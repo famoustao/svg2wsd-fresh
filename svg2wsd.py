@@ -326,8 +326,9 @@ def build_bezier_record(points, color_idx=b'\x01\xff\x00\x00', linewidth=DEFAULT
 # ========== 主转换函数 ==========
 
 def svg_to_wsd(svg_path, wsd_path, color_mode='rainbow',
-               linewidth=DEFAULT_LINEWIDTH, fill_color=None,
-               outline=True, scale=None, offset=None):
+               linewidth=DEFAULT_LINEWIDTH, fill_color='#3366ff',
+               outline=True, flip_v=False, custom_size=None,
+               progress_cb=None):
     """
     将SVG转换为WSD
 
@@ -341,8 +342,9 @@ def svg_to_wsd(svg_path, wsd_path, color_mode='rainbow',
         linewidth: 轮廓线宽 (WSD单位, 40=0.1mm)
         fill_color: 单色填充时的颜色 (#rrggbb)
         outline: 是否绘制黑色轮廓
-        scale: 自定义缩放 (sx, sy), None则自动计算
-        offset: 自定义偏移 (tx, ty), None则自动居中
+        flip_v: 垂直翻转输出
+        custom_size: (width, height) 自定义输出大小(WSD单位), None则自动缩放
+        progress_cb: 进度回调函数(msg, percent)
     """
 
     # 读取模板
@@ -358,24 +360,26 @@ def svg_to_wsd(svg_path, wsd_path, color_mode='rainbow',
     if tail_start is None:
         raise ValueError("找不到模板文件尾部标记")
 
-    # 解析SVG
+    if progress_cb: progress_cb("解析SVG...", 0)
+
+    # 解析SVG (带颜色继承)
     tree = ET.parse(svg_path)
     root = tree.getroot()
-    ns = {'svg': 'http://www.w3.org/2000/svg'}
-
-    paths = []
 
     def _get_fill(elem, parent_fill='#000000'):
         fill = elem.get('fill')
-        if fill:
+        if fill and fill != 'none':
             return fill
         style = elem.get('style', '')
         if style:
             m = re.search(r'fill\s*:\s*([^;]+)', style)
             if m:
-                return m.group(1).strip()
+                f = m.group(1).strip()
+                if f != 'none':
+                    return f
         return parent_fill
 
+    paths = []
     def _collect(parent, parent_fill='#000000'):
         g_fill = _get_fill(parent, parent_fill)
         for child in parent:
@@ -390,6 +394,7 @@ def svg_to_wsd(svg_path, wsd_path, color_mode='rainbow',
     _collect(root, '#000000')
 
     if not paths:
+        ns = {'svg': 'http://www.w3.org/2000/svg'}
         for p in root.findall('.//svg:path', ns):
             paths.append((p.get('d', ''), '#000000', ''))
 
@@ -407,6 +412,8 @@ def svg_to_wsd(svg_path, wsd_path, color_mode='rainbow',
     if not all_subpaths:
         raise ValueError("SVG中没有找到路径")
 
+    if progress_cb: progress_cb(f"找到 {len(all_subpaths)} 个路径", 15)
+
     # 计算坐标变换
     all_x = [x for sp in all_subpaths for x, y in sp]
     all_y = [y for sp in all_subpaths for x, y in sp]
@@ -416,19 +423,29 @@ def svg_to_wsd(svg_path, wsd_path, color_mode='rainbow',
     svg_h = max_y - min_y
 
     canvas_range = CANVAS_MAX - CANVAS_MIN
-    fit_scale = min((canvas_range - 2*MARGIN) / svg_w,
-                    (canvas_range - 2*MARGIN) / svg_h) * 0.9
-    fit_offx = CANVAS_MIN + (canvas_range - svg_w * fit_scale) / 2 - min_x * fit_scale
-    fit_offy = CANVAS_MIN + (canvas_range - svg_h * fit_scale) / 2 - min_y * fit_scale
 
-    if scale:
-        sx, sy = scale
+    # 计算缩放
+    if custom_size:
+        target_w, target_h = custom_size
+        sx = target_w / svg_w
+        sy = target_h / svg_h
     else:
+        fit_scale = min((canvas_range - 2*MARGIN) / svg_w,
+                        (canvas_range - 2*MARGIN) / svg_h) * 0.9
         sx = sy = fit_scale
-    if offset:
-        ox, oy = offset
+
+    # 垂直翻转
+    if flip_v:
+        sy = -sy
+
+    # 居中偏移
+    ox = CANVAS_MIN + (canvas_range - svg_w * sx) / 2 - min_x * sx
+    if flip_v:
+        oy = CANVAS_MIN + (canvas_range + svg_h * abs(sy)) / 2 - min_y * sy
     else:
-        ox, oy = fit_offx, fit_offy
+        oy = CANVAS_MIN + (canvas_range - svg_h * sy) / 2 - min_y * sy
+
+    if progress_cb: progress_cb("分配颜色...", 35)
 
     # 分配填充颜色
     fill_colors = []
@@ -440,18 +457,21 @@ def svg_to_wsd(svg_path, wsd_path, color_mode='rainbow',
             color_map[idx] = rainbow_color(rank, len(sorted_idx))
         fill_colors = [color_map[i] for i in range(len(all_subpaths))]
     elif color_mode == 'single':
-        bgr = hex_to_bgr(fill_color or '#3366ff')
+        bgr = hex_to_bgr(fill_color)
         fill_colors = [bgr] * len(all_subpaths)
     elif color_mode == 'svg':
         fill_colors = [hex_to_bgr(c) for c in all_svg_colors]
     else:
         raise ValueError(f"未知颜色模式: {color_mode}")
 
+    if progress_cb: progress_cb("构建WSD记录...", 55)
+
     # 构建记录
     records_data = bytearray()
     num_objects = 0
     black_idx = bytes([0x01, 0xff, 0x00, 0x00])
 
+    total = len(all_subpaths)
     for i, sp in enumerate(all_subpaths):
         if len(sp) < 2:
             continue
@@ -463,6 +483,11 @@ def svg_to_wsd(svg_path, wsd_path, color_mode='rainbow',
         if outline:
             records_data += build_bezier_record(wsd_sp, black_idx, linewidth)
             num_objects += 1
+        if progress_cb and i % 10 == 0:
+            pct = 55 + int(35 * i / total)
+            progress_cb(f"处理中... {i+1}/{total}", pct)
+
+    if progress_cb: progress_cb("组装文件...", 92)
 
     # 组装文件
     output = bytearray()
@@ -487,12 +512,12 @@ def svg_to_wsd(svg_path, wsd_path, color_mode='rainbow',
     with open(wsd_path, 'wb') as f:
         f.write(output)
 
+    if progress_cb: progress_cb("完成！", 100)
+
     return {
         'subpaths': len(all_subpaths),
         'objects': num_objects,
         'size': actual,
-        'scale': (sx, sy),
-        'offset': (ox, oy),
     }
 
 
@@ -501,8 +526,8 @@ def svg_to_wsd(svg_path, wsd_path, color_mode='rainbow',
 def main():
     import argparse
     parser = argparse.ArgumentParser(description='SVG → WSD 转换器')
-    parser.add_argument('svg', help='输入SVG文件')
-    parser.add_argument('wsd', help='输出WSD文件')
+    parser.add_argument('svg', help='输入SVG文件 (批量时用空格分隔多个文件)')
+    parser.add_argument('wsd', nargs='?', help='输出WSD文件 (单文件时)')
     parser.add_argument('--color', default='rainbow',
                         choices=['rainbow', 'single', 'svg'],
                         help='填充颜色模式 (默认: rainbow)')
@@ -512,21 +537,82 @@ def main():
                         help='轮廓线宽 (WSD单位, 40=0.1mm, 默认80)')
     parser.add_argument('--no-outline', action='store_true',
                         help='不绘制黑色轮廓')
+    parser.add_argument('--flip-v', action='store_true',
+                        help='垂直翻转输出')
+    parser.add_argument('--width', type=int, default=0,
+                        help='自定义输出宽度 (WSD单位)')
+    parser.add_argument('--height', type=int, default=0,
+                        help='自定义输出高度 (WSD单位)')
+    parser.add_argument('--outdir', default='',
+                        help='批量输出目录 (批量转换时使用)')
     args = parser.parse_args()
 
-    result = svg_to_wsd(
-        args.svg, args.wsd,
-        color_mode=args.color,
-        linewidth=args.linewidth,
-        fill_color=args.fill_color,
-        outline=not args.no_outline,
-    )
+    custom_size = None
+    if args.width > 0 and args.height > 0:
+        custom_size = (args.width, args.height)
 
-    print(f"✓ 转换完成!")
-    print(f"  输出: {args.wsd}")
-    print(f"  大小: {result['size']} 字节")
-    print(f"  子路径: {result['subpaths']} 个")
-    print(f"  对象数: {result['objects']} 个")
+    # 判断是否批量模式
+    import glob
+    svg_files = []
+    if '*' in args.svg or '?' in args.svg:
+        svg_files = glob.glob(args.svg)
+    elif os.path.isfile(args.svg):
+        svg_files = [args.svg]
+    else:
+        # 尝试作为多个文件
+        svg_files = [args.svg]
+
+    if not svg_files:
+        print("✗ 找不到输入文件")
+        sys.exit(1)
+
+    if len(svg_files) == 1 and args.wsd and not os.path.isdir(args.wsd or ''):
+        # 单文件转换
+        svg_file = svg_files[0]
+        wsd_file = args.wsd or os.path.splitext(svg_file)[0] + '.wsd'
+        result = svg_to_wsd(
+            svg_file, wsd_file,
+            color_mode=args.color,
+            linewidth=args.linewidth,
+            fill_color=args.fill_color,
+            outline=not args.no_outline,
+            flip_v=args.flip_v,
+            custom_size=custom_size,
+        )
+        print(f"✓ 转换完成!")
+        print(f"  输出: {wsd_file}")
+        print(f"  大小: {result['size']} 字节")
+        print(f"  子路径: {result['subpaths']} 个")
+        print(f"  对象数: {result['objects']} 个")
+    else:
+        # 批量转换
+        out_dir = args.outdir or args.wsd or '.'
+        if not os.path.exists(out_dir):
+            os.makedirs(out_dir)
+
+        success = 0
+        failed = []
+        for svg_file in svg_files:
+            base = os.path.splitext(os.path.basename(svg_file))[0]
+            wsd_file = os.path.join(out_dir, base + '.wsd')
+            try:
+                svg_to_wsd(
+                    svg_file, wsd_file,
+                    color_mode=args.color,
+                    linewidth=args.linewidth,
+                    fill_color=args.fill_color,
+                    outline=not args.no_outline,
+                    flip_v=args.flip_v,
+                    custom_size=custom_size,
+                )
+                success += 1
+                print(f"  ✓ {base}.wsd")
+            except Exception as e:
+                failed.append((base, str(e)))
+                print(f"  ✗ {base}: {e}")
+
+        print(f"\n完成! 成功: {success}, 失败: {len(failed)}")
+        print(f"输出目录: {out_dir}")
 
 if __name__ == '__main__':
     main()
