@@ -25,15 +25,85 @@ SHAPE_CIRCLE = 'circle'
 SHAPE_ARC = 'arc'
 
 
+def _skeletonize(binary):
+    """
+    骨架化/细化：将有宽度的线条变成1像素宽的中心线
+    使用形态学操作实现（快速版本）
+    """
+    import cv2
+    img = binary.copy()
+    _, img = cv2.threshold(img, 127, 255, cv2.THRESH_BINARY)
+
+    skeleton = np.zeros_like(img)
+    kernel = cv2.getStructuringElement(cv2.MORPH_CROSS, (3, 3))
+
+    while True:
+        # 开运算
+        opened = cv2.morphologyEx(img, cv2.MORPH_OPEN, kernel)
+        # 差 = 原图 - 开运算 = 骨架的一部分
+        temp = cv2.subtract(img, opened)
+        # 腐蚀
+        eroded = cv2.erode(img, kernel)
+        # 合并到骨架
+        skeleton = cv2.bitwise_or(skeleton, temp)
+        # 更新图像
+        img = eroded.copy()
+
+        # 检查是否还有前景像素
+        if cv2.countNonZero(img) == 0:
+            break
+
+    return skeleton
+
+
+def _contour_midpoints(outer_pts, inner_pts):
+    """
+    计算内外轮廓的中点，得到中心线
+    outer_pts, inner_pts: list of (x, y)
+    返回: list of (x, y)
+    """
+    if not outer_pts or not inner_pts:
+        return []
+
+    # 简单方法：找最近点配对取平均
+    # 对于有序轮廓，按对应索引配对
+    n_out = len(outer_pts)
+    n_in = len(inner_pts)
+
+    if n_out == n_in:
+        # 点数相同，直接对应
+        mid_pts = []
+        for i in range(n_out):
+            mx = (outer_pts[i][0] + inner_pts[i][0]) / 2
+            my = (outer_pts[i][1] + inner_pts[i][1]) / 2
+            mid_pts.append((mx, my))
+        return mid_pts
+    else:
+        # 点数不同，采样到相同数量
+        n = min(n_out, n_in)
+        step_out = n_out / n
+        step_in = n_in / n
+        mid_pts = []
+        for i in range(n):
+            oi = int(i * step_out) % n_out
+            ii = int(i * step_in) % n_in
+            mx = (outer_pts[oi][0] + inner_pts[ii][0]) / 2
+            my = (outer_pts[oi][1] + inner_pts[ii][1]) / 2
+            mid_pts.append((mx, my))
+        return mid_pts
+
+
 def detect_geometric_shapes(image_path, min_area=50, epsilon_ratio=0.02,
-                            circularity_threshold=0.7):
+                            circularity_threshold=0.85,
+                            min_line_length=20):
     """
     从图片中检测几何形状（支持线条图）
 
     原理：
-    - 用 RETR_TREE 找层级轮廓
-    - 有子轮廓的外轮廓 = 有宽度的形状（矩形、圆等）
-    - 无子轮廓的独立轮廓 = 直线/折线
+    1. 用 RETR_TREE 找层级轮廓
+    2. 有子轮廓的外轮廓 = 有宽度的线条形状 → 取内外轮廓的中心线
+    3. 细长的独立轮廓 = 有宽度的直线 → 计算中心线
+    4. 分类：直线、折线、圆、矩形、三角形、多边形
 
     返回: list of dict
     """
@@ -46,7 +116,7 @@ def detect_geometric_shapes(image_path, min_area=50, epsilon_ratio=0.02,
         img_pil = Image.open(image_path).convert('L')
         img = np.array(img_pil)
 
-    # 二值化（黑色为前景）
+    # 二值化（黑色为前景=255）
     _, binary = cv2.threshold(img, 128, 255, cv2.THRESH_BINARY_INV)
 
     # 形态学闭运算，去除小空洞
@@ -55,7 +125,7 @@ def detect_geometric_shapes(image_path, min_area=50, epsilon_ratio=0.02,
 
     # 找层级轮廓
     contours, hierarchy = cv2.findContours(
-        binary, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE
+        binary, cv2.RETR_TREE, cv2.CHAIN_APPROX_NONE
     )
 
     shapes = []
@@ -72,10 +142,16 @@ def detect_geometric_shapes(image_path, min_area=50, epsilon_ratio=0.02,
         hier = hierarchy[0][i]
         next_, prev_, child, parent = hier
 
-        # 情况1：有子轮廓的外轮廓 = 有宽度的闭合形状
+        # === 情况1：有子轮廓的外轮廓 = 有宽度的闭合形状（圆、矩形、三角形等）===
         if child >= 0 and parent < 0:
             inner_cnt = contours[child]
             inner_area = cv2.contourArea(inner_cnt)
+
+            # 检查子轮廓是否还有子轮廓（排除嵌套形状）
+            inner_hier = hierarchy[0][child]
+            if inner_hier[2] >= 0:
+                # 内部还有轮廓，跳过（复杂嵌套）
+                continue
 
             # 近似外轮廓
             epsilon = epsilon_ratio * cv2.arcLength(cnt, True)
@@ -87,65 +163,192 @@ def detect_geometric_shapes(image_path, min_area=50, epsilon_ratio=0.02,
             approx_inner = cv2.approxPolyDP(inner_cnt, epsilon_inner, True)
             inner_pts = [(float(p[0][0]), float(p[0][1])) for p in approx_inner]
 
-            # 分类形状
+            # 计算中心线点
+            mid_pts = _contour_midpoints(outer_pts, inner_pts)
+
+            n_outer = len(outer_pts)
+            n_inner = len(inner_pts)
+
+            x, y, w, h = cv2.boundingRect(cnt)
+            bbox = (x, y, w, h)
+
+            # 分类
             shape_type = SHAPE_POLYGON
             extra = {}
 
-            n_outer = len(outer_pts)
-            n_inner = len(approx_inner)
-
             if n_outer == 3 and n_inner == 3:
                 shape_type = SHAPE_TRIANGLE
+                extra['points'] = mid_pts if mid_pts else outer_pts
             elif n_outer == 4 and n_inner == 4:
                 shape_type = SHAPE_RECTANGLE
+                extra['points'] = mid_pts if mid_pts else outer_pts
             elif n_outer > 6 and n_inner > 6:
-                # 检查是否是圆
-                (cx, cy), radius = cv2.minEnclosingCircle(cnt)
-                (_, _), inner_radius = cv2.minEnclosingCircle(inner_cnt)
-                avg_radius = (radius + inner_radius) / 2
-                circularity = area / (math.pi * radius * radius)
-                if circularity > circularity_threshold:
+                # 可能是圆
+                (cx, cy), radius_outer = cv2.minEnclosingCircle(cnt)
+                (_, _), radius_inner = cv2.minEnclosingCircle(inner_cnt)
+                avg_radius = (radius_outer + radius_inner) / 2
+                # 检查圆度
+                circularity = area / (math.pi * radius_outer * radius_outer)
+                if circularity > 0.6:
                     shape_type = SHAPE_CIRCLE
-                    extra['center'] = (cx, cy)
-                    extra['radius'] = avg_radius
+                    extra['center'] = (float(cx), float(cy))
+                    extra['radius'] = float(avg_radius)
+                    extra['points'] = mid_pts
+                else:
+                    extra['points'] = mid_pts if mid_pts else outer_pts
+            else:
+                extra['points'] = mid_pts if mid_pts else outer_pts
 
-            x, y, w, h = cv2.boundingRect(cnt)
             shape = {
                 'type': shape_type,
-                'points': outer_pts,
-                'inner_points': inner_pts,
+                'points': extra.get('points', mid_pts if mid_pts else outer_pts),
                 'area': area,
-                'inner_area': inner_area,
-                'bbox': (x, y, w, h),
+                'bbox': bbox,
             }
-            shape.update(extra)
+            if 'center' in extra:
+                shape['center'] = extra['center']
+                shape['radius'] = extra['radius']
             shapes.append(shape)
             processed.add(i)
             processed.add(child)
 
-        # 情况2：独立轮廓 = 直线/开曲线
+        # === 情况2：独立轮廓（无子无父）===
         elif parent < 0 and child < 0:
-            epsilon = epsilon_ratio * cv2.arcLength(cnt, True)
-            approx = cv2.approxPolyDP(cnt, epsilon, True)
-            pts = [(float(p[0][0]), float(p[0][1])) for p in approx]
-
+            # 判断是否是细长的（有宽度的直线）
             x, y, w, h = cv2.boundingRect(cnt)
+            aspect = max(w, h) / max(min(w, h), 1)
+            length = cv2.arcLength(cnt, True)
 
-            if len(pts) <= 2:
-                shape_type = SHAPE_LINE
+            if aspect > 3 and length > min_line_length:
+                # 细长形状 = 有宽度的直线 → 计算中心线
+                # 用骨架化
+                # 先创建一个只包含这个轮廓的小图
+                mask = np.zeros((h + 4, w + 4), dtype=np.uint8)
+                shifted = cnt - np.array([x - 2, y - 2])
+                cv2.drawContours(mask, [shifted], -1, 255, -1)
+                skel = _skeletonize(mask)
+
+                # 从骨架找轮廓
+                skel_contours, _ = cv2.findContours(
+                    skel, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+                )
+
+                for sc in skel_contours:
+                    sc_len = cv2.arcLength(sc, False)
+                    if sc_len < min_line_length:
+                        continue
+                    eps = epsilon_ratio * sc_len
+                    approx = cv2.approxPolyDP(sc, eps, False)
+                    pts = [(float(p[0][0] + x - 2), float(p[0][1] + y - 2)) for p in approx]
+                    if len(pts) < 2:
+                        continue
+
+                    bbox = (x, y, w, h)
+                    if len(pts) == 2:
+                        shapes.append({
+                            'type': SHAPE_LINE,
+                            'points': pts,
+                            'area': sc_len,
+                            'bbox': bbox,
+                        })
+                    else:
+                        shapes.append({
+                            'type': SHAPE_POLYLINE,
+                            'points': pts,
+                            'area': sc_len,
+                            'bbox': bbox,
+                        })
+                processed.add(i)
             else:
-                shape_type = SHAPE_POLYLINE
+                # 非细长，当作普通折线/多边形
+                epsilon = epsilon_ratio * cv2.arcLength(cnt, True)
+                approx = cv2.approxPolyDP(cnt, epsilon, True)
+                pts = [(float(p[0][0]), float(p[0][1])) for p in approx]
 
-            shape = {
-                'type': shape_type,
-                'points': pts,
-                'area': area,
-                'bbox': (x, y, w, h),
-            }
-            shapes.append(shape)
-            processed.add(i)
+                if len(pts) < 2:
+                    processed.add(i)
+                    continue
+
+                bbox = (x, y, w, h)
+
+                # 判断是否闭合
+                d = math.hypot(pts[0][0] - pts[-1][0], pts[0][1] - pts[-1][1])
+                is_closed = d < epsilon_ratio * length
+
+                if is_closed and len(pts) >= 3:
+                    if len(pts) == 3:
+                        shape_type = SHAPE_TRIANGLE
+                    elif len(pts) == 4:
+                        shape_type = SHAPE_RECTANGLE
+                    else:
+                        shape_type = SHAPE_POLYGON
+                    shapes.append({
+                        'type': shape_type,
+                        'points': pts,
+                        'area': area,
+                        'bbox': bbox,
+                    })
+                else:
+                    if len(pts) == 2:
+                        shape_type = SHAPE_LINE
+                    else:
+                        shape_type = SHAPE_POLYLINE
+                    shapes.append({
+                        'type': shape_type,
+                        'points': pts,
+                        'area': length,
+                        'bbox': bbox,
+                    })
+                processed.add(i)
 
     return shapes
+
+
+def _deduplicate_shapes(shapes, overlap_threshold=0.8):
+    """去除高度重叠的形状"""
+    if len(shapes) <= 1:
+        return shapes
+
+    # 按面积/长度从大到小排序，保留大的
+    sorted_shapes = sorted(shapes, key=lambda s: s.get('area', 0), reverse=True)
+    kept = []
+
+    for s in sorted_shapes:
+        # 检查是否与已保留的形状高度重叠
+        skip = False
+        for k in kept:
+            if _shapes_overlap(s, k) > overlap_threshold:
+                skip = True
+                break
+        if not skip:
+            kept.append(s)
+
+    return kept
+
+
+def _shapes_overlap(s1, s2):
+    """计算两个形状的重叠程度（基于bbox的IOU近似）"""
+    x1, y1, w1, h1 = s1['bbox']
+    x2, y2, w2, h2 = s2['bbox']
+
+    # 扩大bbox以考虑线宽
+    pad = 5
+    x1 -= pad; y1 -= pad; w1 += 2*pad; h1 += 2*pad
+    x2 -= pad; y2 -= pad; w2 += 2*pad; h2 += 2*pad
+
+    # 交集
+    ix = max(x1, x2)
+    iy = max(y1, y2)
+    iw = min(x1 + w1, x2 + w2) - ix
+    ih = min(y1 + h1, y2 + h2) - iy
+    if iw <= 0 or ih <= 0:
+        return 0.0
+
+    inter = iw * ih
+    union = w1 * h1 + w2 * h2 - inter
+    if union <= 0:
+        return 0.0
+    return inter / union
 
 
 def circle_to_polyline(cx, cy, radius, segments=72):
