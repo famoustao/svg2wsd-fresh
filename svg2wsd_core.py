@@ -269,6 +269,90 @@ def path_area(sp):
     return abs(signed)
 
 
+# ========== SVG transform 解析 ==========
+
+def _parse_transform(transform_str):
+    """
+    解析SVG transform属性，返回仿射矩阵 (a, b, c, d, e, f)
+    对应: x' = a*x + c*y + e
+          y' = b*x + d*y + f
+    None 表示无变换
+    """
+    if not transform_str or not transform_str.strip():
+        return None
+
+    result = (1, 0, 0, 1, 0, 0)  # 单位矩阵
+    # 匹配各种transform函数
+    pattern = r'(translate|scale|rotate|matrix|skewX|skewY)\s*\(([^)]*)\)'
+    for match in re.finditer(pattern, transform_str):
+        func = match.group(1)
+        args_str = match.group(2).strip()
+        args = [float(x.strip()) for x in re.split(r'[\s,]+', args_str) if x.strip()]
+
+        if func == 'translate':
+            tx = args[0] if len(args) >= 1 else 0
+            ty = args[1] if len(args) >= 2 else 0
+            mat = (1, 0, 0, 1, tx, ty)
+        elif func == 'scale':
+            sx = args[0] if len(args) >= 1 else 1
+            sy = args[1] if len(args) >= 2 else sx
+            mat = (sx, 0, 0, sy, 0, 0)
+        elif func == 'rotate':
+            angle = args[0] if args else 0
+            import math
+            rad = math.radians(angle)
+            cos_a = math.cos(rad)
+            sin_a = math.sin(rad)
+            if len(args) >= 3:
+                cx, cy = args[1], args[2]
+                mat = (cos_a, sin_a, -sin_a, cos_a,
+                       cx - cos_a*cx + sin_a*cy,
+                       cy - sin_a*cx - cos_a*cy)
+            else:
+                mat = (cos_a, sin_a, -sin_a, cos_a, 0, 0)
+        elif func == 'matrix':
+            if len(args) >= 6:
+                mat = tuple(args[:6])
+            else:
+                mat = (1, 0, 0, 1, 0, 0)
+        elif func == 'skewX':
+            import math
+            angle = args[0] if args else 0
+            mat = (1, 0, math.tan(math.radians(angle)), 1, 0, 0)
+        elif func == 'skewY':
+            import math
+            angle = args[0] if args else 0
+            mat = (1, math.tan(math.radians(angle)), 0, 1, 0, 0)
+        else:
+            continue
+
+        result = _concat_transform(result, mat)
+
+    return result
+
+
+def _concat_transform(t1, t2):
+    """
+    连接两个变换矩阵: t2 先应用，然后 t1
+    t1 = (a1, b1, c1, d1, e1, f1)
+    t2 = (a2, b2, c2, d2, e2, f2)
+    result = t1 * t2
+    """
+    if t1 is None:
+        return t2
+    if t2 is None:
+        return t1
+    a1, b1, c1, d1, e1, f1 = t1
+    a2, b2, c2, d2, e2, f2 = t2
+    a = a1*a2 + c1*b2
+    b = b1*a2 + d1*b2
+    c = a1*c2 + c1*d2
+    d = b1*c2 + d1*d2
+    e = a1*e2 + c1*f2 + e1
+    f = b1*e2 + d1*f2 + f1
+    return (a, b, c, d, e, f)
+
+
 # ========== SVG解析 ==========
 
 def _parse_svg_file(svg_path):
@@ -290,26 +374,39 @@ def _parse_svg_file(svg_path):
         return parent_fill
 
     paths = []
-    def _collect(parent, parent_fill='#000000'):
+    def _collect(parent, parent_fill='#000000', parent_transform=None):
         g_fill = _get_fill(parent, parent_fill)
+        g_transform = _parse_transform(parent.get('transform', ''))
+        combined = _concat_transform(parent_transform, g_transform)
         for child in parent:
             tag = child.tag.split('}')[-1] if '}' in child.tag else child.tag
             if tag == 'g':
-                _collect(child, g_fill)
+                _collect(child, g_fill, combined)
             elif tag == 'path':
                 d = child.get('d', '')
                 fill = _get_fill(child, g_fill)
-                paths.append((d, fill))
+                t = _parse_transform(child.get('transform', ''))
+                full_t = _concat_transform(combined, t)
+                paths.append((d, fill, full_t))
 
-    _collect(root, '#000000')
+    _collect(root, '#000000', None)
 
     all_subpaths = []
     all_colors = []
-    for d, fill in paths:
+    for d, fill, transform in paths:
         parser = SVGPathParser(d)
         subpaths = parser.parse()
         for sp in subpaths:
-            tsp = [(x*SVG_SCALE_X+SVG_TX, y*SVG_SCALE_Y+SVG_TY) for x, y in sp]
+            tsp = []
+            for x, y in sp:
+                # 应用transform
+                if transform:
+                    a, b, c, d_t, e, f = transform
+                    nx = a * x + c * y + e
+                    ny = b * x + d_t * y + f
+                else:
+                    nx, ny = x, y
+                tsp.append((nx, ny))
             all_subpaths.append(tsp)
             all_colors.append(fill)
 
