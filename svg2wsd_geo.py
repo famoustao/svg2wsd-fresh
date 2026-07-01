@@ -59,36 +59,66 @@ def _skeletonize(binary):
 def _contour_midpoints(outer_pts, inner_pts):
     """
     计算内外轮廓的中点，得到中心线
-    outer_pts, inner_pts: list of (x, y)
-    返回: list of (x, y)
+    使用最近点配对，避免起点不一致导致的错位
     """
     if not outer_pts or not inner_pts:
         return []
 
-    # 简单方法：找最近点配对取平均
-    # 对于有序轮廓，按对应索引配对
     n_out = len(outer_pts)
     n_in = len(inner_pts)
 
+    # 找到外轮廓第一个点在内轮廓上的最近点作为起点
+    best_offset = 0
+    best_dist = float('inf')
+    for j in range(n_in):
+        d = math.hypot(
+            outer_pts[0][0] - inner_pts[j][0],
+            outer_pts[0][1] - inner_pts[j][1]
+        )
+        if d < best_dist:
+            best_dist = d
+            best_offset = j
+
+    # 检查方向（顺时针/逆时针），决定内轮廓是正向还是反向遍历
+    # 简单方法：试两个方向，取总距离小的
+    def _total_dist(offset, reverse=False):
+        total = 0
+        for i in range(n_out):
+            if reverse:
+                j = (best_offset - i) % n_in
+            else:
+                j = (best_offset + i) % n_in
+            total += math.hypot(
+                outer_pts[i][0] - inner_pts[j][0],
+                outer_pts[i][1] - inner_pts[j][1]
+            )
+        return total
+
     if n_out == n_in:
-        # 点数相同，直接对应
+        # 点数相同，判断方向
+        dist_fwd = _total_dist(best_offset, reverse=False)
+        dist_rev = _total_dist(best_offset, reverse=True)
+        reverse = dist_rev < dist_fwd
+
         mid_pts = []
         for i in range(n_out):
-            mx = (outer_pts[i][0] + inner_pts[i][0]) / 2
-            my = (outer_pts[i][1] + inner_pts[i][1]) / 2
+            if reverse:
+                j = (best_offset - i) % n_in
+            else:
+                j = (best_offset + i) % n_in
+            mx = (outer_pts[i][0] + inner_pts[j][0]) / 2
+            my = (outer_pts[i][1] + inner_pts[j][1]) / 2
             mid_pts.append((mx, my))
         return mid_pts
     else:
-        # 点数不同，采样到相同数量
-        n = min(n_out, n_in)
-        step_out = n_out / n
+        # 点数不同，采样外轮廓点数到内轮廓数量
+        n = n_out
         step_in = n_in / n
         mid_pts = []
         for i in range(n):
-            oi = int(i * step_out) % n_out
-            ii = int(i * step_in) % n_in
-            mx = (outer_pts[oi][0] + inner_pts[ii][0]) / 2
-            my = (outer_pts[oi][1] + inner_pts[ii][1]) / 2
+            j = int(best_offset + i * step_in) % n_in
+            mx = (outer_pts[i][0] + inner_pts[j][0]) / 2
+            my = (outer_pts[i][1] + inner_pts[j][1]) / 2
             mid_pts.append((mx, my))
         return mid_pts
 

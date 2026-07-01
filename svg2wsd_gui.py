@@ -534,14 +534,10 @@ class Image2WSDApp:
                 color = '#cccccc'
 
             if is_geo:
-                # 几何模式：直接用折线点
+                # 几何模式：用线条绘制
                 pts = [(x*scale+ox, y*scale+oy) for x, y in sp]
                 flat = [coord for pt in pts for coord in pt]
-                # 判断是否闭合
-                if sp[0] == sp[-1] and len(sp) > 2:
-                    canvas.create_polygon(flat, fill=color, outline='', smooth=False)
-                else:
-                    canvas.create_line(flat, fill=color, width=2, capstyle='round')
+                canvas.create_line(flat, fill=color, width=2, capstyle='round', joinstyle='round')
             else:
                 poly = subpath_to_polygon(sp, samples_per_seg=6)
                 pts = [(x*scale+ox, y*scale+oy) for x, y in poly]
@@ -641,13 +637,10 @@ class Image2WSDApp:
                 color = '#cccccc'
 
             if is_geo:
-                # 几何模式：直接绘制折线
+                # 几何模式：用线条绘制
                 pts = [(x*dscale+dox, y*dscale+doy) for x, y in wsd_sp]
                 flat = [coord for pt in pts for coord in pt]
-                if wsd_sp[0] == wsd_sp[-1] and len(wsd_sp) > 2:
-                    canvas.create_polygon(flat, fill=color, outline='', smooth=False)
-                else:
-                    canvas.create_line(flat, fill=color, width=2, capstyle='round')
+                canvas.create_line(flat, fill=color, width=2, capstyle='round', joinstyle='round')
             else:
                 poly = subpath_to_polygon(wsd_sp, samples_per_seg=6)
                 pts = [(x*dscale+dox, y*dscale+doy) for x, y in poly]
