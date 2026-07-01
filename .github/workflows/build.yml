@@ -1,0 +1,49 @@
+name: Build Windows EXE
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install PyInstaller
+        run: pip install pyinstaller
+
+      - name: Build EXE
+        run: pyinstaller --onefile --clean --name svg2wsd svg2wsd.py
+
+      - name: Copy template
+        run: xcopy /E /I template dist\template
+
+      - name: Create release zip
+        run: |
+          Compress-Archive -Path dist\* -DestinationPath svg2wsd-windows.zip
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: svg2wsd-windows
+          path: svg2wsd-windows.zip
+
+      - name: Get version
+        id: version
+        run: echo "date=$(date +'%Y%m%d')" >> $env:GITHUB_OUTPUT
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v-${{ steps.version.outputs.date }}
+          name: svg2wsd ${{ steps.version.outputs.date }}
+          files: svg2wsd-windows.zip
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
