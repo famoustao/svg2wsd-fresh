@@ -38,6 +38,7 @@ class Image2WSDApp:
         self.current_file = None
         self.current_data = None  # (subpaths, colors, bbox, file_type)
 
+        self.convert_mode = tk.StringVar(value='normal')  # normal / geometric
         self.output_mode = tk.StringVar(value='separate')  # separate / merged
         self.color_mode = tk.StringVar(value='rainbow')
         self.fill_color = tk.StringVar(value='#3366ff')
@@ -62,17 +63,53 @@ class Image2WSDApp:
         left = ttk.Frame(main, width=340)
         main.add(left, weight=0)
 
-        # 文件列表
-        batch_frame = ttk.LabelFrame(left, text="文件列表 (支持批量)")
-        batch_frame.pack(fill='x', padx=5, pady=5)
+        # 转换模式
+        mode_frame = ttk.LabelFrame(left, text="转换模式")
+        mode_frame.pack(fill='x', padx=5, pady=5)
 
-        btn_row = ttk.Frame(batch_frame)
+        mode_row = ttk.Frame(mode_frame)
+        mode_row.pack(fill='x', padx=8, pady=8)
+        ttk.Radiobutton(mode_row, text="普通转换", variable=self.convert_mode,
+                        value='normal', command=self._on_mode_change).pack(side='left', padx=10)
+        ttk.Radiobutton(mode_row, text="几何转换", variable=self.convert_mode,
+                        value='geometric', command=self._on_mode_change).pack(side='left', padx=10)
+
+        # 几何转换参数
+        self.geo_min_area = tk.IntVar(value=50)
+        self.geo_epsilon = tk.DoubleVar(value=0.02)
+
+        self.geo_frame = ttk.LabelFrame(left, text="几何转换参数")
+        # 最小面积
+        min_area_row = ttk.Frame(self.geo_frame)
+        min_area_row.pack(fill='x', padx=8, pady=4)
+        ttk.Label(min_area_row, text="最小面积:", width=10).pack(side='left')
+        self.min_area_scale = ttk.Scale(min_area_row, from_=5, to=500, orient='horizontal',
+                                        variable=self.geo_min_area, command=self._on_geo_param_change)
+        self.min_area_scale.pack(side='left', fill='x', expand=True, padx=5)
+        self.min_area_val_label = ttk.Label(min_area_row, text="50px", width=8)
+        self.min_area_val_label.pack(side='left')
+
+        # 近似精度
+        eps_row = ttk.Frame(self.geo_frame)
+        eps_row.pack(fill='x', padx=8, pady=(0, 8))
+        ttk.Label(eps_row, text="近似精度:", width=10).pack(side='left')
+        self.eps_scale = ttk.Scale(eps_row, from_=0.005, to=0.05, orient='horizontal',
+                                   variable=self.geo_epsilon, command=self._on_geo_param_change)
+        self.eps_scale.pack(side='left', fill='x', expand=True, padx=5)
+        self.eps_val_label = ttk.Label(eps_row, text="0.020", width=8)
+        self.eps_val_label.pack(side='left')
+
+        # 文件列表
+        self.batch_frame = ttk.LabelFrame(left, text="文件列表 (支持批量)")
+        self.batch_frame.pack(fill='x', padx=5, pady=5)
+
+        btn_row = ttk.Frame(self.batch_frame)
         btn_row.pack(fill='x', padx=5, pady=5)
         ttk.Button(btn_row, text="添加文件", command=self._add_files).pack(side='left', padx=2)
         ttk.Button(btn_row, text="移除选中", command=self._remove_files).pack(side='left', padx=2)
         ttk.Button(btn_row, text="清空", command=self._clear_files).pack(side='left', padx=2)
 
-        self.file_listbox = tk.Listbox(batch_frame, height=6, selectmode='extended')
+        self.file_listbox = tk.Listbox(self.batch_frame, height=6, selectmode='extended')
         self.file_listbox.pack(fill='both', expand=True, padx=5, pady=(0, 5))
         self.file_listbox.bind('<<ListboxSelect>>', self._on_file_select)
 
@@ -294,6 +331,24 @@ class Image2WSDApp:
 
     # ===== 选项事件 =====
 
+    def _on_mode_change(self):
+        """切换转换模式"""
+        if self.convert_mode.get() == 'geometric':
+            self.geo_frame.pack(fill='x', padx=5, pady=5, before=self.batch_frame)
+        else:
+            self.geo_frame.pack_forget()
+        self.current_data = None
+        self._update_all_previews()
+
+    def _on_geo_param_change(self, *args):
+        """几何参数变化时更新预览"""
+        # 更新数值标签
+        self.min_area_val_label.config(text=f"{int(self.geo_min_area.get())}px")
+        self.eps_val_label.config(text=f"{self.geo_epsilon.get():.3f}")
+        if self.convert_mode.get() == 'geometric':
+            self.current_data = None
+            self._update_all_previews()
+
     def _on_color_mode(self):
         if self.color_mode.get() == 'single':
             self.color_entry.config(state='normal')
@@ -348,16 +403,57 @@ class Image2WSDApp:
         if not self.current_file:
             return False
         try:
-            subpaths, colors, bbox, ftype = parse_input_file(
-                self.current_file,
-                img_threshold=self.img_threshold.get(),
-                img_turdsize=self.img_turdsize.get(),
-            )
-            self.current_data = (subpaths, colors, bbox, ftype)
+            if self.convert_mode.get() == 'geometric':
+                # 几何模式：检测几何形状
+                from svg2wsd_geo import detect_geometric_shapes, shape_to_polyline_points
+                shapes = detect_geometric_shapes(
+                    self.current_file,
+                    min_area=self.geo_min_area.get(),
+                    epsilon_ratio=self.geo_epsilon.get(),
+                )
+                if not shapes:
+                    raise ValueError("未检测到几何形状，请调整最小面积参数")
+                # 转折线点用于预览
+                subpaths = [shape_to_polyline_points(s) for s in shapes]
+                colors = []
+                # 用彩虹色区分不同形状
+                from svg2wsd_core import rainbow_color_hex
+                for i in range(len(shapes)):
+                    colors.append(rainbow_color_hex(i, len(shapes)))
+                # 计算边界
+                all_x = [x for sp in subpaths for x, y in sp]
+                all_y = [y for sp in subpaths for x, y in sp]
+                bbox = (min(all_x), min(all_y), max(all_x), max(all_y))
+                self.current_data = (subpaths, colors, bbox, 'geometric')
+                self._shape_info = [(s['type'], s['area']) for s in shapes]
+            else:
+                subpaths, colors, bbox, ftype = parse_input_file(
+                    self.current_file,
+                    img_threshold=self.img_threshold.get(),
+                    img_turdsize=self.img_turdsize.get(),
+                )
+                self.current_data = (subpaths, colors, bbox, ftype)
             return True
         except Exception as e:
             self.status.config(text=f"解析失败: {str(e)[:40]}")
             return False
+
+    def _polyline_area(self, pts):
+        """计算折线围成的面积（shoelace公式），开曲线返回0"""
+        if len(pts) < 3:
+            return 0
+        if pts[0] != pts[-1]:
+            return 0  # 非闭合
+        signed = 0
+        for i in range(len(pts) - 1):
+            x1, y1 = pts[i]
+            x2, y2 = pts[i + 1]
+            signed += (x2 - x1) * (y2 + y1)
+        return abs(signed)
+
+    def _is_geometric_mode(self):
+        """判断当前是否为几何模式"""
+        return self.current_data and self.current_data[3] == 'geometric'
 
     def _draw_orig_preview(self):
         if not self.current_file:
@@ -370,8 +466,8 @@ class Image2WSDApp:
         if w < 10 or h < 10:
             return
 
-        # 如果是图片，直接显示原图
-        if self._is_image_file(self.current_file):
+        # 如果是图片，直接显示原图（几何模式也显示原图做对比）
+        if self._is_image_file(self.current_file) and not self._is_geometric_mode():
             try:
                 from PIL import Image, ImageTk
                 img = Image.open(self.current_file)
@@ -385,10 +481,11 @@ class Image2WSDApp:
             except:
                 pass
 
-        # SVG 或 矢量化结果：绘制路径预览
+        # SVG 或 矢量化结果 或 几何模式：绘制路径预览
         if not self._ensure_data():
             return
         subpaths, colors, bbox, ftype = self.current_data
+        is_geo = self._is_geometric_mode()
 
         min_x, min_y, max_x, max_y = bbox
         sw = max_x - min_x
@@ -401,7 +498,7 @@ class Image2WSDApp:
         ox = pad + (w - 2*pad - sw * scale) / 2 - min_x * scale
         oy = pad + (h - 2*pad - sh * scale) / 2 - min_y * scale
 
-        # 绘制填充
+        # 绘制填充/线条
         for i, sp in enumerate(subpaths):
             if self.color_mode.get() == 'svg':
                 color = colors[i]
@@ -412,13 +509,23 @@ class Image2WSDApp:
             if not color or color == 'none':
                 color = '#cccccc'
 
-            poly = subpath_to_polygon(sp, samples_per_seg=6)
-            pts = [(x*scale+ox, y*scale+oy) for x, y in poly]
-            flat = [coord for pt in pts for coord in pt]
-            canvas.create_polygon(flat, fill=color, outline='', smooth=False)
+            if is_geo:
+                # 几何模式：直接用折线点
+                pts = [(x*scale+ox, y*scale+oy) for x, y in sp]
+                flat = [coord for pt in pts for coord in pt]
+                # 判断是否闭合
+                if sp[0] == sp[-1] and len(sp) > 2:
+                    canvas.create_polygon(flat, fill=color, outline='', smooth=False)
+                else:
+                    canvas.create_line(flat, fill=color, width=2, capstyle='round')
+            else:
+                poly = subpath_to_polygon(sp, samples_per_seg=6)
+                pts = [(x*scale+ox, y*scale+oy) for x, y in poly]
+                flat = [coord for pt in pts for coord in pt]
+                canvas.create_polygon(flat, fill=color, outline='', smooth=False)
 
         # 绘制轮廓
-        if self.outline.get():
+        if self.outline.get() and not is_geo:
             for sp in subpaths:
                 poly = subpath_to_polygon(sp, samples_per_seg=8)
                 pts = [(x*scale+ox, y*scale+oy) for x, y in poly]
@@ -434,6 +541,7 @@ class Image2WSDApp:
         if not self._ensure_data():
             return
         subpaths, colors, bbox, ftype = self.current_data
+        is_geo = self._is_geometric_mode()
 
         w = canvas.winfo_width()
         h = canvas.winfo_height()
@@ -487,7 +595,10 @@ class Image2WSDApp:
         # 分配颜色
         fill_colors_hex = []
         if self.color_mode.get() == 'rainbow':
-            areas = [path_area(sp) for sp in subpaths]
+            if is_geo:
+                areas = [self._polyline_area(sp) for sp in subpaths]
+            else:
+                areas = [path_area(sp) for sp in subpaths]
             sorted_idx = sorted(range(len(subpaths)), key=lambda i: -areas[i])
             color_map = {}
             for rank, idx in enumerate(sorted_idx):
@@ -498,20 +609,29 @@ class Image2WSDApp:
         else:
             fill_colors_hex = colors
 
-        # 绘制填充
+        # 绘制
         for i, sp in enumerate(subpaths):
             wsd_sp = [(int(x*sx+ox), int(y*sy+oy)) for x, y in sp]
             color = fill_colors_hex[i]
             if not color or color == 'none':
                 color = '#cccccc'
 
-            poly = subpath_to_polygon(wsd_sp, samples_per_seg=6)
-            pts = [(x*dscale+dox, y*dscale+doy) for x, y in poly]
-            flat = [coord for pt in pts for coord in pt]
-            canvas.create_polygon(flat, fill=color, outline='', smooth=False)
+            if is_geo:
+                # 几何模式：直接绘制折线
+                pts = [(x*dscale+dox, y*dscale+doy) for x, y in wsd_sp]
+                flat = [coord for pt in pts for coord in pt]
+                if wsd_sp[0] == wsd_sp[-1] and len(wsd_sp) > 2:
+                    canvas.create_polygon(flat, fill=color, outline='', smooth=False)
+                else:
+                    canvas.create_line(flat, fill=color, width=2, capstyle='round')
+            else:
+                poly = subpath_to_polygon(wsd_sp, samples_per_seg=6)
+                pts = [(x*dscale+dox, y*dscale+doy) for x, y in poly]
+                flat = [coord for pt in pts for coord in pt]
+                canvas.create_polygon(flat, fill=color, outline='', smooth=False)
 
-        # 绘制轮廓
-        if self.outline.get():
+        # 绘制轮廓（仅非几何模式）
+        if self.outline.get() and not is_geo:
             for sp in subpaths:
                 wsd_sp = [(int(x*sx+ox), int(y*sy+oy)) for x, y in sp]
                 poly = subpath_to_polygon(wsd_sp, samples_per_seg=8)
@@ -522,8 +642,13 @@ class Image2WSDApp:
         # 更新信息
         actual_w = int(sw * sx)
         actual_h = int(sh * abs(sy))
-        info = f"路径: {len(subpaths)} | WSD尺寸: {actual_w} × {actual_h} | "
-        info += f"翻转: {'是' if flip else '否'} | 类型: {ftype}"
+        if is_geo:
+            shape_types = set(t for t, _ in getattr(self, '_shape_info', []))
+            info = f"形状: {len(subpaths)} 个 | 类型: {','.join(shape_types) if shape_types else '-'} | "
+            info += f"WSD尺寸: {actual_w} × {actual_h} | 翻转: {'是' if flip else '否'}"
+        else:
+            info = f"路径: {len(subpaths)} | WSD尺寸: {actual_w} × {actual_h} | "
+            info += f"翻转: {'是' if flip else '否'} | 类型: {ftype}"
         self.info_label.config(text=info)
 
     # ===== 转换 =====
@@ -542,6 +667,8 @@ class Image2WSDApp:
         if self.use_custom_size.get():
             custom_size = (self.custom_w.get(), self.custom_h.get())
 
+        is_geo = self.convert_mode.get() == 'geometric'
+
         # 合并模式
         if self.output_mode.get() == 'merged':
             out_file = filedialog.asksaveasfilename(
@@ -554,23 +681,38 @@ class Image2WSDApp:
                 return
 
             try:
-                from svg2wsd_core import convert_to_wsd_multi
                 self._update_progress("开始转换...", 0)
-                result = convert_to_wsd_multi(
-                    self.input_files, out_file,
-                    color_mode=self.color_mode.get(),
-                    linewidth=self.linewidth.get(),
-                    fill_color=self.fill_color.get(),
-                    outline=self.outline.get(),
-                    flip_v=self.flip_v.get(),
-                    custom_size=custom_size,
-                    img_threshold=self.img_threshold.get(),
-                    img_turdsize=self.img_turdsize.get(),
-                    progress_cb=self._update_progress,
-                )
+                if is_geo:
+                    from svg2wsd_geo import convert_geo_to_wsd_multi
+                    result = convert_geo_to_wsd_multi(
+                        self.input_files, out_file,
+                        color_mode=self.color_mode.get(),
+                        linewidth=self.linewidth.get(),
+                        fill_color=self.fill_color.get(),
+                        flip_v=self.flip_v.get(),
+                        custom_size=custom_size,
+                        min_area=self.geo_min_area.get(),
+                        epsilon_ratio=self.geo_epsilon.get(),
+                        progress_cb=self._update_progress,
+                    )
+                else:
+                    from svg2wsd_core import convert_to_wsd_multi
+                    result = convert_to_wsd_multi(
+                        self.input_files, out_file,
+                        color_mode=self.color_mode.get(),
+                        linewidth=self.linewidth.get(),
+                        fill_color=self.fill_color.get(),
+                        outline=self.outline.get(),
+                        flip_v=self.flip_v.get(),
+                        custom_size=custom_size,
+                        img_threshold=self.img_threshold.get(),
+                        img_turdsize=self.img_turdsize.get(),
+                        progress_cb=self._update_progress,
+                    )
                 self._update_progress("完成！", 100)
+                mode_name = "几何转换" if is_geo else "普通转换"
                 messagebox.showinfo("完成",
-                    f"合并完成！\n\n"
+                    f"{mode_name}合并完成！\n\n"
                     f"画布数: {result['canvases']}\n"
                     f"输入文件: {result['files']} 个\n"
                     f"文件大小: {result['size']} 字节\n\n"
@@ -595,25 +737,40 @@ class Image2WSDApp:
 
             try:
                 self._update_progress(f"转换中 {i+1}/{total}: {base}", int(100 * i / total))
-                convert_to_wsd(
-                    in_file, wsd_file,
-                    color_mode=self.color_mode.get(),
-                    linewidth=self.linewidth.get(),
-                    fill_color=self.fill_color.get(),
-                    outline=self.outline.get(),
-                    flip_v=self.flip_v.get(),
-                    custom_size=custom_size,
-                    img_threshold=self.img_threshold.get(),
-                    img_turdsize=self.img_turdsize.get(),
-                    progress_cb=None,
-                )
+                if is_geo:
+                    from svg2wsd_geo import convert_geo_to_wsd
+                    convert_geo_to_wsd(
+                        in_file, wsd_file,
+                        color_mode=self.color_mode.get(),
+                        linewidth=self.linewidth.get(),
+                        fill_color=self.fill_color.get(),
+                        flip_v=self.flip_v.get(),
+                        custom_size=custom_size,
+                        min_area=self.geo_min_area.get(),
+                        epsilon_ratio=self.geo_epsilon.get(),
+                        progress_cb=None,
+                    )
+                else:
+                    convert_to_wsd(
+                        in_file, wsd_file,
+                        color_mode=self.color_mode.get(),
+                        linewidth=self.linewidth.get(),
+                        fill_color=self.fill_color.get(),
+                        outline=self.outline.get(),
+                        flip_v=self.flip_v.get(),
+                        custom_size=custom_size,
+                        img_threshold=self.img_threshold.get(),
+                        img_turdsize=self.img_turdsize.get(),
+                        progress_cb=None,
+                    )
                 success += 1
             except Exception as e:
                 failed.append((base, str(e)))
 
         self._update_progress("完成！", 100)
 
-        msg = f"转换完成！\n\n成功: {success} 个\n"
+        mode_name = "几何转换" if is_geo else "普通转换"
+        msg = f"{mode_name}完成！\n\n成功: {success} 个\n"
         if failed:
             msg += f"失败: {len(failed)} 个\n\n"
             for name, err in failed[:5]:
