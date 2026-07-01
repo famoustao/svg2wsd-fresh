@@ -324,10 +324,36 @@ def svg_to_wsd(svg_path, wsd_path, color_mode='rainbow',
     ns = {'svg': 'http://www.w3.org/2000/svg'}
 
     paths = []
-    for g in root.findall('.//svg:g', ns):
-        for p in g.findall('svg:path', ns):
-            paths.append((p.get('d', ''), p.get('fill', '#000000'), g.get('transform', '')))
+    ns = {'svg': 'http://www.w3.org/2000/svg'}
+
+    def _get_fill(elem, parent_fill='#000000'):
+        """获取元素的fill颜色，先看自己，再看style"""
+        fill = elem.get('fill')
+        if fill:
+            return fill
+        style = elem.get('style', '')
+        if style:
+            m = re.search(r'fill\s*:\s*([^;]+)', style)
+            if m:
+                return m.group(1).strip()
+        return parent_fill
+
+    # 遍历所有g和path，正确继承fill
+    def _collect(parent, parent_fill='#000000'):
+        g_fill = _get_fill(parent, parent_fill)
+        for child in parent:
+            tag = child.tag.split('}')[-1] if '}' in child.tag else child.tag
+            if tag == 'g':
+                _collect(child, g_fill)
+            elif tag == 'path':
+                d = child.get('d', '')
+                fill = _get_fill(child, g_fill)
+                paths.append((d, fill, ''))
+
+    _collect(root, '#000000')
+
     if not paths:
+        # 兜底：直接找所有path
         for p in root.findall('.//svg:path', ns):
             paths.append((p.get('d', ''), '#000000', ''))
 
