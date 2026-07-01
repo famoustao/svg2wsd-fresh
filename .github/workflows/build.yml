@@ -5,6 +5,9 @@ on:
     branches: [ main ]
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   build-windows:
     runs-on: windows-latest
@@ -26,24 +29,10 @@ jobs:
         run: xcopy /E /I template dist\template
 
       - name: Create release zip
-        run: |
-          Compress-Archive -Path dist\* -DestinationPath svg2wsd-windows.zip
+        run: Compress-Archive -Path dist\* -DestinationPath svg2wsd-windows.zip
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: svg2wsd-windows
           path: svg2wsd-windows.zip
-
-      - name: Get version
-        id: version
-        run: echo "date=$(date +'%Y%m%d')" >> $env:GITHUB_OUTPUT
-
-      - name: Create Release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: v-${{ steps.version.outputs.date }}
-          name: svg2wsd ${{ steps.version.outputs.date }}
-          files: svg2wsd-windows.zip
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
