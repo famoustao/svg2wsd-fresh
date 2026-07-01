@@ -89,11 +89,11 @@ class Image2WSDApp:
         row.pack(fill='x', padx=8, pady=(8, 4))
         ttk.Label(row, text="填充颜色:", width=10).pack(side='left')
         ttk.Radiobutton(row, text="彩虹", variable=self.color_mode, value='rainbow',
-                        command=self._update_wsd_preview).pack(side='left')
+                        command=self._update_all_previews).pack(side='left')
         ttk.Radiobutton(row, text="单色", variable=self.color_mode, value='single',
                         command=self._on_color_mode).pack(side='left')
         ttk.Radiobutton(row, text="原色", variable=self.color_mode, value='svg',
-                        command=self._update_wsd_preview).pack(side='left')
+                        command=self._update_all_previews).pack(side='left')
 
         # 单色选择
         row2 = ttk.Frame(opt_frame)
@@ -117,13 +117,13 @@ class Image2WSDApp:
         row4 = ttk.Frame(opt_frame)
         row4.pack(fill='x', padx=8, pady=4)
         ttk.Checkbutton(row4, text="绘制黑色轮廓", variable=self.outline,
-                        command=self._update_wsd_preview).pack(side='left')
+                        command=self._update_all_previews).pack(side='left')
 
         # 垂直翻转
         row5 = ttk.Frame(opt_frame)
         row5.pack(fill='x', padx=8, pady=4)
         ttk.Checkbutton(row5, text="垂直翻转输出", variable=self.flip_v,
-                        command=self._update_wsd_preview).pack(side='left')
+                        command=self._update_all_previews).pack(side='left')
 
         # 自定义大小
         size_frame = ttk.LabelFrame(opt_frame, text="自定义大小")
@@ -289,7 +289,7 @@ class Image2WSDApp:
         else:
             self.color_entry.config(state='disabled')
             self.color_btn.config(state='disabled')
-        self._update_wsd_preview()
+        self._update_all_previews()
 
     def _on_custom_size(self):
         if self.use_custom_size.get():
@@ -298,13 +298,13 @@ class Image2WSDApp:
         else:
             self.w_entry.config(state='disabled')
             self.h_entry.config(state='disabled')
-        self._update_wsd_preview()
+        self._update_all_previews()
 
     def _pick_color(self):
         color = colorchooser.askcolor(color=self.fill_color.get(), title="选择填充颜色")
         if color and color[1]:
             self.fill_color.set(color[1])
-            self._update_wsd_preview()
+            self._update_all_previews()
 
     def _on_img_param_change(self, *args):
         # 图片参数变化时重新矢量化
