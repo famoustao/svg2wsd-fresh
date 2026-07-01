@@ -148,8 +148,9 @@ def detect_geometric_shapes(image_path, min_area=50, epsilon_ratio=0.02,
         img_pil = Image.open(image_path).convert('L')
         img = np.array(img_pil)
 
-    # 二值化（黑色为前景=255）
-    _, binary = cv2.threshold(img, 128, 255, cv2.THRESH_BINARY_INV)
+    # 二值化（用OTSU自动阈值，适应不同颜色的前景
+    _, binary = cv2.threshold(img, 0, 255,
+                              cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
 
     # 形态学闭运算，去除小空洞
     kernel = np.ones((2, 2), np.uint8)
