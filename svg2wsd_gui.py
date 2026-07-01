@@ -38,6 +38,7 @@ class Image2WSDApp:
         self.current_file = None
         self.current_data = None  # (subpaths, colors, bbox, file_type)
 
+        self.output_mode = tk.StringVar(value='separate')  # separate / merged
         self.color_mode = tk.StringVar(value='rainbow')
         self.fill_color = tk.StringVar(value='#3366ff')
         self.linewidth = tk.IntVar(value=80)
@@ -166,6 +167,17 @@ class Image2WSDApp:
                                      variable=self.img_turdsize, command=self._on_img_param_change)
         self.turd_scale.pack(side='left', fill='x', expand=True, padx=5)
         ttk.Label(turd_row, text="像素", foreground='gray').pack(side='left')
+
+        # 输出模式
+        out_frame = ttk.LabelFrame(left, text="输出模式")
+        out_frame.pack(fill='x', padx=5, pady=5)
+
+        mode_row = ttk.Frame(out_frame)
+        mode_row.pack(fill='x', padx=8, pady=8)
+        ttk.Radiobutton(mode_row, text="分别输出", variable=self.output_mode,
+                        value='separate').pack(side='left', padx=5)
+        ttk.Radiobutton(mode_row, text="合并到同一WSD的不同画布",
+                        variable=self.output_mode, value='merged').pack(side='left', padx=5)
 
         # 预览按钮
         prev_btn_row = ttk.Frame(left)
@@ -526,13 +538,52 @@ class Image2WSDApp:
             messagebox.showwarning("提示", "请先添加文件")
             return
 
-        out_dir = filedialog.askdirectory(title="选择输出目录")
-        if not out_dir:
-            return
-
         custom_size = None
         if self.use_custom_size.get():
             custom_size = (self.custom_w.get(), self.custom_h.get())
+
+        # 合并模式
+        if self.output_mode.get() == 'merged':
+            out_file = filedialog.asksaveasfilename(
+                title="保存合并后的WSD文件",
+                defaultextension=".wsd",
+                filetypes=[("WSD文件", "*.wsd"), ("所有文件", "*.*")],
+                initialfile="merged.wsd"
+            )
+            if not out_file:
+                return
+
+            try:
+                from svg2wsd_core import convert_to_wsd_multi
+                self._update_progress("开始转换...", 0)
+                result = convert_to_wsd_multi(
+                    self.input_files, out_file,
+                    color_mode=self.color_mode.get(),
+                    linewidth=self.linewidth.get(),
+                    fill_color=self.fill_color.get(),
+                    outline=self.outline.get(),
+                    flip_v=self.flip_v.get(),
+                    custom_size=custom_size,
+                    img_threshold=self.img_threshold.get(),
+                    img_turdsize=self.img_turdsize.get(),
+                    progress_cb=self._update_progress,
+                )
+                self._update_progress("完成！", 100)
+                messagebox.showinfo("完成",
+                    f"合并完成！\n\n"
+                    f"画布数: {result['canvases']}\n"
+                    f"输入文件: {result['files']} 个\n"
+                    f"文件大小: {result['size']} 字节\n\n"
+                    f"输出: {out_file}")
+            except Exception as e:
+                self._update_progress("失败", 0)
+                messagebox.showerror("错误", f"转换失败:\n{str(e)}")
+            return
+
+        # 分别输出模式
+        out_dir = filedialog.askdirectory(title="选择输出目录")
+        if not out_dir:
+            return
 
         total = len(self.input_files)
         success = 0

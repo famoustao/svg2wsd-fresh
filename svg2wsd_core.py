@@ -735,6 +735,204 @@ def convert_to_wsd(input_path, wsd_path, color_mode='rainbow',
     }
 
 
+# ========== 多画布合并 ==========
+
+# 画布头模板 (42B) - 从rty.wsd提取
+_CANVAS_HEADER = bytes.fromhex(
+    '02000100000008004000020000002020ffff10000100'
+    '0000000000000000000000000010000000000000'
+)
+
+# 画布尾模板 (32B) - 记录结束后的8B零 + 52d2 + 尾部
+_CANVAS_TAIL = bytes.fromhex(
+    '000000000000000052d200002969000000000000'
+    '000100320010f50000000000'
+)
+
+# 画布头大小
+_CANVAS_HEADER_SIZE = 42
+# 对象数偏移 (画布头内)
+_OBJ_COUNT_OFFSET = 42
+# 画布尾大小
+_CANVAS_TAIL_SIZE = 32
+
+
+def _build_canvas_block(subpaths, colors, color_mode, linewidth, outline,
+                        flip_v, custom_size):
+    """构建一个画布的完整数据块 (头+对象数+记录+尾)"""
+    canvas_range = CANVAS_MAX - CANVAS_MIN
+
+    # 计算边界
+    all_x = [x for sp in subpaths for x, y in sp]
+    all_y = [y for sp in subpaths for x, y in sp]
+    min_x, max_x = min(all_x), max(all_x)
+    min_y, max_y = min(all_y), max(all_y)
+    sw = max_x - min_x
+    sh = max_y - min_y
+
+    # 计算缩放
+    if custom_size:
+        target_w, target_h = custom_size
+        sx = target_w / sw
+        sy = target_h / sh
+    else:
+        fit_scale = min((canvas_range - 2*MARGIN) / sw,
+                        (canvas_range - 2*MARGIN) / sh) * 0.9
+        sx = sy = fit_scale
+
+    if flip_v:
+        sy = -sy
+
+    # 居中偏移
+    ox = CANVAS_MIN + (canvas_range - sw * sx) / 2 - min_x * sx
+    if flip_v:
+        oy = CANVAS_MIN + (canvas_range + sh * abs(sy)) / 2 - min_y * sy
+    else:
+        oy = CANVAS_MIN + (canvas_range - sh * sy) / 2 - min_y * sy
+
+    # 构建记录
+    records_data = bytearray()
+    num_objects = 0
+    black_idx = bytes([0x01, 0xff, 0x00, 0x00])
+
+    for i, sp in enumerate(subpaths):
+        if len(sp) < 2:
+            continue
+        wsd_sp = [(int(x*sx+ox), int(y*sy+oy)) for x, y in sp]
+        records_data += build_fill_record(wsd_sp, colors[i])
+        num_objects += 1
+        if outline:
+            records_data += build_bezier_record(wsd_sp, black_idx, linewidth)
+            num_objects += 1
+
+    # 组装画布块: 头(42B) + 对象数(4B) + 记录 + 尾(32B)
+    block = bytearray()
+    block += _CANVAS_HEADER
+    block += struct.pack('<I', num_objects)
+    block += records_data
+    block += _CANVAS_TAIL
+
+    return block, num_objects
+
+
+def convert_to_wsd_multi(input_files, output_path, color_mode='rainbow',
+                         linewidth=DEFAULT_LINEWIDTH, fill_color='#3366ff',
+                         outline=True, flip_v=False, custom_size=None,
+                         img_threshold=128, img_turdsize=2,
+                         progress_cb=None):
+    """
+    将多个输入文件合并到同一个WSD的不同画布
+
+    参数:
+        input_files: 输入文件路径列表
+        output_path: 输出WSD文件路径
+        其他参数同 convert_to_wsd
+    """
+    if not input_files:
+        raise ValueError("没有输入文件")
+
+    with open(TEMPLATE_PATH, 'rb') as f:
+        tpl = f.read()
+
+    # 找文件头 (到第一个画布头之前)
+    # 文件头 = 0x0000 - 0xea25 (59942B)
+    # 画布头从 0xea26 开始
+    file_header = tpl[:0xea26]
+
+    # 找文件尾 (从最后一个52d2后24B到文件结束)
+    # 简化：从模板的 ffff 往前找
+    file_tail = None
+    for i in range(len(tpl)-4, max(0, len(tpl)-200), -1):
+        if tpl[i:i+4] == b'\xff\xff\xff\xff':
+            # 文件尾从 8B零 + 52d2 + 24B 开始？
+            # 直接取最后 128B 作为文件尾
+            file_tail = tpl[-128:]
+            break
+    if file_tail is None:
+        file_tail = tpl[-128:]
+
+    # 解析所有文件并准备画布数据
+    canvases_data = []
+    total_files = len(input_files)
+
+    for idx, in_file in enumerate(input_files):
+        if progress_cb:
+            progress_cb(f"解析 {idx+1}/{total_files}: {os.path.basename(in_file)}",
+                        int(10 + 50 * idx / total_files))
+
+        subpaths, svg_colors, bbox, ftype = parse_input_file(
+            in_file, img_threshold=img_threshold, img_turdsize=img_turdsize
+        )
+
+        if not subpaths:
+            continue
+
+        # 分配颜色
+        colors = []
+        if color_mode == 'rainbow':
+            areas = [path_area(sp) for sp in subpaths]
+            sorted_idx = sorted(range(len(subpaths)), key=lambda i: -areas[i])
+            color_map = {}
+            for rank, i in enumerate(sorted_idx):
+                color_map[i] = rainbow_color_bgr(rank, len(sorted_idx))
+            colors = [color_map[i] for i in range(len(subpaths))]
+        elif color_mode == 'single':
+            bgr = hex_to_bgr(fill_color)
+            colors = [bgr] * len(subpaths)
+        elif color_mode == 'svg':
+            colors = [hex_to_bgr(c) for c in svg_colors]
+
+        block, obj_count = _build_canvas_block(
+            subpaths, colors, color_mode, linewidth, outline, flip_v, custom_size
+        )
+        canvases_data.append(block)
+
+    if not canvases_data:
+        raise ValueError("没有可转换的内容")
+
+    if progress_cb:
+        progress_cb(f"组装 {len(canvases_data)} 个画布...", 70)
+
+    # 组装完整文件
+    output = bytearray()
+    output += file_header
+
+    # 更新画布数量 (在0xea22位置)
+    canvas_count = len(canvases_data)
+    # 0xea22 是画布数量
+    output[0xea22] = canvas_count & 0xFF
+
+    # 添加所有画布
+    for block in canvases_data:
+        output += block
+
+    # 添加文件尾
+    output += file_tail
+
+    # 8字节对齐
+    while len(output) % 8 != 0:
+        output += b'\x00'
+
+    # 更新文件大小
+    actual = len(output)
+    for i in range(len(output)-4, max(0, len(output)-200), -1):
+        if output[i:i+4] == b'\xff\xff\xff\xff':
+            output[i-4:i] = struct.pack('<I', actual)
+            break
+
+    with open(output_path, 'wb') as f:
+        f.write(output)
+
+    if progress_cb:
+        progress_cb(f"完成！共 {canvas_count} 个画布", 100)
+
+    return {
+        'canvases': canvas_count,
+        'size': actual,
+        'files': total_files,
+    }
+
+
 # ========== 预览用工具 ==========
 
 def bezier_sample(p0, c1, c2, p3, n=10):

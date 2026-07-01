@@ -37,6 +37,8 @@ def main():
                         help='图片二值化阈值 (10-245, 默认128)')
     parser.add_argument('--turdsize', type=int, default=2,
                         help='忽略的最小区域像素数 (默认2)')
+    parser.add_argument('--merge', action='store_true',
+                        help='合并到同一个WSD的不同画布')
     args = parser.parse_args()
 
     custom_size = None
@@ -58,6 +60,28 @@ def main():
     if not input_files:
         print("✗ 没有找到支持的文件格式")
         sys.exit(1)
+
+    # 合并模式
+    if args.merge:
+        out_file = args.output or 'merged.wsd'
+        from svg2wsd_core import convert_to_wsd_multi
+        result = convert_to_wsd_multi(
+            input_files, out_file,
+            color_mode=args.color,
+            linewidth=args.linewidth,
+            fill_color=args.fill_color,
+            outline=not args.no_outline,
+            flip_v=args.flip_v,
+            custom_size=custom_size,
+            img_threshold=args.threshold,
+            img_turdsize=args.turdsize,
+        )
+        print(f"✓ 合并完成!")
+        print(f"  画布数: {result['canvases']}")
+        print(f"  输入文件: {result['files']} 个")
+        print(f"  输出: {out_file}")
+        print(f"  大小: {result['size']} 字节")
+        sys.exit(0)
 
     # 判断单文件还是批量
     if len(input_files) == 1 and args.output and not os.path.isdir(args.output or ''):
