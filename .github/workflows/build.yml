@@ -19,8 +19,8 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Install PyInstaller
-        run: pip install pyinstaller
+      - name: Install dependencies
+        run: pip install pyinstaller pillow potracer numpy
 
       - name: Build CLI EXE
         run: pyinstaller --onefile --clean --name svg2wsd svg2wsd.py
