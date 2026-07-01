@@ -59,9 +59,33 @@ class Image2WSDApp:
         main = ttk.PanedWindow(self.root, orient='horizontal')
         main.pack(fill='both', expand=True, padx=5, pady=5)
 
-        # ===== 左侧控制面板 =====
-        left = ttk.Frame(main, width=340)
-        main.add(left, weight=0)
+        # ===== 左侧控制面板（可滚动）=====
+        left_container = ttk.Frame(main, width=340)
+        main.add(left_container, weight=0)
+
+        # 滚动条
+        left_scroll = ttk.Scrollbar(left_container, orient='vertical')
+        left_scroll.pack(side='right', fill='y')
+
+        # 画布
+        left_canvas = tk.Canvas(left_container, width=340, highlightthickness=0,
+                                 yscrollcommand=left_scroll.set)
+        left_canvas.pack(side='left', fill='both', expand=True)
+        left_scroll.config(command=left_canvas.yview)
+
+        # 内容框架
+        left = ttk.Frame(left_canvas)
+        left_canvas.create_window((0, 0), window=left, anchor='nw', width=330)
+
+        # 绑定滚动区域
+        def _update_scrollregion(event=None):
+            left_canvas.configure(scrollregion=left_canvas.bbox('all'))
+        left.bind('<Configure>', _update_scrollregion)
+
+        # 鼠标滚轮滚动
+        def _on_mousewheel(event):
+            left_canvas.yview_scroll(int(-1 * (event.delta / 120)), 'units')
+        left_canvas.bind_all('<MouseWheel>', _on_mousewheel)
 
         # 转换模式
         mode_frame = ttk.LabelFrame(left, text="转换模式")
