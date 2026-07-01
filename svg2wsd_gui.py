@@ -431,8 +431,9 @@ class SVG2WSDApp:
     def __init__(self, root):
         self.root = root
         root.title("SVG → WSD 转换器")
-        root.geometry("500x380")
+        root.geometry("520x460")
         root.resizable(False, False)
+        root.configure(bg='#f0f0f0')
 
         # 变量
         self.svg_path = tk.StringVar()
@@ -499,8 +500,25 @@ class SVG2WSDApp:
         self.status = ttk.Label(self.root, text="就绪", foreground='gray')
         self.status.pack(pady=(0, 5))
 
-        # 转换按钮
-        ttk.Button(self.root, text="开始转换", command=self._convert, style='Accent.TButton').pack(pady=10)
+        # 转换按钮 - 用普通tk.Button确保可见
+        btn_frame = tk.Frame(self.root, bg='#f0f0f0')
+        btn_frame.pack(pady=(15, 5))
+        self.convert_btn = tk.Button(
+            btn_frame,
+            text="  开始转换  ",
+            command=self._convert,
+            font=('Microsoft YaHei', 12, 'bold'),
+            bg='#4CAF50',
+            fg='white',
+            activebackground='#45a049',
+            activeforeground='white',
+            relief='raised',
+            bd=2,
+            padx=30,
+            pady=8,
+            cursor='hand2'
+        )
+        self.convert_btn.pack()
 
     def _toggle_color(self):
         if self.color_mode.get() == 'single':
