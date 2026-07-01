@@ -127,12 +127,14 @@ def detect_geometric_shapes(image_path, min_area=50, epsilon_ratio=0.02,
                             circularity_threshold=0.85,
                             min_line_length=20):
     """
-    从图片中检测几何形状（支持线条图）
+    从图片中检测几何形状（支持线条图和实心填充图）
 
     原理：
     1. 用 RETR_TREE 找层级轮廓
-    2. 有子轮廓的外轮廓 = 有宽度的线条形状 → 取内外轮廓的中心线
-    3. 细长的独立轮廓 = 有宽度的直线 → 计算中心线
+    2. 有子轮廓的外轮廓 = 空心线条形状 → 取内外轮廓的中心线
+    3. 无子轮廓的独立轮廓 = 实心形状 → 直接用外轮廓
+       - 细长的 → 骨架化提取中心线（直线/折线）
+       - 非细长的 → 直接作为闭合多边形（三角形/矩形/圆/多边形）
     4. 分类：直线、折线、圆、矩形、三角形、多边形
 
     返回: list of dict
@@ -172,7 +174,7 @@ def detect_geometric_shapes(image_path, min_area=50, epsilon_ratio=0.02,
         hier = hierarchy[0][i]
         next_, prev_, child, parent = hier
 
-        # === 情况1：有子轮廓的外轮廓 = 有宽度的闭合形状（圆、矩形、三角形等）===
+        # === 情况1：有子轮廓的外轮廓 = 空心线条形状（圆、矩形、三角形等）===
         if child >= 0 and parent < 0:
             inner_cnt = contours[child]
             inner_area = cv2.contourArea(inner_cnt)
@@ -242,17 +244,18 @@ def detect_geometric_shapes(image_path, min_area=50, epsilon_ratio=0.02,
             processed.add(i)
             processed.add(child)
 
-        # === 情况2：独立轮廓（无子无父）===
+        # === 情况2：独立轮廓（无子无父）= 实心形状 ===
         elif parent < 0 and child < 0:
-            # 判断是否是细长的（有宽度的直线）
             x, y, w, h = cv2.boundingRect(cnt)
-            aspect = max(w, h) / max(min(w, h), 1)
             length = cv2.arcLength(cnt, True)
 
+            # 用最小外接矩形判断细长比（适应旋转的形状）
+            rect = cv2.minAreaRect(cnt)
+            rw, rh = rect[1]
+            aspect = max(rw, rh) / max(min(rw, rh), 1)
+
             if aspect > 3 and length > min_line_length:
-                # 细长形状 = 有宽度的直线 → 计算中心线
-                # 用骨架化
-                # 先创建一个只包含这个轮廓的小图
+                # 细长形状 = 有宽度的直线 → 骨架化提取中心线
                 mask = np.zeros((h + 4, w + 4), dtype=np.uint8)
                 shifted = cnt - np.array([x - 2, y - 2])
                 cv2.drawContours(mask, [shifted], -1, 255, -1)
@@ -290,45 +293,50 @@ def detect_geometric_shapes(image_path, min_area=50, epsilon_ratio=0.02,
                         })
                 processed.add(i)
             else:
-                # 非细长，当作普通折线/多边形
+                # 非细长 = 实心闭合形状（三角形/矩形/圆/多边形）
+                # 注意：approxPolyDP(closed=True) 返回的点首尾不重合
                 epsilon = epsilon_ratio * cv2.arcLength(cnt, True)
                 approx = cv2.approxPolyDP(cnt, epsilon, True)
                 pts = [(float(p[0][0]), float(p[0][1])) for p in approx]
 
-                if len(pts) < 2:
+                if len(pts) < 3:
                     processed.add(i)
                     continue
 
                 bbox = (x, y, w, h)
+                n = len(pts)
 
-                # 判断是否闭合
-                d = math.hypot(pts[0][0] - pts[-1][0], pts[0][1] - pts[-1][1])
-                is_closed = d < epsilon_ratio * length
+                # 检查是否是圆
+                if n > 6:
+                    (cx, cy), radius = cv2.minEnclosingCircle(cnt)
+                    circle_area = math.pi * radius * radius
+                    circularity = area / circle_area
+                    if circularity > circularity_threshold:
+                        shapes.append({
+                            'type': SHAPE_CIRCLE,
+                            'center': (float(cx), float(cy)),
+                            'radius': float(radius),
+                            'points': pts,
+                            'area': area,
+                            'bbox': bbox,
+                        })
+                        processed.add(i)
+                        continue
 
-                if is_closed and len(pts) >= 3:
-                    if len(pts) == 3:
-                        shape_type = SHAPE_TRIANGLE
-                    elif len(pts) == 4:
-                        shape_type = SHAPE_RECTANGLE
-                    else:
-                        shape_type = SHAPE_POLYGON
-                    shapes.append({
-                        'type': shape_type,
-                        'points': pts,
-                        'area': area,
-                        'bbox': bbox,
-                    })
+                # 多边形分类
+                if n == 3:
+                    shape_type = SHAPE_TRIANGLE
+                elif n == 4:
+                    shape_type = SHAPE_RECTANGLE
                 else:
-                    if len(pts) == 2:
-                        shape_type = SHAPE_LINE
-                    else:
-                        shape_type = SHAPE_POLYLINE
-                    shapes.append({
-                        'type': shape_type,
-                        'points': pts,
-                        'area': length,
-                        'bbox': bbox,
-                    })
+                    shape_type = SHAPE_POLYGON
+
+                shapes.append({
+                    'type': shape_type,
+                    'points': pts,
+                    'area': area,
+                    'bbox': bbox,
+                })
                 processed.add(i)
 
     return shapes
