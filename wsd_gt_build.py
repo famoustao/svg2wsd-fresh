@@ -36,6 +36,7 @@ SEG_CIRCLE = 0x4284    # 原生圆/椭圆/弧 (float32参数)
 
 PATH_TAG = 0x330f
 HDR4 = bytes.fromhex('cf100704')  # v2 Type-A 格式头
+HDR4_ARC = bytes.fromhex('ff000704')  # 圆弧格式头
 
 # 坐标单位: 1mm = 400 WSD单位
 MM_TO_WSD = 400
@@ -150,6 +151,145 @@ def make_circle_native_seg(cx, cy, r, param4=0.0, mflag=0x00):
     b += struct.pack('<f', float(r))     # f32 r
     b += struct.pack('<f', float(param4))  # f32 param4
     return bytes(b)
+
+
+def make_arc_native_path(cx, cy, r, start_angle, end_angle,
+                         line_color_bgra, line_width_wsd):
+    """
+    构建原生圆弧路径 (hdr4 = ff000704)
+
+    经过实验验证的圆弧格式（85字节）：
+      tag = 0x330f
+      hdr4 = ff 00 07 04
+      unk = 0xffff
+      fill(BGRA) | stroke(4)=0 | width(i32) | flag(u8)=0
+      seglist_count = 4 (u16)
+      固定头部数据 (约24字节，包含4个seglist的计数和段头部)
+      3个圆上点 (i32 x, i32 y) + 4字节零 = 28字节
+      r (f32) | angle1 (f32) | angle2 (f32) = 12字节
+      cx (i32) | cy (i32) = 8字节
+      尾部 0x64
+
+    角度系统：
+      0° = 正上方（12点钟方向）
+      角度沿顺时针方向增加（90°=右, 180°=下, 270°=左）
+      弧从 angle2 顺时针扫到 angle1
+
+    Args:
+        cx, cy: 圆心（WSD单位）
+        r: 半径（WSD单位）
+        start_angle: 起始角度（弧度，数学坐标系：0°=右，逆时针增加）
+        end_angle: 结束角度（弧度）
+        line_color_bgra: 线条颜色 (BGRA 4字节)
+        line_width_wsd: 线宽（WSD单位）
+
+    Returns:
+        bytes: 完整的圆弧路径记录
+    """
+    # 将数学坐标系角度转换为WSD角度系统
+    # 数学: 0°=右, 逆时针增加
+    # WSD:  0°=上, 顺时针增加
+    # 转换: wsd_angle = 90° - math_angle (顺时针)
+    # 或者说: wsd_angle = -math_angle + 90°
+    def math_to_wsd_angle(angle_rad):
+        # 数学角度 → WSD角度
+        # 数学0°(右) = WSD 90°
+        # 数学90°(上) = WSD 0°
+        # WSD角度 = 90° - 数学角度（都转成角度的话）
+        # 用弧度: wsd = pi/2 - math_angle
+        wsd = math.pi / 2 - angle_rad
+        # 归一化到 [0, 2π)
+        while wsd < 0:
+            wsd += 2 * math.pi
+        while wsd >= 2 * math.pi:
+            wsd -= 2 * math.pi
+        return wsd
+
+    angle1 = math_to_wsd_angle(start_angle)
+    angle2 = math_to_wsd_angle(end_angle)
+
+    # 计算弧上的3个采样点（用于显示控制点）
+    # 在弧上均匀取3个点
+    # 弧从 angle2 顺时针到 angle1
+    # 顺时针扫过的角度 = angle1 - angle2 (如果 angle1 > angle2)
+    # 否则 = angle1 + 2π - angle2
+    sweep = angle1 - angle2
+    if sweep <= 0:
+        sweep += 2 * math.pi
+
+    pts = []
+    for i in range(3):
+        t = i / 2.0  # 0, 0.5, 1
+        # 从angle2顺时针扫t*sweep
+        a = angle2 + t * sweep
+        if a >= 2 * math.pi:
+            a -= 2 * math.pi
+        # WSD角度转坐标（0°=上, 顺时针增加）
+        x = cx + r * math.sin(a)
+        y = cy - r * math.cos(a)
+        pts.append((int(round(x)), int(round(y))))
+
+    # 构建85字节的圆弧路径
+    # 先构建固定部分（从+21到+35）
+    # 基于原始文件的固定数据
+    # +20: flag = 0x00
+    # +21-22: seglist_count = 4 (u16)
+    # +23-31: 固定字节 (9字节)
+    # +32-35: 4字节 (变化，可能是mflag相关)
+
+    # 我们直接基于模板的固定结构来构建
+    # 从原始文件提取的固定头部（+20到+35）
+    # 00 04 00 04 00 01 00 01 00 00 00 07 43 00 03 00
+    # 但32-35字节在第三个弧中不同: 43 30 00 20
+    # 所以这4字节可能是某种标志
+
+    # 为了安全，我们用一个已知正确的模板
+    # 这里直接构建完整的85字节路径
+
+    path = bytearray(85)
+    p = 0
+
+    # 头部 (21字节)
+    struct.pack_into('<H', path, p, PATH_TAG); p += 2
+    path[p:p+4] = HDR4_ARC; p += 4
+    struct.pack_into('<H', path, p, 0xffff); p += 2
+    path[p:p+4] = line_color_bgra; p += 4
+    path[p:p+4] = bytes(4); p += 4  # stroke = 0
+    struct.pack_into('<i', path, p, int(round(line_width_wsd))); p += 4
+    path[p] = 0x00; p += 1  # flag = 仅轮廓
+
+    # seglist_count = 4
+    struct.pack_into('<H', path, p, 4); p += 2
+
+    # 固定数据 (+23到+35，13字节)
+    # 从原始文件提取: 04 00 01 00 01 00 00 00 07 43 00 03 00
+    fixed_bytes = bytes([
+        0x04, 0x00, 0x01, 0x00,  # +23-26
+        0x01, 0x00, 0x00, 0x00,  # +27-30
+        0x07, 0x43, 0x00, 0x03, 0x00,  # +31-35
+    ])
+    path[p:p+len(fixed_bytes)] = fixed_bytes; p += len(fixed_bytes)
+
+    # 3个点 (24字节) + 4字节零 = 28字节
+    for x, y in pts:
+        struct.pack_into('<i', path, p, x); p += 4
+        struct.pack_into('<i', path, p, y); p += 4
+    # 4字节零
+    path[p:p+4] = bytes(4); p += 4
+
+    # 半径 + 角度1 + 角度2 (12字节)
+    struct.pack_into('<f', path, p, float(r)); p += 4
+    struct.pack_into('<f', path, p, float(angle1)); p += 4
+    struct.pack_into('<f', path, p, float(angle2)); p += 4
+
+    # 圆心 cx, cy (8字节)
+    struct.pack_into('<i', path, p, int(round(cx))); p += 4
+    struct.pack_into('<i', path, p, int(round(cy))); p += 4
+
+    # 尾部 0x64
+    path[p] = 0x64; p += 1
+
+    return bytes(path)
 
 
 def make_circle_segs(cx, cy, r):
@@ -431,6 +571,38 @@ def build_circle(cx, cy, r, line_color='#000000', line_width_mm=0.2, native=True
         segs = make_circle_segs(cx, cy, r)
         path = make_path([segs], color_bgra, line_width_wsd)
     return build_wsd([path])
+
+
+def build_arc(cx, cy, r, start_angle, end_angle,
+              line_color='#000000', line_width_mm=0.2, native=True):
+    """
+    构建单个圆弧的WSD文件
+
+    Args:
+        cx, cy: 圆心（WSD单位）
+        r: 半径（WSD单位）
+        start_angle: 起始角度（弧度，数学坐标系：0°=右，逆时针增加）
+        end_angle: 结束角度（弧度）
+        line_color: 线条颜色 (#rrggbb)
+        line_width_mm: 线宽（mm）
+        native: True=使用原生圆弧格式, False=用贝塞尔近似
+
+    Returns:
+        bytes: WSD文件数据
+    """
+    color_bgra = hex_to_bgra(line_color)
+    line_width_wsd = line_width_mm * MM_TO_WSD
+
+    if native:
+        # 原生圆弧格式
+        path = make_arc_native_path(cx, cy, r, start_angle, end_angle,
+                                     color_bgra, line_width_wsd)
+        return build_wsd([path])
+    else:
+        # 贝塞尔近似
+        segs = make_arc_segs(cx, cy, r, start_angle, end_angle)
+        path = make_path([segs], color_bgra, line_width_wsd)
+        return build_wsd([path])
 
 
 # ========== 自测 ==========

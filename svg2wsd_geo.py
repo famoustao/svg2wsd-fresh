@@ -1277,6 +1277,30 @@ def shape_to_polyline_points(shape):
             except (TypeError, ValueError, IndexError):
                 continue
         return valid_pts
+    elif shape['type'] == SHAPE_ARC:
+        # 圆弧：用近似折线
+        center = shape.get('center')
+        radius = shape.get('radius')
+        if not isinstance(center, (tuple, list)) or len(center) != 2:
+            return []
+        try:
+            cx = float(center[0])
+            cy = float(center[1])
+            r = float(radius)
+            start_angle = float(shape.get('start_angle', 0))
+            end_angle = float(shape.get('end_angle', math.pi))
+        except (TypeError, ValueError, IndexError):
+            return []
+        # 用32段近似圆弧
+        segments = max(4, int(abs(end_angle - start_angle) / (math.pi / 16)))
+        pts = []
+        for i in range(segments + 1):
+            t = i / segments
+            angle = start_angle + t * (end_angle - start_angle)
+            x = cx + r * math.cos(angle)
+            y = cy + r * math.sin(angle)
+            pts.append((x, y))
+        return pts
     elif shape['type'] in (SHAPE_RECTANGLE, SHAPE_TRIANGLE, SHAPE_POLYGON):
         # 闭合多边形：首尾相连
         pts = shape['points']
@@ -1421,7 +1445,7 @@ def _shape_to_gt_segs(shape, sx, sy, ox, oy, flip_v=False):
         seg = make_circle_native_seg(cx, cy, r)
         return [seg], True
 
-    # 圆弧：用贝塞尔分段近似
+    # 圆弧：使用原生圆弧格式
     elif shape_type == SHAPE_ARC:
         center = _validate_point(shape.get('center'))
         if center is None:
@@ -1431,7 +1455,9 @@ def _shape_to_gt_segs(shape, sx, sy, ox, oy, flip_v=False):
             r_val = float(radius)
         except (TypeError, ValueError):
             return [], False
-        cx, cy = _transform(center[0], center[1])
+        # 原生圆弧用float坐标
+        cx = center[0] * sx + ox
+        cy = center[1] * sy + oy
         r = r_val * abs(sx)
         start_angle = shape.get('start_angle', 0)
         end_angle = shape.get('end_angle', math.pi)
@@ -1440,8 +1466,9 @@ def _shape_to_gt_segs(shape, sx, sy, ox, oy, flip_v=False):
             end_angle = float(end_angle)
         except (TypeError, ValueError):
             return [], False
-        segments = max(2, int(abs(end_angle - start_angle) / (math.pi / 4)))
-        return make_arc_segs(cx, cy, r, start_angle, end_angle, segments), False
+        # 原生圆弧返回特殊标记，让上层用make_arc_native_path构建
+        # 返回格式: (['__arc_path__', cx, cy, r, start_angle, end_angle], False)
+        return [('__arc_path__', cx, cy, r, start_angle, end_angle)], False
 
     # 闭合多边形类：矩形、三角形、多边形
     elif shape_type in (SHAPE_RECTANGLE, SHAPE_TRIANGLE, SHAPE_POLYGON):
@@ -1629,12 +1656,21 @@ def convert_geo_to_wsd(input_path, wsd_path,
 
     # 步骤5：组装WSD文件
     def _build_file():
-        # 每个形状单独创建一个esShapePath，以支持不同颜色
+        from wsd_gt_build import make_arc_native_path
         paths = []
         for i, segs in enumerate(seglists):
             color = colors[i] if i < len(colors) else colors[0]
-            path = make_path([segs], color, linewidth)
-            paths.append(path)
+            # 检查是否是原生圆弧（特殊标记）
+            if len(segs) == 1 and isinstance(segs[0], tuple) and len(segs[0]) == 6 and segs[0][0] == '__arc_path__':
+                # 原生圆弧
+                _, cx, cy, r, start_angle, end_angle = segs[0]
+                path = make_arc_native_path(cx, cy, r, start_angle, end_angle,
+                                             color, linewidth)
+                paths.append(path)
+            else:
+                # 普通形状
+                path = make_path([segs], color, linewidth)
+                paths.append(path)
         wsd_data = build_wsd(paths)
         with open(wsd_path, 'wb') as f:
             f.write(wsd_data)
