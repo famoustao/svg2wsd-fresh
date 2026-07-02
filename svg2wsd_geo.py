@@ -1629,9 +1629,13 @@ def convert_geo_to_wsd(input_path, wsd_path,
 
     # 步骤5：组装WSD文件
     def _build_file():
-        # 构建路径（所有形状在一个路径中，作为独立的seglist）
-        path = make_path(seglists, colors[0], linewidth)
-        wsd_data = build_wsd([path])
+        # 每个形状单独创建一个esShapePath，以支持不同颜色
+        paths = []
+        for i, segs in enumerate(seglists):
+            color = colors[i] if i < len(colors) else colors[0]
+            path = make_path([segs], color, linewidth)
+            paths.append(path)
+        wsd_data = build_wsd(paths)
         with open(wsd_path, 'wb') as f:
             f.write(wsd_data)
         return wsd_data
@@ -1644,7 +1648,7 @@ def convert_geo_to_wsd(input_path, wsd_path,
     return {
         'shapes': len(shapes),
         'shape_types': list(set(s['type'] for s in shapes)),
-        'objects': 1,  # 一个路径包含所有形状
+        'objects': len(seglists),  # 每个形状一个对象
         'seglists': len(seglists),
         'size': len(wsd_data),
     }
