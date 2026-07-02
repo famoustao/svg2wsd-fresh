@@ -562,7 +562,9 @@ class Image2WSDApp:
                 self.current_data = (subpaths, colors, bbox, ftype)
             return True
         except Exception as e:
-            self.status.config(text=f"解析失败: {str(e)[:40]}")
+            err_msg = str(e)
+            print(f"[svg2wsd_gui] 解析失败: {err_msg}", file=sys.stderr)
+            self.status.config(text=f"解析失败: {err_msg[:80]}")
             return False
 
     def _polyline_area(self, pts):

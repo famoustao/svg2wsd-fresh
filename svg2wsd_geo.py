@@ -257,10 +257,20 @@ def _nms_circles(circles, overlap_thresh=0.15):
     """
     if not circles:
         return []
-    # 按半径从大到小排序
-    circles = sorted(circles, key=lambda c: -c[2])
-    kept = []
+    # 验证每个圆的格式：必须是3个值的tuple/list (x, y, r)
+    valid_circles = []
     for c in circles:
+        try:
+            if isinstance(c, (tuple, list)) and len(c) == 3:
+                valid_circles.append((float(c[0]), float(c[1]), float(c[2])))
+        except (TypeError, ValueError, IndexError):
+            continue
+    if not valid_circles:
+        return []
+    # 按半径从大到小排序
+    valid_circles = sorted(valid_circles, key=lambda c: -c[2])
+    kept = []
+    for c in valid_circles:
         x, y, r = c
         duplicate = False
         for k in kept:
@@ -427,9 +437,22 @@ def _merge_colinear_segments(lines, angle_thresh=3, dist_thresh=20):
     if not lines:
         return []
 
+    # 验证每条线段的格式：必须是4个值的tuple/list (x1, y1, x2, y2)
+    valid_lines = []
+    for seg in lines:
+        try:
+            if isinstance(seg, (tuple, list)) and len(seg) == 4:
+                valid_lines.append(
+                    (float(seg[0]), float(seg[1]), float(seg[2]), float(seg[3]))
+                )
+        except (TypeError, ValueError, IndexError):
+            continue
+    if not valid_lines:
+        return []
+
     # 第一步：将线段转换为 (rho, theta, length, endpoints) 表示
     hough_lines = []
-    for x1, y1, x2, y2 in lines:
+    for x1, y1, x2, y2 in valid_lines:
         dx = x2 - x1
         dy = y2 - y1
         length = math.hypot(dx, dy)
@@ -728,9 +751,15 @@ def _contour_overlaps_hough_circle(cnt_bbox, hough_circles, overlap_thresh=0.6):
     """
     if not hough_circles:
         return False
+    # 验证 bbox 格式
+    if not isinstance(cnt_bbox, (tuple, list)) or len(cnt_bbox) != 4:
+        return False
     x1, y1, w1, h1 = cnt_bbox
     for circ in hough_circles:
-        x2, y2, w2, h2 = circ['bbox']
+        cbbox = circ.get('bbox')
+        if not isinstance(cbbox, (tuple, list)) or len(cbbox) != 4:
+            continue
+        x2, y2, w2, h2 = cbbox
         # 交集
         ix = max(x1, x2)
         iy = max(y1, y2)
@@ -759,9 +788,15 @@ def _contour_overlaps_hough_line(cnt_bbox, hough_lines, overlap_thresh=0.6):
     """
     if not hough_lines:
         return False
+    # 验证 bbox 格式
+    if not isinstance(cnt_bbox, (tuple, list)) or len(cnt_bbox) != 4:
+        return False
     x1, y1, w1, h1 = cnt_bbox
     for line in hough_lines:
-        x2, y2, w2, h2 = line['bbox']
+        lbbox = line.get('bbox')
+        if not isinstance(lbbox, (tuple, list)) or len(lbbox) != 4:
+            continue
+        x2, y2, w2, h2 = lbbox
         # 扩大直线 bbox 以考虑线宽
         pad = 10
         x2_e = x2 - pad
@@ -850,7 +885,15 @@ def detect_geometric_shapes(image_path, min_area=50, epsilon_ratio=0.02,
             gray, min_radius=max(10, min_area // 5), skeleton=skeleton,
             param2_base=circle_param2
         )
-        for cx, cy, r in circles:
+        # 验证每个圆的格式：必须是3个值的tuple/list (x, y, r)
+        valid_circles = []
+        for c in circles:
+            try:
+                if isinstance(c, (tuple, list)) and len(c) == 3:
+                    valid_circles.append((float(c[0]), float(c[1]), float(c[2])))
+            except (TypeError, ValueError, IndexError):
+                continue
+        for cx, cy, r in valid_circles:
             shape = {
                 'type': SHAPE_CIRCLE,
                 'center': (float(cx), float(cy)),
@@ -869,7 +912,20 @@ def detect_geometric_shapes(image_path, min_area=50, epsilon_ratio=0.02,
             gray, min_length=min_line_length, skeleton=skeleton,
             threshold=line_threshold
         )
-        for (x1, y1), (x2, y2) in lines:
+        # 验证每条直线的格式：必须是 ((x1,y1), (x2,y2))
+        valid_lines = []
+        for ln in lines:
+            try:
+                if (isinstance(ln, (tuple, list)) and len(ln) == 2
+                        and isinstance(ln[0], (tuple, list)) and len(ln[0]) == 2
+                        and isinstance(ln[1], (tuple, list)) and len(ln[1]) == 2):
+                    valid_lines.append(
+                        ((float(ln[0][0]), float(ln[0][1])),
+                         (float(ln[1][0]), float(ln[1][1])))
+                    )
+            except (TypeError, ValueError, IndexError):
+                continue
+        for (x1, y1), (x2, y2) in valid_lines:
             length = math.hypot(x2 - x1, y2 - y1)
             shape = {
                 'type': SHAPE_LINE,
@@ -1135,8 +1191,14 @@ def _shapes_overlap(s1, s2):
     """
     计算两个形状的重叠程度（基于bbox的IOU近似）
     """
-    x1, y1, w1, h1 = s1['bbox']
-    x2, y2, w2, h2 = s2['bbox']
+    bbox1 = s1.get('bbox')
+    bbox2 = s2.get('bbox')
+    if not isinstance(bbox1, (tuple, list)) or len(bbox1) != 4:
+        return 0.0
+    if not isinstance(bbox2, (tuple, list)) or len(bbox2) != 4:
+        return 0.0
+    x1, y1, w1, h1 = bbox1
+    x2, y2, w2, h2 = bbox2
 
     # 扩大bbox以考虑线宽
     pad = 5
@@ -1185,9 +1247,26 @@ def shape_to_polyline_points(shape):
         pts = shape['points']
         if pts and pts[0] != pts[-1]:
             pts = list(pts) + [pts[0]]
-        return pts
+        # 验证每个点的格式：必须是2个值的tuple/list
+        valid_pts = []
+        for p in pts:
+            try:
+                if isinstance(p, (tuple, list)) and len(p) == 2:
+                    valid_pts.append((float(p[0]), float(p[1])))
+            except (TypeError, ValueError, IndexError):
+                continue
+        return valid_pts
     else:  # line, polyline
-        return shape['points']
+        pts = shape['points']
+        # 验证每个点的格式：必须是2个值的tuple/list
+        valid_pts = []
+        for p in pts:
+            try:
+                if isinstance(p, (tuple, list)) and len(p) == 2:
+                    valid_pts.append((float(p[0]), float(p[1])))
+            except (TypeError, ValueError, IndexError):
+                continue
+        return valid_pts
 
 
 # ========== GT格式转换 ==========
