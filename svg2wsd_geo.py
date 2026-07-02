@@ -420,8 +420,8 @@ def shape_to_polyline_points(shape):
 
 def build_polyline_record(points, color_idx=b'\x01\xff\x00\x00', linewidth=DEFAULT_LINEWIDTH):
     """
-    构建WSD折线记录
-    格式和贝塞尔记录基本相同，flags最后一个字节是02（折线模式）
+    构建WSD折线记录（使用贝塞尔模式，控制点与端点重合即直线）
+    说明：WSD使用贝塞尔记录格式，当控制点与端点重合时即为直线段
     """
     n = len(points)
     rec = bytearray()
@@ -431,7 +431,7 @@ def build_polyline_record(points, color_idx=b'\x01\xff\x00\x00', linewidth=DEFAU
     rec += b'\x00\x00\x00\x00'
     rec += struct.pack('<I', linewidth)
     rec += bytes([0x00, 0x01, 0x00, 0x01])
-    rec += bytes([0x00, 0x00, 0x00, 0x02])  # 02 = 折线模式
+    rec += bytes([0x00, 0x00, 0x00, 0x03])  # 03 = 贝塞尔模式
     rec += bytes([0x47, 0x00]) + struct.pack('<H', n)
     for x, y in points:
         rec += struct.pack('<I', int(x) & 0xFFFFFFFF)
