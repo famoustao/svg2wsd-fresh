@@ -1237,11 +1237,30 @@ def circle_to_polyline(cx, cy, radius, segments=72):
 def shape_to_polyline_points(shape):
     """
     将任意形状转换为折线点列表
+    返回的所有点都是 (float, float) 格式
     """
     if shape['type'] == SHAPE_CIRCLE:
-        return circle_to_polyline(
-            shape['center'][0], shape['center'][1], shape['radius']
-        )
+        # 验证 center 和 radius
+        center = shape.get('center')
+        radius = shape.get('radius')
+        if not isinstance(center, (tuple, list)) or len(center) != 2:
+            return []
+        try:
+            cx = float(center[0])
+            cy = float(center[1])
+            r = float(radius)
+        except (TypeError, ValueError, IndexError):
+            return []
+        pts = circle_to_polyline(cx, cy, r)
+        # 确保所有返回的点都是 (float, float) 格式
+        valid_pts = []
+        for p in pts:
+            try:
+                if isinstance(p, (tuple, list)) and len(p) == 2:
+                    valid_pts.append((float(p[0]), float(p[1])))
+            except (TypeError, ValueError, IndexError):
+                continue
+        return valid_pts
     elif shape['type'] in (SHAPE_RECTANGLE, SHAPE_TRIANGLE, SHAPE_POLYGON):
         # 闭合多边形：首尾相连
         pts = shape['points']
@@ -1271,6 +1290,76 @@ def shape_to_polyline_points(shape):
 
 # ========== GT格式转换 ==========
 
+def _validate_point(p):
+    """
+    验证点是否为2元素的tuple/list，且元素为数字。
+
+    返回: (float, float) 或 None
+    """
+    try:
+        if isinstance(p, (tuple, list)) and len(p) == 2:
+            return (float(p[0]), float(p[1]))
+    except (TypeError, ValueError, IndexError):
+        pass
+    return None
+
+
+def _validate_points(pts):
+    """
+    验证点列表中的每个点，返回有效的 (float, float) 列表。
+    """
+    valid = []
+    if not pts:
+        return valid
+    for p in pts:
+        vp = _validate_point(p)
+        if vp is not None:
+            valid.append(vp)
+    return valid
+
+
+def _validate_shape(shape):
+    """
+    验证shape字典的必要字段是否存在且格式正确。
+
+    返回: (is_valid, reason)
+        is_valid: True 表示有效
+        reason: 无效原因字符串，有效时为 None
+    """
+    if not isinstance(shape, dict):
+        return False, "shape不是字典类型"
+
+    shape_type = shape.get('type')
+    if shape_type is None:
+        return False, "缺少type字段"
+
+    # 需要 points 字段的形状
+    if shape_type in (SHAPE_LINE, SHAPE_POLYLINE, SHAPE_RECTANGLE,
+                      SHAPE_TRIANGLE, SHAPE_POLYGON):
+        pts = shape.get('points')
+        if pts is None:
+            return False, f"形状类型{shape_type}缺少points字段"
+        if not isinstance(pts, (list, tuple)):
+            return False, f"形状类型{shape_type}的points不是列表"
+
+    # 需要 center 和 radius 的形状
+    if shape_type in (SHAPE_CIRCLE, SHAPE_ARC):
+        center = shape.get('center')
+        if center is None:
+            return False, f"形状类型{shape_type}缺少center字段"
+        if not isinstance(center, (tuple, list)) or len(center) != 2:
+            return False, f"形状类型{shape_type}的center格式错误"
+        radius = shape.get('radius')
+        if radius is None:
+            return False, f"形状类型{shape_type}缺少radius字段"
+        try:
+            float(radius)
+        except (TypeError, ValueError):
+            return False, f"形状类型{shape_type}的radius不是数字"
+
+    return True, None
+
+
 def _shape_to_gt_segs(shape, sx, sy, ox, oy, flip_v=False):
     """
     将检测到的形状转换为GT格式的段(seg)列表
@@ -1279,7 +1368,9 @@ def _shape_to_gt_segs(shape, sx, sy, ox, oy, flip_v=False):
         segs: 段字节列表
         is_closed: 是否闭合形状
     """
-    shape_type = shape['type']
+    shape_type = shape.get('type')
+    if shape_type is None:
+        return [], False
 
     def _transform(x, y):
         """坐标变换"""
@@ -1289,41 +1380,70 @@ def _shape_to_gt_segs(shape, sx, sy, ox, oy, flip_v=False):
 
     # 直线
     if shape_type == SHAPE_LINE:
-        pts = shape['points']
+        pts = _validate_points(shape.get('points', []))
         if len(pts) >= 2:
             wsd_pts = [_transform(p[0], p[1]) for p in pts]
             return [make_line_seg(wsd_pts)], False
+        return [], False
 
     # 圆：用4段贝塞尔近似
     elif shape_type == SHAPE_CIRCLE:
-        cx, cy = _transform(shape['center'][0], shape['center'][1])
-        r = shape['radius'] * abs(sx)
+        center = _validate_point(shape.get('center'))
+        if center is None:
+            return [], False
+        radius = shape.get('radius')
+        try:
+            r_val = float(radius)
+        except (TypeError, ValueError):
+            return [], False
+        cx, cy = _transform(center[0], center[1])
+        r = r_val * abs(sx)
         return make_circle_segs(cx, cy, r), True
 
     # 圆弧：用贝塞尔分段近似
     elif shape_type == SHAPE_ARC:
-        cx, cy = _transform(shape['center'][0], shape['center'][1])
-        r = shape['radius'] * abs(sx)
+        center = _validate_point(shape.get('center'))
+        if center is None:
+            return [], False
+        radius = shape.get('radius')
+        try:
+            r_val = float(radius)
+        except (TypeError, ValueError):
+            return [], False
+        cx, cy = _transform(center[0], center[1])
+        r = r_val * abs(sx)
         start_angle = shape.get('start_angle', 0)
         end_angle = shape.get('end_angle', math.pi)
+        try:
+            start_angle = float(start_angle)
+            end_angle = float(end_angle)
+        except (TypeError, ValueError):
+            return [], False
         segments = max(2, int(abs(end_angle - start_angle) / (math.pi / 4)))
         return make_arc_segs(cx, cy, r, start_angle, end_angle, segments), False
 
     # 闭合多边形类：矩形、三角形、多边形
     elif shape_type in (SHAPE_RECTANGLE, SHAPE_TRIANGLE, SHAPE_POLYGON):
-        pts = shape['points']
+        pts = _validate_points(shape.get('points', []))
+        if not pts:
+            return [], False
         wsd_pts = [_transform(p[0], p[1]) for p in pts]
         return [make_gon_seg(wsd_pts)], True
 
     # 折线（开放）
     elif shape_type == SHAPE_POLYLINE:
-        pts = shape['points']
+        pts = _validate_points(shape.get('points', []))
+        if not pts:
+            return [], False
         wsd_pts = [_transform(p[0], p[1]) for p in pts]
         return [make_line_seg(wsd_pts)], False
 
     # 默认：用折线表示
     pts = shape_to_polyline_points(shape)
-    wsd_pts = [_transform(x, y) for x, y in pts]
+    valid_pts = _validate_points(pts)
+    if not valid_pts:
+        return [], False
+    wsd_pts = [_transform(x, y) for x, y in valid_pts]
     closed = shape_type not in (SHAPE_LINE, SHAPE_POLYLINE, SHAPE_ARC)
     if closed:
         return [make_gon_seg(wsd_pts)], True
@@ -1438,6 +1558,12 @@ def convert_geo_to_wsd(input_path, wsd_path,
     # 为每个形状创建一个seglist（独立子路径，互不连接）
     seglists = []
     for i, shape in enumerate(shapes):
+        # 先验证shape的必要字段
+        is_valid, reason = _validate_shape(shape)
+        if not is_valid:
+            print(f"警告: 形状{i}验证失败，跳过 - {reason}")
+            continue
+
         try:
             segs, _ = _shape_to_gt_segs(
                 shape, sx, sy, ox, oy, flip_v
@@ -1498,6 +1624,7 @@ def convert_geo_to_wsd_multi(input_files, output_path, **kwargs):
 
     all_shapes_data = []
     total_files = len(input_files)
+    failed_files = []  # 收集失败的文件及原因
 
     for idx, in_file in enumerate(input_files):
         if progress_cb:
@@ -1506,74 +1633,94 @@ def convert_geo_to_wsd_multi(input_files, output_path, **kwargs):
                 int(10 + 50 * idx / total_files)
             )
 
-        shapes = detect_geometric_shapes(
-            in_file, min_area=min_area, epsilon_ratio=epsilon_ratio,
-            use_hough=use_hough, min_line_length=min_line_length,
-            line_threshold=line_threshold, circle_param2=circle_param2
-        )
+        try:
+            shapes = detect_geometric_shapes(
+                in_file, min_area=min_area, epsilon_ratio=epsilon_ratio,
+                use_hough=use_hough, min_line_length=min_line_length,
+                line_threshold=line_threshold, circle_param2=circle_param2
+            )
+        except Exception as e:
+            err_msg = f"形状检测失败: {e}"
+            print(f"警告: 文件 {in_file} {err_msg}")
+            failed_files.append((in_file, err_msg))
+            continue
 
         if not shapes:
             continue
 
-        all_polylines = [shape_to_polyline_points(s) for s in shapes]
+        try:
+            all_polylines = [shape_to_polyline_points(s) for s in shapes]
 
-        all_x = [x for poly in all_polylines for x, y in poly]
-        all_y = [y for poly in all_polylines for x, y in poly]
-        min_x, max_x = min(all_x), max(all_x)
-        min_y, max_y = min(all_y), max(all_y)
-        sw = max_x - min_x
-        sh = max_y - min_y
+            all_x = [x for poly in all_polylines for x, y in poly]
+            all_y = [y for poly in all_polylines for x, y in poly]
+            if not all_x or not all_y:
+                continue
 
-        canvas_range = CANVAS_MAX - CANVAS_MIN
+            min_x, max_x = min(all_x), max(all_x)
+            min_y, max_y = min(all_y), max(all_y)
+            sw = max_x - min_x
+            sh = max_y - min_y
 
-        if custom_size:
-            target_w, target_h = custom_size
-            sx = target_w / sw
-            sy = target_h / sh
-        else:
-            fit_scale = min(
-                (canvas_range - 2 * MARGIN) / sw,
-                (canvas_range - 2 * MARGIN) / sh
-            ) * 0.9
-            sx = sy = fit_scale
+            canvas_range = CANVAS_MAX - CANVAS_MIN
 
-        if flip_v:
-            sy = -sy
+            if custom_size:
+                target_w, target_h = custom_size
+                sx = target_w / sw
+                sy = target_h / sh
+            else:
+                fit_scale = min(
+                    (canvas_range - 2 * MARGIN) / sw,
+                    (canvas_range - 2 * MARGIN) / sh
+                ) * 0.9
+                sx = sy = fit_scale
 
-        ox = CANVAS_MIN + (canvas_range - sw * sx) / 2 - min_x * sx
-        if flip_v:
-            oy = CANVAS_MIN + (canvas_range + sh * abs(sy)) / 2 - min_y * sy
-        else:
-            oy = CANVAS_MIN + (canvas_range - sh * sy) / 2 - min_y * sy
+            if flip_v:
+                sy = -sy
 
-        # 颜色
-        if color_mode == 'rainbow':
-            areas = [s['area'] for s in shapes]
-            sorted_idx = sorted(range(len(shapes)), key=lambda i: -areas[i])
-            color_map = {}
-            for rank, i in enumerate(sorted_idx):
-                color_map[i] = rainbow_bgra(rank, len(sorted_idx))
-            shape_colors = [color_map[i] for i in range(len(shapes))]
-        elif color_mode == 'single':
-            bgra = hex_to_bgra(fill_color)
-            shape_colors = [bgra] * len(shapes)
-        else:
-            shape_colors = [hex_to_bgra('#000000')] * len(shapes)
+            ox = CANVAS_MIN + (canvas_range - sw * sx) / 2 - min_x * sx
+            if flip_v:
+                oy = CANVAS_MIN + (canvas_range + sh * abs(sy)) / 2 - min_y * sy
+            else:
+                oy = CANVAS_MIN + (canvas_range - sh * sy) / 2 - min_y * sy
 
-        # 构建seglists
-        seglists = []
-        for i, shape in enumerate(shapes):
-            try:
-                segs, _ = _shape_to_gt_segs(
-                    shape, sx, sy, ox, oy, flip_v
-                )
-                if segs:
-                    seglists.append(segs)
-            except Exception:
-                pass
+            # 颜色
+            if color_mode == 'rainbow':
+                areas = [s['area'] for s in shapes]
+                sorted_idx = sorted(range(len(shapes)), key=lambda i: -areas[i])
+                color_map = {}
+                for rank, i in enumerate(sorted_idx):
+                    color_map[i] = rainbow_bgra(rank, len(sorted_idx))
+                shape_colors = [color_map[i] for i in range(len(shapes))]
+            elif color_mode == 'single':
+                bgra = hex_to_bgra(fill_color)
+                shape_colors = [bgra] * len(shapes)
+            else:
+                shape_colors = [hex_to_bgra('#000000')] * len(shapes)
 
-        if seglists:
-            all_shapes_data.append((seglists, shape_colors[0]))
+            # 构建seglists
+            seglists = []
+            for i, shape in enumerate(shapes):
+                # 先验证shape的必要字段
+                is_valid, reason = _validate_shape(shape)
+                if not is_valid:
+                    print(f"警告: 文件{os.path.basename(in_file)} 形状{i}验证失败，跳过 - {reason}")
+                    continue
+                try:
+                    segs, _ = _shape_to_gt_segs(
+                        shape, sx, sy, ox, oy, flip_v
+                    )
+                    if segs:
+                        seglists.append(segs)
+                except Exception:
+                    pass
+
+            if seglists:
+                all_shapes_data.append((seglists, shape_colors[0]))
+        except Exception as e:
+            err_msg = f"转换失败: {e}"
+            print(f"警告: 文件 {in_file} {err_msg}")
+            failed_files.append((in_file, err_msg))
+            continue
 
     if not all_shapes_data:
         raise ValueError("没有可转换的内容")
@@ -1595,8 +1742,14 @@ def convert_geo_to_wsd_multi(input_files, output_path, **kwargs):
     if progress_cb:
         progress_cb(f"完成！共 {len(all_shapes_data)} 个画布", 100)
 
+    if failed_files:
+        print(f"警告: {len(failed_files)} 个文件处理失败")
+        for fpath, reason in failed_files:
+            print(f"  - {fpath}: {reason}")
+
     return {
         'canvases': len(all_shapes_data),
         'size': len(wsd_data),
         'files': total_files,
+        'failed_files': failed_files,
     }

@@ -76,14 +76,30 @@ def make_seg(tag, pts):
         pts: 点列表 [(x, y), ...]，坐标为WSD单位（int）
 
     Returns:
-        bytes: 段的二进制数据
+        bytes: 段的二进制数据；如果没有有效点则返回空bytes
     """
+    # 验证每个点的格式：必须是2元素的tuple/list
+    valid_pts = []
+    if pts:
+        for p in pts:
+            try:
+                if isinstance(p, (tuple, list)) and len(p) == 2:
+                    valid_pts.append(
+                        (int(round(float(p[0]))), int(round(float(p[1]))))
+                    )
+            except (TypeError, ValueError, IndexError):
+                continue
+
+    # 如果没有有效点，返回空bytes
+    if not valid_pts:
+        return b''
+
     b = bytearray()
     b += struct.pack('<H', tag)       # u16 tag
     b += bytes([0x00])                 # u8 mflag = 0 (无矩阵)
-    b += struct.pack('<H', len(pts))   # u16 npts
-    for x, y in pts:
-        b += struct.pack('<ii', int(round(x)), int(round(y)))
+    b += struct.pack('<H', len(valid_pts))  # u16 npts
+    for x, y in valid_pts:
+        b += struct.pack('<ii', x, y)
     return bytes(b)
 
 
