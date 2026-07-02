@@ -440,6 +440,17 @@ def build_polyline_record(points, color_idx=b'\x01\xff\x00\x00', linewidth=DEFAU
     return rec
 
 
+def _shape_to_bezier_record(shape, sx, sy, ox, oy, line_color, linewidth, flip_v=False):
+    """将检测到的形状转换为贝塞尔WSD记录（兼容模式，保证能打开）"""
+    pts = shape_to_polyline_points(shape)
+    wsd_pts = []
+    for x, y in pts:
+        tx = int(x * sx + ox)
+        ty = int(y * sy + oy)
+        wsd_pts.append((tx, ty))
+    return build_bezier_record(wsd_pts, line_color, linewidth)
+
+
 from wsd_records import (
     build_line_record,
     build_arc_record,
@@ -451,7 +462,7 @@ from wsd_records import (
 
 
 def _shape_to_native_record(shape, sx, sy, ox, oy, line_color, linewidth, flip_v=False):
-    """将检测到的形状转换为原生WSD几何记录"""
+    """将检测到的形状转换为原生WSD几何记录（实验性功能）"""
     shape_type = shape['type']
 
     def _transform(x, y):
@@ -460,54 +471,18 @@ def _shape_to_native_record(shape, sx, sy, ox, oy, line_color, linewidth, flip_v
         ty = y * sy + oy
         return (int(tx), int(ty))
 
-    if shape_type == SHAPE_LINE:
-        pts = shape['points']
-        if len(pts) >= 2:
-            x1, y1 = _transform(pts[0][0], pts[0][1])
-            x2, y2 = _transform(pts[-1][0], pts[-1][1])
-            return build_line_record(x1, y1, x2, y2, line_color, linewidth)
-
-    elif shape_type == SHAPE_CIRCLE:
-        cx, cy = _transform(shape['center'][0], shape['center'][1])
-        # 半径缩放
-        r = shape['radius'] * abs(sx)
-        return build_circle_record(cx, cy, r, line_color, linewidth)
-
-    elif shape_type == SHAPE_RECTANGLE:
-        # 矩形：用折线段记录（闭合）
-        pts = shape['points']
-        wsd_pts = [_transform(p[0], p[1]) for p in pts]
-        # 闭合：添加起点
-        if wsd_pts and wsd_pts[0] != wsd_pts[-1]:
-            wsd_pts.append(wsd_pts[0])
-        return build_polyline_native_record(wsd_pts, line_color, linewidth)
-
-    elif shape_type == SHAPE_TRIANGLE:
-        # 三角形：用折线段记录（闭合）
-        pts = shape['points']
-        wsd_pts = [_transform(p[0], p[1]) for p in pts]
-        if wsd_pts and wsd_pts[0] != wsd_pts[-1]:
-            wsd_pts.append(wsd_pts[0])
-        return build_polyline_native_record(wsd_pts, line_color, linewidth)
-
-    elif shape_type == SHAPE_POLYGON:
-        # 多边形：用折线段记录（闭合）
-        pts = shape['points']
-        wsd_pts = [_transform(p[0], p[1]) for p in pts]
-        if wsd_pts and wsd_pts[0] != wsd_pts[-1]:
-            wsd_pts.append(wsd_pts[0])
-        return build_polyline_native_record(wsd_pts, line_color, linewidth)
-
-    elif shape_type == SHAPE_POLYLINE:
-        # 折线：用折线段记录（开放）
-        pts = shape['points']
-        wsd_pts = [_transform(p[0], p[1]) for p in pts]
-        return build_polyline_native_record(wsd_pts, line_color, linewidth)
-
-    # 默认：用折线段
+    # 统一用折线段（模式2，颜色索引）输出，保证兼容性
+    # 原生直线和圆格式待进一步研究
     pts = shape_to_polyline_points(shape)
-    wsd_pts = [_transform(p[0], p[1]) for p in pts]
-    return build_polyline_native_record(wsd_pts, line_color, linewidth)
+    wsd_pts = [_transform(x, y) for x, y in pts]
+    # 闭合形状添加起点
+    if shape_type not in (SHAPE_LINE, SHAPE_POLYLINE, SHAPE_ARC):
+        if wsd_pts and wsd_pts[0] != wsd_pts[-1]:
+            wsd_pts.append(wsd_pts[0])
+    # 使用颜色索引格式（0x0000FF01 = 黑色）
+    # TODO: 研究彩色输出和原生直线/圆格式
+    color_idx = bytes([0x01, 0xff, 0x00, 0x00])
+    return build_polyline_native_record(wsd_pts, color_idx, linewidth)
 
 
 def convert_geo_to_wsd(input_path, wsd_path,
@@ -519,10 +494,15 @@ def convert_geo_to_wsd(input_path, wsd_path,
                        custom_size=None,
                        min_area=50,
                        epsilon_ratio=0.02,
+                       native_mode=False,
                        progress_cb=None):
     """
-    几何转换：识别图片中的几何图形，用WSD原生几何类型输出
+    几何转换：识别图片中的几何图形并转换为WSD
     支持：直线、圆、圆弧、矩形、三角形、多边形、折线
+
+    参数:
+        native_mode: 是否使用原生WSD几何类型（实验性功能，可能无法打开）
+                     False=贝塞尔模式（兼容，推荐）
     """
     if progress_cb:
         progress_cb("检测几何形状...", 0)
@@ -574,15 +554,15 @@ def convert_geo_to_wsd(input_path, wsd_path,
 
     # 分配颜色
     colors = []
-    if color_mode == 'rainbow':
-        for i in range(len(shapes)):
-            colors.append(rainbow_argb(i, len(shapes)))
-    elif color_mode == 'single':
-        argb = hex_to_argb(fill_color)
-        colors = [argb] * len(shapes)
+    if native_mode:
+        # 原生模式：暂时用颜色索引（黑色），待研究彩色输出
+        color_idx = bytes([0x01, 0xff, 0x00, 0x00])
+        colors = [color_idx] * len(shapes)
     else:
-        # 默认黑色
-        colors = [hex_to_argb('#000000')] * len(shapes)
+        # 贝塞尔模式：用颜色索引（黑色轮廓），保证兼容
+        # TODO: 研究贝塞尔模式彩色轮廓输出
+        color_idx = bytes([0x01, 0xff, 0x00, 0x00])
+        colors = [color_idx] * len(shapes)
 
     if progress_cb:
         progress_cb("构建WSD记录...", 60)
@@ -592,9 +572,14 @@ def convert_geo_to_wsd(input_path, wsd_path,
 
     for i, shape in enumerate(shapes):
         try:
-            rec = _shape_to_native_record(
-                shape, sx, sy, ox, oy, colors[i], linewidth, flip_v
-            )
+            if native_mode:
+                rec = _shape_to_native_record(
+                    shape, sx, sy, ox, oy, colors[i], linewidth, flip_v
+                )
+            else:
+                rec = _shape_to_bezier_record(
+                    shape, sx, sy, ox, oy, colors[i], linewidth, flip_v
+                )
             if rec:
                 records_data += rec
                 num_objects += 1
@@ -611,16 +596,21 @@ def convert_geo_to_wsd(input_path, wsd_path,
     with open(TEMPLATE_PATH, 'rb') as f:
         tpl = f.read()
 
-    file_header = tpl[:0xea26]
-    file_tail = tpl[-128:]
+    # 找尾部标记（和普通转换一致）
+    tail_start = None
+    for i in range(len(tpl) - 4, 0xea00, -1):
+        if tpl[i:i + 4] == b'\x52\xd2\x00\x00':
+            tail_start = i
+            break
+    if tail_start is None:
+        raise ValueError("找不到模板文件尾部标记")
 
     output = bytearray()
-    output += file_header
-    output += _CANVAS_HEADER
+    output += tpl[:0xea50]
     output += struct.pack('<I', num_objects)
     output += records_data
-    output += _CANVAS_TAIL
-    output += file_tail
+    output += bytes(8)
+    output += tpl[tail_start:]
 
     while len(output) % 8 != 0:
         output += b'\x00'
@@ -654,7 +644,16 @@ def convert_geo_to_wsd_multi(input_files, output_path, **kwargs):
         tpl = f.read()
 
     file_header = tpl[:0xea26]
-    file_tail = tpl[-128:]
+
+    # 找尾部标记
+    tail_start = None
+    for i in range(len(tpl) - 4, 0xea00, -1):
+        if tpl[i:i + 4] == b'\x52\xd2\x00\x00':
+            tail_start = i
+            break
+    if tail_start is None:
+        raise ValueError("找不到模板文件尾部标记")
+    file_tail = tpl[tail_start:]
 
     progress_cb = kwargs.get('progress_cb')
     linewidth = kwargs.get('linewidth', DEFAULT_LINEWIDTH)
@@ -664,6 +663,7 @@ def convert_geo_to_wsd_multi(input_files, output_path, **kwargs):
     custom_size = kwargs.get('custom_size')
     min_area = kwargs.get('min_area', 50)
     epsilon_ratio = kwargs.get('epsilon_ratio', 0.02)
+    native_mode = kwargs.get('native_mode', False)
 
     canvases_data = []
     total_files = len(input_files)
@@ -715,29 +715,34 @@ def convert_geo_to_wsd_multi(input_files, output_path, **kwargs):
 
         # 颜色
         colors = []
-        if color_mode == 'rainbow':
-            for i in range(len(shapes)):
-                colors.append(rainbow_argb(i, len(shapes)))
-        elif color_mode == 'single':
-            argb = hex_to_argb(fill_color)
-            colors = [argb] * len(shapes)
+        if native_mode:
+            color_idx = bytes([0x01, 0xff, 0x00, 0x00])
+            colors = [color_idx] * len(shapes)
         else:
-            colors = [hex_to_argb('#000000')] * len(shapes)
+            color_idx = bytes([0x01, 0xff, 0x00, 0x00])
+            colors = [color_idx] * len(shapes)
 
         records_data = bytearray()
         num_objects = 0
 
         for i, shape in enumerate(shapes):
             try:
-                rec = _shape_to_native_record(
-                    shape, sx, sy, ox, oy, colors[i], linewidth, flip_v
-                )
+                if native_mode:
+                    rec = _shape_to_native_record(
+                        shape, sx, sy, ox, oy, colors[i], linewidth, flip_v
+                    )
+                else:
+                    rec = _shape_to_bezier_record(
+                        shape, sx, sy, ox, oy, colors[i], linewidth, flip_v
+                    )
                 if rec:
                     records_data += rec
                     num_objects += 1
             except Exception:
                 pass
 
+        # 组装画布块: 对象数(4B) + 记录 + 8B零 + 尾部(从tail_start开始)
+        # 注意：多画布模式每个画布需要完整的canvas头+对象数+记录+canvas尾
         block = bytearray()
         block += _CANVAS_HEADER
         block += struct.pack('<I', num_objects)
