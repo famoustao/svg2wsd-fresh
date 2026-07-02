@@ -244,6 +244,199 @@ def _contour_midpoints(outer_pts, inner_pts):
         return mid_pts
 
 
+def _fit_circle_three_points(p1, p2, p3):
+    """
+    三点定圆：给定三个点，计算外接圆的圆心和半径
+
+    参数:
+        p1, p2, p3: (x, y) 三个点
+
+    返回:
+        (cx, cy, radius) 或 None（三点共线时返回None）
+    """
+    x1, y1 = p1
+    x2, y2 = p2
+    x3, y3 = p3
+
+    # 计算行列式
+    d = 2 * (x1 * (y2 - y3) + x2 * (y3 - y1) + x3 * (y1 - y2))
+    if abs(d) < 1e-10:
+        return None  # 三点共线或重合
+
+    # 圆心坐标
+    ux = ((x1 * x1 + y1 * y1) * (y2 - y3) +
+          (x2 * x2 + y2 * y2) * (y3 - y1) +
+          (x3 * x3 + y3 * y3) * (y1 - y2)) / d
+    uy = ((x1 * x1 + y1 * y1) * (x3 - x2) +
+          (x2 * x2 + y2 * y2) * (x1 - x3) +
+          (x3 * x3 + y3 * y3) * (x2 - x1)) / d
+
+    radius = math.hypot(ux - x1, uy - y1)
+    if radius < 1:
+        return None
+
+    return (float(ux), float(uy), float(radius))
+
+
+def _detect_arc_from_contour(cnt_pts, area, bbox,
+                              circularity_min=0.5, circularity_max=0.85,
+                              angle_min_deg=30, angle_max_deg=330,
+                              error_tolerance=0.15):
+    """
+    从轮廓点中检测圆弧
+
+    思路：
+    1. 从轮廓点中取起点、中点、终点，用三点定圆法拟合
+    2. 验证轮廓上的点到圆心的距离是否接近半径（误差<error_tolerance）
+    3. 计算圆弧的起始角度和结束角度
+    4. 验证覆盖角度在 angle_min_deg ~ angle_max_deg 之间
+
+    参数:
+        cnt_pts: 轮廓点列表 [(x, y), ...]
+        area: 轮廓面积
+        bbox: 外接矩形 (x, y, w, h)
+        circularity_min: 最小圆形度（默认0.5）
+        circularity_max: 最大圆形度（默认0.85）
+        angle_min_deg: 最小覆盖角度（度，默认30）
+        angle_max_deg: 最大覆盖角度（度，默认330）
+        error_tolerance: 半径误差容差（比例，默认0.15即15%）
+
+    返回:
+        圆弧形状字典 或 None（不符合条件时）
+    """
+    if not cnt_pts or len(cnt_pts) < 5:
+        return None
+
+    n = len(cnt_pts)
+
+    # 取起点、中点、终点
+    p_start = cnt_pts[0]
+    p_mid = cnt_pts[n // 2]
+    p_end = cnt_pts[-1]
+
+    # 三点定圆
+    circle = _fit_circle_three_points(p_start, p_mid, p_end)
+    if circle is None:
+        return None
+
+    cx, cy, r = circle
+    if r < 2:
+        return None
+
+    # 验证所有轮廓点到圆心的距离是否接近半径
+    distances = []
+    for px, py in cnt_pts:
+        d = math.hypot(px - cx, py - cy)
+        distances.append(d)
+
+    if not distances:
+        return None
+
+    avg_dist = sum(distances) / len(distances)
+    if avg_dist < 1:
+        return None
+
+    # 计算平均误差比例
+    error_sum = 0.0
+    for d in distances:
+        error_sum += abs(d - r) / r
+    avg_error = error_sum / len(distances)
+
+    if avg_error > error_tolerance:
+        return None
+
+    # 用平均距离作为更准确的半径
+    radius = avg_dist
+
+    # 计算起始角度和结束角度
+    start_angle = math.atan2(p_start[1] - cy, p_start[0] - cx)
+    end_angle = math.atan2(p_end[1] - cy, p_end[0] - cx)
+
+    # 计算圆弧覆盖的角度
+    # 需要判断旋转方向，计算实际扫过的角度
+    # 方法：计算中点角度，判断方向
+    mid_angle = math.atan2(p_mid[1] - cy, p_mid[0] - cx)
+
+    # 归一化角度差，确定旋转方向
+    def _angle_diff(a, b):
+        """从a到b的有向角度差（-pi ~ pi）"""
+        diff = b - a
+        while diff > math.pi:
+            diff -= 2 * math.pi
+        while diff < -math.pi:
+            diff += 2 * math.pi
+        return diff
+
+    diff1 = _angle_diff(start_angle, mid_angle)
+    diff2 = _angle_diff(mid_angle, end_angle)
+
+    # 如果两个差值同号，说明方向一致
+    if diff1 * diff2 > 0:
+        # 方向一致，总角度 = start -> end 的有向差
+        sweep = _angle_diff(start_angle, end_angle)
+    else:
+        # 方向不一致，取较大的那个弧
+        total_diff = _angle_diff(start_angle, end_angle)
+        # 用多数点来判断方向
+        # 计算轮廓点的角度累加方向
+        prev_angle = start_angle
+        cw_sum = 0.0
+        ccw_sum = 0.0
+        for i in range(1, min(n, 50)):
+            px, py = cnt_pts[i * n // min(n, 50) if n > 50 else i]
+            # 采样点
+            idx = int(i * n / 50) if n > 50 else i
+            if idx >= n:
+                idx = n - 1
+            px, py = cnt_pts[idx]
+            cur_angle = math.atan2(py - cy, px - cx)
+            d = _angle_diff(prev_angle, cur_angle)
+            if d > 0:
+                ccw_sum += d
+            else:
+                cw_sum += abs(d)
+            prev_angle = cur_angle
+
+        if ccw_sum > cw_sum:
+            # 逆时针
+            sweep = _angle_diff(start_angle, end_angle)
+            if sweep < 0:
+                sweep += 2 * math.pi
+        else:
+            # 顺时针
+            sweep = _angle_diff(start_angle, end_angle)
+            if sweep > 0:
+                sweep -= 2 * math.pi
+
+    sweep_deg = abs(sweep) * 180 / math.pi
+
+    # 验证覆盖角度范围
+    if sweep_deg < angle_min_deg or sweep_deg > angle_max_deg:
+        return None
+
+    # 计算圆形度（用外接圆面积和轮廓面积的比）
+    x, y, w, h = bbox
+    enclosing_circle_area = math.pi * radius * radius
+    circularity = area / enclosing_circle_area if enclosing_circle_area > 0 else 0
+
+    # 验证圆形度范围
+    if circularity < circularity_min or circularity > circularity_max:
+        return None
+
+    # 计算圆弧面积（扇形面积近似）
+    arc_area = area
+
+    return {
+        'type': SHAPE_ARC,
+        'center': (float(cx), float(cy)),
+        'radius': float(radius),
+        'start_angle': float(start_angle),
+        'end_angle': float(end_angle),
+        'area': float(arc_area),
+        'bbox': bbox,
+    }
+
+
 def _nms_circles(circles, overlap_thresh=0.15):
     """
     非极大值抑制去除重复圆
@@ -1044,7 +1237,7 @@ def detect_geometric_shapes(image_path, min_area=50, epsilon_ratio=0.02,
                 shape_type = SHAPE_RECTANGLE
                 extra['points'] = mid_pts if mid_pts else outer_pts
             elif n_outer > 6 and n_inner > 6:
-                # 可能是圆 —— 如果霍夫已检测到则跳过
+                # 可能是圆或圆弧 —— 如果霍夫已检测到圆则跳过
                 if use_hough and _contour_overlaps_hough_circle(bbox, hough_circles, 0.5):
                     processed.add(i)
                     processed.add(child)
@@ -1054,11 +1247,31 @@ def detect_geometric_shapes(image_path, min_area=50, epsilon_ratio=0.02,
                 avg_radius = (radius_outer + radius_inner) / 2
                 # 检查圆度
                 circularity = area / (math.pi * radius_outer * radius_outer)
-                if circularity > 0.6:
+                if circularity > circularity_threshold:
+                    # 圆形度高 → 完整圆
                     shape_type = SHAPE_CIRCLE
                     extra['center'] = (float(cx), float(cy))
                     extra['radius'] = float(avg_radius)
                     extra['points'] = mid_pts
+                elif circularity >= 0.5 and circularity <= circularity_threshold:
+                    # 圆形度中等 → 尝试圆弧检测（使用中心线点）
+                    arc_pts = mid_pts if mid_pts else outer_pts
+                    arc = _detect_arc_from_contour(
+                        arc_pts, area, bbox,
+                        circularity_min=0.5,
+                        circularity_max=circularity_threshold,
+                        angle_min_deg=30, angle_max_deg=330,
+                        error_tolerance=0.15
+                    )
+                    if arc is not None:
+                        shape_type = SHAPE_ARC
+                        extra['center'] = arc['center']
+                        extra['radius'] = arc['radius']
+                        extra['start_angle'] = arc['start_angle']
+                        extra['end_angle'] = arc['end_angle']
+                        extra['points'] = arc_pts
+                    else:
+                        extra['points'] = mid_pts if mid_pts else outer_pts
                 else:
                     extra['points'] = mid_pts if mid_pts else outer_pts
             else:
@@ -1073,6 +1286,9 @@ def detect_geometric_shapes(image_path, min_area=50, epsilon_ratio=0.02,
             if 'center' in extra:
                 shape['center'] = extra['center']
                 shape['radius'] = extra['radius']
+            if 'start_angle' in extra:
+                shape['start_angle'] = extra['start_angle']
+                shape['end_angle'] = extra['end_angle']
             shapes.append(shape)
             processed.add(i)
             processed.add(child)
@@ -1154,6 +1370,22 @@ def detect_geometric_shapes(image_path, min_area=50, epsilon_ratio=0.02,
                         })
                         processed.add(i)
                         continue
+                    elif circularity >= 0.5 and circularity <= circularity_threshold:
+                        # 圆形度中等 → 尝试圆弧检测
+                        # 使用原始轮廓点（而非近似点）进行三点拟合，精度更高
+                        raw_pts = [(float(p[0][0]), float(p[0][1])) for p in cnt]
+                        arc = _detect_arc_from_contour(
+                            raw_pts, area, bbox,
+                            circularity_min=0.5,
+                            circularity_max=circularity_threshold,
+                            angle_min_deg=30, angle_max_deg=330,
+                            error_tolerance=0.15
+                        )
+                        if arc is not None:
+                            arc['points'] = pts
+                            shapes.append(arc)
+                            processed.add(i)
+                            continue
 
                 # 多边形分类
                 if n == 3:
@@ -1611,6 +1843,9 @@ def convert_geo_to_wsd(input_path, wsd_path,
         elif color_mode == 'single':
             bgra = hex_to_bgra(fill_color)
             colors = [bgra] * len(shapes)
+        elif color_mode == 'none':
+            # 无填充：用黑色线条
+            colors = [hex_to_bgra('#000000')] * len(shapes)
         else:
             # 默认黑色
             colors = [hex_to_bgra('#000000')] * len(shapes)
@@ -1782,6 +2017,8 @@ def convert_geo_to_wsd_multi(input_files, output_path, **kwargs):
             elif color_mode == 'single':
                 bgra = hex_to_bgra(fill_color)
                 shape_colors = [bgra] * len(shapes)
+            elif color_mode == 'none':
+                shape_colors = [hex_to_bgra('#000000')] * len(shapes)
             else:
                 shape_colors = [hex_to_bgra('#000000')] * len(shapes)
 

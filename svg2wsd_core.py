@@ -420,7 +420,290 @@ def _parse_svg_file(svg_path):
     return all_subpaths, all_colors, bbox
 
 
-# ========== 图片矢量化 ==========
+# ========== 图片彩色矢量化 ==========
+
+def _median_cut_quantize(img_array, n_colors=16):
+    """
+    使用中位切分法(Median Cut)对图片进行颜色量化（直方图加速版）
+
+    算法优化：
+    1. 先将颜色量化到32级/通道（32768种可能颜色），建立直方图
+    2. 对直方图进行中位切分，大幅减少排序开销
+    3. 最后将每个桶的平均颜色分配给原始像素
+
+    返回: (palette, labels)
+        palette: 调色板数组 (n_colors, 3) uint8
+        labels: 每个像素的颜色索引 (h, w) int
+    """
+    import numpy as np
+
+    h, w = img_array.shape[:2]
+    pixels = img_array.reshape(-1, 3)
+
+    # 量化到32级/通道 (5位每通道)，减少颜色总数
+    levels = 32
+    step = 256 // levels
+    quantized = (pixels // step).astype(np.int32)
+    q_indices = quantized[:, 0] * levels * levels + quantized[:, 1] * levels + quantized[:, 2]
+
+    # 建立直方图
+    hist = np.bincount(q_indices, minlength=levels * levels * levels)
+    # 获取非空颜色的索引和计数
+    nonzero = np.nonzero(hist)[0]
+    counts = hist[nonzero]
+    # 转换回RGB
+    color_r = (nonzero // (levels * levels)).astype(np.uint8) * step + step // 2
+    color_g = ((nonzero // levels) % levels).astype(np.uint8) * step + step // 2
+    color_b = (nonzero % levels).astype(np.uint8) * step + step // 2
+    colors = np.stack([color_r, color_g, color_b], axis=1)
+
+    # 中位切分：初始桶包含所有非空颜色的索引
+    buckets = [(np.arange(len(colors)), counts.copy())]
+
+    while len(buckets) < n_colors:
+        # 找到范围最大的桶
+        max_range = -1
+        max_bucket_idx = -1
+        max_channel = -1
+
+        for bi, (color_idx, cnt) in enumerate(buckets):
+            if len(color_idx) < 2:
+                continue
+            bucket_colors = colors[color_idx]
+            ranges = np.max(bucket_colors, axis=0) - np.min(bucket_colors, axis=0)
+            channel = np.argmax(ranges)
+            r = ranges[channel]
+            if r > max_range:
+                max_range = r
+                max_bucket_idx = bi
+                max_channel = channel
+
+        if max_bucket_idx < 0 or max_range < step:
+            break
+
+        # 按范围最大的通道排序
+        color_idx, cnt = buckets[max_bucket_idx]
+        bucket_colors = colors[color_idx]
+        sorted_order = np.argsort(bucket_colors[:, max_channel])
+        sorted_idx = color_idx[sorted_order]
+        sorted_counts = cnt[sorted_order]
+
+        # 找到像素数中位数位置
+        total_pixels = np.sum(sorted_counts)
+        half = total_pixels // 2
+        cumsum = np.cumsum(sorted_counts)
+        mid_pos = np.searchsorted(cumsum, half)
+        mid_pos = max(1, min(mid_pos, len(sorted_idx) - 1))
+
+        # 分割
+        idx1 = sorted_idx[:mid_pos]
+        cnt1 = sorted_counts[:mid_pos]
+        idx2 = sorted_idx[mid_pos:]
+        cnt2 = sorted_counts[mid_pos:]
+
+        buckets.pop(max_bucket_idx)
+        buckets.append((idx1, cnt1))
+        buckets.append((idx2, cnt2))
+
+    # 计算每个桶的平均颜色（按像素数加权）
+    n_final = len(buckets)
+    palette = np.zeros((n_final, 3), dtype=np.uint8)
+
+    for bi, (color_idx, cnt) in enumerate(buckets):
+        if len(color_idx) == 0:
+            continue
+        bucket_colors = colors[color_idx].astype(np.float64)
+        total = np.sum(cnt)
+        if total > 0:
+            avg = np.average(bucket_colors, weights=cnt, axis=0)
+            palette[bi] = np.clip(avg, 0, 255).astype(np.uint8)
+
+    # 为每个量化颜色分配调色板索引
+    color_to_palette = np.zeros(levels * levels * levels, dtype=np.int32)
+    for bi, (color_idx, cnt) in enumerate(buckets):
+        for ci in color_idx:
+            color_to_palette[nonzero[ci]] = bi
+
+    # 生成标签
+    labels = color_to_palette[q_indices].reshape(h, w)
+
+    return palette, labels
+
+
+def _quantize_colors(img_array, n_colors=16):
+    """
+    颜色量化（优先使用中位切分法，效果更好）
+    返回: (quantized_img, palette, labels)
+    """
+    import numpy as np
+
+    h, w = img_array.shape[:2]
+
+    # 使用中位切分法
+    palette, labels = _median_cut_quantize(img_array, n_colors=n_colors)
+    quantized_img = palette[labels]
+
+    return quantized_img, palette, labels
+
+
+def _vectorize_mask(bw_mask, turdsize=2, alphamax=1.0):
+    """
+    对二值掩码进行potrace矢量化，返回贝塞尔子路径列表
+    """
+    import potrace
+
+    bmp = potrace.Bitmap(bw_mask)
+    path = bmp.trace(
+        alphamax=alphamax,
+        turdsize=turdsize,
+        turnpolicy=potrace.POTRACE_TURNPOLICY_MINORITY
+    )
+
+    subpaths = []
+    for curve in path.curves:
+        sp = []
+        start = (curve.start_point.x, curve.start_point.y)
+        sp.append(start)
+        for seg in curve:
+            if hasattr(seg, 'c1'):
+                # 贝塞尔曲线段
+                c1 = (seg.c1.x, seg.c1.y)
+                c2 = (seg.c2.x, seg.c2.y)
+                end = (seg.end_point.x, seg.end_point.y)
+                sp.append(c1)
+                sp.append(c2)
+                sp.append(end)
+            elif hasattr(seg, 'c'):
+                # CornerSegment (直线)
+                corner = (seg.c.x, seg.c.y)
+                end = (seg.end_point.x, seg.end_point.y)
+                p0 = sp[-1] if sp else start
+                # 第一段: p0 -> corner
+                c1a = (p0[0] + (corner[0]-p0[0])/3, p0[1] + (corner[1]-p0[1])/3)
+                c2a = (p0[0] + (corner[0]-p0[0])*2/3, p0[1] + (corner[1]-p0[1])*2/3)
+                sp.append(c1a)
+                sp.append(c2a)
+                sp.append(corner)
+                # 第二段: corner -> end
+                c1b = (corner[0] + (end[0]-corner[0])/3, corner[1] + (end[1]-corner[1])/3)
+                c2b = (corner[0] + (end[0]-corner[0])*2/3, corner[1] + (end[1]-corner[1])*2/3)
+                sp.append(c1b)
+                sp.append(c2b)
+                sp.append(end)
+
+        # 闭合
+        if len(sp) > 1 and sp[0] != sp[-1]:
+            end = sp[-1]
+            p0 = sp[0]
+            c1 = (end[0] + (p0[0]-end[0])/3, end[1] + (p0[1]-end[1])/3)
+            c2 = (end[0] + (p0[0]-end[0])*2/3, end[1] + (p0[1]-end[1])*2/3)
+            sp.append(c1)
+            sp.append(c2)
+            sp.append(p0)
+
+        if len(sp) >= 4:
+            subpaths.append(sp)
+
+    return subpaths
+
+
+def _parse_image_file_color(img_path, turdsize=2, n_colors=32, alphamax=1.0):
+    """
+    将彩色图片矢量化为带颜色的贝塞尔路径
+    使用中位切分颜色量化 + 分区域potrace矢量化
+    每个颜色区域用贝塞尔曲线形成封闭区间，填充图片原本的颜色
+
+    返回: (子路径列表, 颜色列表, 边界框)
+    """
+    from PIL import Image
+    import numpy as np
+
+    # 读取图片
+    img = Image.open(img_path).convert('RGB')
+    orig_w, orig_h = img.size
+
+    # 如果图片太大，先缩小用于颜色量化（加快量化速度）
+    quant_max_dim = 300
+    w, h = img.size
+    if max(w, h) > quant_max_dim:
+        scale_q = quant_max_dim / max(w, h)
+        qw = int(w * scale_q)
+        qh = int(h * scale_q)
+        small_img = img.resize((qw, qh), Image.LANCZOS)
+        small_arr = np.array(small_img)
+    else:
+        small_arr = np.array(img)
+        scale_q = 1.0
+
+    # 颜色量化（在小图上进行，速度更快）
+    quantized_small, palette, labels_small = _quantize_colors(small_arr, n_colors=n_colors)
+
+    # 如果图片被缩小了，将量化结果放大回原图尺寸
+    if scale_q < 1.0:
+        # 直接在原图上分配颜色（使用最近邻）
+        small_labels_img = Image.fromarray(labels_small.astype(np.uint8), mode='L')
+        big_labels_img = small_labels_img.resize((orig_w, orig_h), Image.NEAREST)
+        labels = np.array(big_labels_img).astype(np.int32)
+    else:
+        labels = labels_small
+
+    # 矢量化时的图片尺寸（平衡质量和速度）
+    vector_max_dim = 600
+    if max(orig_w, orig_h) > vector_max_dim:
+        scale_v = vector_max_dim / max(orig_w, orig_h)
+        vw = int(orig_w * scale_v)
+        vh = int(orig_h * scale_v)
+        # 标签图也缩小
+        labels_img = Image.fromarray(labels.astype(np.uint8), mode='L')
+        labels_img = labels_img.resize((vw, vh), Image.NEAREST)
+        labels = np.array(labels_img).astype(np.int32)
+    else:
+        vw, vh = orig_w, orig_h
+        scale_v = 1.0
+
+    # 计算每种颜色的区域面积，按面积从大到小处理
+    color_areas = []
+    for i in range(len(palette)):
+        mask = (labels == i)
+        area = np.sum(mask)
+        if area > turdsize * 20:  # 忽略太小的区域
+            color_areas.append((i, area))
+
+    # 按面积从大到小排序
+    color_areas.sort(key=lambda x: -x[1])
+
+    all_subpaths = []
+    all_colors = []
+
+    for color_idx, area in color_areas:
+        # 创建该颜色的二值掩码
+        bw_mask = (labels == color_idx)
+
+        # 矢量化该区域
+        subpaths = _vectorize_mask(bw_mask, turdsize=turdsize, alphamax=alphamax)
+
+        if subpaths:
+            # 获取该颜色的十六进制表示
+            r, g, b = palette[color_idx]
+            color_hex = f'#{int(r):02x}{int(g):02x}{int(b):02x}'
+
+            for sp in subpaths:
+                all_subpaths.append(sp)
+                all_colors.append(color_hex)
+
+    if not all_subpaths:
+        # 如果彩色矢量化失败，回退到黑白矢量化
+        return _parse_image_file(img_path, threshold=128, turdsize=turdsize, alphamax=alphamax)
+
+    # 计算边界框
+    all_x = [x for sp in all_subpaths for x, y in sp]
+    all_y = [y for sp in all_subpaths for x, y in sp]
+    bbox = (min(all_x), min(all_y), max(all_x), max(all_y))
+
+    return all_subpaths, all_colors, bbox
+
+
+# ========== 图片矢量化（黑白）==========
 
 def _parse_image_file(img_path, threshold=128, turdsize=2, alphamax=1.0):
     """
@@ -518,7 +801,8 @@ def _parse_image_file(img_path, threshold=128, turdsize=2, alphamax=1.0):
 
 # ========== 统一入口 ==========
 
-def parse_input_file(file_path, img_threshold=128, img_turdsize=2):
+def parse_input_file(file_path, img_threshold=128, img_turdsize=2,
+                     img_color=False, img_n_colors=16):
     """
     统一解析输入文件（SVG或图片）
     返回: (subpaths, colors, bbox, file_type)
@@ -529,9 +813,16 @@ def parse_input_file(file_path, img_threshold=128, img_turdsize=2):
         subpaths, colors, bbox = _parse_svg_file(file_path)
         return subpaths, colors, bbox, 'svg'
     elif ext in IMAGE_EXTENSIONS:
-        subpaths, colors, bbox = _parse_image_file(
-            file_path, threshold=img_threshold, turdsize=img_turdsize
-        )
+        if img_color:
+            # 彩色矢量化模式
+            subpaths, colors, bbox = _parse_image_file_color(
+                file_path, turdsize=img_turdsize, n_colors=img_n_colors
+            )
+        else:
+            # 黑白矢量化模式
+            subpaths, colors, bbox = _parse_image_file(
+                file_path, threshold=img_threshold, turdsize=img_turdsize
+            )
         return subpaths, colors, bbox, 'image'
     else:
         # 尝试当作SVG处理
@@ -540,9 +831,14 @@ def parse_input_file(file_path, img_threshold=128, img_turdsize=2):
             return subpaths, colors, bbox, 'svg'
         except:
             try:
-                subpaths, colors, bbox = _parse_image_file(
-                    file_path, threshold=img_threshold, turdsize=img_turdsize
-                )
+                if img_color:
+                    subpaths, colors, bbox = _parse_image_file_color(
+                        file_path, turdsize=img_turdsize, n_colors=img_n_colors
+                    )
+                else:
+                    subpaths, colors, bbox = _parse_image_file(
+                        file_path, threshold=img_threshold, turdsize=img_turdsize
+                    )
                 return subpaths, colors, bbox, 'image'
             except:
                 raise ValueError(f"不支持的文件格式: {ext}")
@@ -597,6 +893,7 @@ def convert_to_wsd(input_path, wsd_path, color_mode='rainbow',
                    linewidth=DEFAULT_LINEWIDTH, fill_color='#3366ff',
                    outline=True, flip_v=False, custom_size=None,
                    img_threshold=128, img_turdsize=2,
+                   img_color=False, img_n_colors=16,
                    progress_cb=None):
     """
     将SVG或图片转换为WSD
@@ -604,7 +901,7 @@ def convert_to_wsd(input_path, wsd_path, color_mode='rainbow',
     参数:
         input_path: 输入文件路径 (SVG, PNG, JPG, BMP等)
         wsd_path: 输出WSD文件路径
-        color_mode: 颜色模式 ('rainbow', 'single', 'svg')
+        color_mode: 颜色模式 ('rainbow', 'single', 'svg', 'none')
         linewidth: 轮廓线宽 (WSD单位, 40=0.1mm)
         fill_color: 单色填充时的颜色 (#rrggbb)
         outline: 是否绘制黑色轮廓
@@ -612,6 +909,8 @@ def convert_to_wsd(input_path, wsd_path, color_mode='rainbow',
         custom_size: (width, height) 自定义输出大小(WSD单位)
         img_threshold: 图片二值化阈值 (0-255)
         img_turdsize: 图片矢量化时忽略的最小区域(像素)
+        img_color: 是否使用彩色矢量化 (仅图片)
+        img_n_colors: 彩色矢量化时的颜色数量
         progress_cb: 进度回调函数(msg, percent)
     """
 
@@ -630,7 +929,8 @@ def convert_to_wsd(input_path, wsd_path, color_mode='rainbow',
 
     # 统一解析
     all_subpaths, all_colors, bbox, file_type = parse_input_file(
-        input_path, img_threshold=img_threshold, img_turdsize=img_turdsize
+        input_path, img_threshold=img_threshold, img_turdsize=img_turdsize,
+        img_color=img_color, img_n_colors=img_n_colors
     )
 
     if not all_subpaths:
@@ -680,6 +980,9 @@ def convert_to_wsd(input_path, wsd_path, color_mode='rainbow',
         fill_colors = [bgr] * len(all_subpaths)
     elif color_mode == 'svg':
         fill_colors = [hex_to_bgr(c) for c in all_colors]
+    elif color_mode == 'none':
+        # 无填充：颜色置空，后面只绘制轮廓
+        fill_colors = [None] * len(all_subpaths)
     else:
         raise ValueError(f"未知颜色模式: {color_mode}")
 
@@ -694,9 +997,12 @@ def convert_to_wsd(input_path, wsd_path, color_mode='rainbow',
         if len(sp) < 2:
             continue
         wsd_sp = [(int(x*sx+ox), int(y*sy+oy)) for x, y in sp]
-        records_data += build_fill_record(wsd_sp, fill_colors[i])
-        num_objects += 1
-        if outline:
+        # 无填充模式下跳过填充记录
+        if fill_colors[i] is not None:
+            records_data += build_fill_record(wsd_sp, fill_colors[i])
+            num_objects += 1
+        # 轮廓：无填充模式下也绘制轮廓
+        if outline or fill_colors[i] is None:
             records_data += build_bezier_record(wsd_sp, black_idx, linewidth)
             num_objects += 1
         if progress_cb and i % 10 == 0:
@@ -819,6 +1125,7 @@ def convert_to_wsd_multi(input_files, output_path, color_mode='rainbow',
                          linewidth=DEFAULT_LINEWIDTH, fill_color='#3366ff',
                          outline=True, flip_v=False, custom_size=None,
                          img_threshold=128, img_turdsize=2,
+                         img_color=False, img_n_colors=16,
                          progress_cb=None):
     """
     将多个输入文件合并到同一个WSD的不同画布
@@ -861,7 +1168,8 @@ def convert_to_wsd_multi(input_files, output_path, color_mode='rainbow',
                         int(10 + 50 * idx / total_files))
 
         subpaths, svg_colors, bbox, ftype = parse_input_file(
-            in_file, img_threshold=img_threshold, img_turdsize=img_turdsize
+            in_file, img_threshold=img_threshold, img_turdsize=img_turdsize,
+            img_color=img_color, img_n_colors=img_n_colors
         )
 
         if not subpaths:
@@ -881,6 +1189,8 @@ def convert_to_wsd_multi(input_files, output_path, color_mode='rainbow',
             colors = [bgr] * len(subpaths)
         elif color_mode == 'svg':
             colors = [hex_to_bgr(c) for c in svg_colors]
+        elif color_mode == 'none':
+            colors = [None] * len(subpaths)
 
         block, obj_count = _build_canvas_block(
             subpaths, colors, color_mode, linewidth, outline, flip_v, custom_size

@@ -40,8 +40,11 @@ class Image2WSDApp:
 
         self.convert_mode = tk.StringVar(value='normal')  # normal / geometric
         self.output_mode = tk.StringVar(value='separate')  # separate / merged
-        self.color_mode = tk.StringVar(value='rainbow')
+        self.color_mode = tk.StringVar(value='none')  # 默认无色填充
         self.fill_color = tk.StringVar(value='#3366ff')
+        self._preview_update_job = None  # 防抖定时器
+        self._geo_update_job = None  # 几何参数防抖定时器
+        self._img_update_job = None  # 图片参数防抖定时器
         self.linewidth = tk.IntVar(value=80)
         self.outline = tk.BooleanVar(value=True)
         self.flip_v = tk.BooleanVar(value=False)
@@ -52,6 +55,8 @@ class Image2WSDApp:
         # 图片矢量化参数
         self.img_threshold = tk.IntVar(value=128)
         self.img_turdsize = tk.IntVar(value=2)
+        self.img_color = tk.BooleanVar(value=False)  # 彩色矢量化
+        self.img_n_colors = tk.IntVar(value=32)  # 颜色数量
 
         self._build_ui()
 
@@ -107,25 +112,50 @@ class Image2WSDApp:
         self.geo_circle_sensitivity = tk.IntVar(value=50)
 
         self.geo_frame = ttk.LabelFrame(left, text="几何转换参数")
+
+        # 辅助函数：创建带+-按钮的滑块
+        def _make_slider_row(parent, label_text, var, from_, to, step, val_fmt, width=10):
+            row = ttk.Frame(parent)
+            row.pack(fill='x', padx=8, pady=2)
+            ttk.Label(row, text=label_text, width=width).pack(side='left')
+
+            # - 按钮
+            def _dec(*args):
+                cur = var.get()
+                new = max(from_, cur - step)
+                var.set(new)
+                self._schedule_geo_update()
+
+            btn_minus = ttk.Button(row, text="-", width=2, command=_dec)
+            btn_minus.pack(side='left')
+
+            # 滑块
+            scale = ttk.Scale(row, from_=from_, to=to, orient='horizontal',
+                              variable=var, command=self._on_geo_param_change)
+            scale.pack(side='left', fill='x', expand=True, padx=3)
+
+            # + 按钮
+            def _inc(*args):
+                cur = var.get()
+                new = min(to, cur + step)
+                var.set(new)
+                self._schedule_geo_update()
+
+            btn_plus = ttk.Button(row, text="+", width=2, command=_inc)
+            btn_plus.pack(side='left')
+
+            # 数值标签
+            val_label = ttk.Label(row, text=val_fmt.format(var.get()), width=8)
+            val_label.pack(side='left')
+            return scale, val_label
+
         # 最小面积
-        min_area_row = ttk.Frame(self.geo_frame)
-        min_area_row.pack(fill='x', padx=8, pady=4)
-        ttk.Label(min_area_row, text="最小面积:", width=10).pack(side='left')
-        self.min_area_scale = ttk.Scale(min_area_row, from_=5, to=500, orient='horizontal',
-                                        variable=self.geo_min_area, command=self._on_geo_param_change)
-        self.min_area_scale.pack(side='left', fill='x', expand=True, padx=5)
-        self.min_area_val_label = ttk.Label(min_area_row, text="50px", width=8)
-        self.min_area_val_label.pack(side='left')
+        self.min_area_scale, self.min_area_val_label = _make_slider_row(
+            self.geo_frame, "最小面积:", self.geo_min_area, 5, 500, 5, "{}px")
 
         # 近似精度
-        eps_row = ttk.Frame(self.geo_frame)
-        eps_row.pack(fill='x', padx=8, pady=(0, 4))
-        ttk.Label(eps_row, text="近似精度:", width=10).pack(side='left')
-        self.eps_scale = ttk.Scale(eps_row, from_=0.005, to=0.05, orient='horizontal',
-                                   variable=self.geo_epsilon, command=self._on_geo_param_change)
-        self.eps_scale.pack(side='left', fill='x', expand=True, padx=5)
-        self.eps_val_label = ttk.Label(eps_row, text="0.020", width=8)
-        self.eps_val_label.pack(side='left')
+        self.eps_scale, self.eps_val_label = _make_slider_row(
+            self.geo_frame, "近似精度:", self.geo_epsilon, 0.005, 0.05, 0.002, "{:.3f}")
 
         # 启用霍夫变换
         hough_row = ttk.Frame(self.geo_frame)
@@ -134,34 +164,16 @@ class Image2WSDApp:
                         command=self._on_geo_param_change).pack(side='left')
 
         # 最小直线长度
-        mll_row = ttk.Frame(self.geo_frame)
-        mll_row.pack(fill='x', padx=8, pady=2)
-        ttk.Label(mll_row, text="最小直线长度:", width=12).pack(side='left')
-        self.mll_scale = ttk.Scale(mll_row, from_=10, to=200, orient='horizontal',
-                                   variable=self.geo_min_line_length, command=self._on_geo_param_change)
-        self.mll_scale.pack(side='left', fill='x', expand=True, padx=5)
-        self.mll_val_label = ttk.Label(mll_row, text="80px", width=8)
-        self.mll_val_label.pack(side='left')
+        self.mll_scale, self.mll_val_label = _make_slider_row(
+            self.geo_frame, "最小直线长度:", self.geo_min_line_length, 10, 200, 10, "{}px", width=12)
 
         # 直线灵敏度
-        lt_row = ttk.Frame(self.geo_frame)
-        lt_row.pack(fill='x', padx=8, pady=2)
-        ttk.Label(lt_row, text="直线灵敏度:", width=12).pack(side='left')
-        self.lt_scale = ttk.Scale(lt_row, from_=10, to=100, orient='horizontal',
-                                  variable=self.geo_line_threshold, command=self._on_geo_param_change)
-        self.lt_scale.pack(side='left', fill='x', expand=True, padx=5)
-        self.lt_val_label = ttk.Label(lt_row, text="30", width=8)
-        self.lt_val_label.pack(side='left')
+        self.lt_scale, self.lt_val_label = _make_slider_row(
+            self.geo_frame, "直线灵敏度:", self.geo_line_threshold, 10, 100, 5, "{}", width=12)
 
         # 圆检测灵敏度
-        cs_row = ttk.Frame(self.geo_frame)
-        cs_row.pack(fill='x', padx=8, pady=2)
-        ttk.Label(cs_row, text="圆检测灵敏度:", width=12).pack(side='left')
-        self.cs_scale = ttk.Scale(cs_row, from_=20, to=100, orient='horizontal',
-                                  variable=self.geo_circle_sensitivity, command=self._on_geo_param_change)
-        self.cs_scale.pack(side='left', fill='x', expand=True, padx=5)
-        self.cs_val_label = ttk.Label(cs_row, text="50", width=8)
-        self.cs_val_label.pack(side='left')
+        self.cs_scale, self.cs_val_label = _make_slider_row(
+            self.geo_frame, "圆检测灵敏度:", self.geo_circle_sensitivity, 20, 100, 5, "{}", width=12)
 
         # 自动调节参数按钮
         auto_row = ttk.Frame(self.geo_frame)
@@ -201,13 +213,21 @@ class Image2WSDApp:
                         command=self._on_color_mode).pack(side='left')
         ttk.Radiobutton(row, text="原色", variable=self.color_mode, value='svg',
                         command=self._update_all_previews).pack(side='left')
+        ttk.Radiobutton(row, text="无色", variable=self.color_mode, value='none',
+                        command=self._update_all_previews).pack(side='left')
 
-        # 单色选择
+        # 单色选择（带颜色预览）
         row2 = ttk.Frame(opt_frame)
         row2.pack(fill='x', padx=8, pady=2)
         ttk.Label(row2, text="颜色值:", width=10).pack(side='left')
         self.color_entry = ttk.Entry(row2, textvariable=self.fill_color, width=10, state='disabled')
         self.color_entry.pack(side='left')
+        # 颜色预览框
+        self.color_preview = tk.Canvas(row2, width=24, height=20, bg=self.fill_color.get(),
+                                       highlightthickness=1, highlightbackground='#999',
+                                       cursor='hand2')
+        self.color_preview.pack(side='left', padx=5)
+        self.color_preview.bind('<Button-1>', lambda e: self._pick_color())
         self.color_btn = ttk.Button(row2, text="选择", command=self._pick_color, state='disabled', width=6)
         self.color_btn.pack(side='left', padx=5)
 
@@ -253,26 +273,63 @@ class Image2WSDApp:
         img_frame = ttk.LabelFrame(left, text="图片矢量化选项 (仅图片)")
         img_frame.pack(fill='x', padx=5, pady=5)
 
+        # 辅助函数：创建带+-按钮的滑块（图片用）
+        def _make_img_slider_row(parent, label_text, var, from_, to, step, val_fmt, width=12):
+            row = ttk.Frame(parent)
+            row.pack(fill='x', padx=8, pady=2)
+            ttk.Label(row, text=label_text, width=width).pack(side='left')
+
+            # - 按钮
+            def _dec(*args):
+                cur = var.get()
+                new = max(from_, cur - step)
+                var.set(new)
+                self._schedule_img_update()
+
+            btn_minus = ttk.Button(row, text="-", width=2, command=_dec)
+            btn_minus.pack(side='left')
+
+            # 滑块
+            scale = ttk.Scale(row, from_=from_, to=to, orient='horizontal',
+                              variable=var, command=self._on_img_param_change)
+            scale.pack(side='left', fill='x', expand=True, padx=3)
+
+            # + 按钮
+            def _inc(*args):
+                cur = var.get()
+                new = min(to, cur + step)
+                var.set(new)
+                self._schedule_img_update()
+
+            btn_plus = ttk.Button(row, text="+", width=2, command=_inc)
+            btn_plus.pack(side='left')
+
+            # 数值标签
+            val_label = ttk.Label(row, text=val_fmt.format(var.get()), width=6, anchor='w')
+            val_label.pack(side='left', padx=2)
+            return scale, val_label
+
         # 阈值
-        th_row = ttk.Frame(img_frame)
-        th_row.pack(fill='x', padx=8, pady=(8, 4))
-        ttk.Label(th_row, text="二值化阈值:", width=12).pack(side='left')
-        self.threshold_scale = ttk.Scale(th_row, from_=10, to=245, orient='horizontal',
-                                         variable=self.img_threshold, command=self._on_img_param_change)
-        self.threshold_scale.pack(side='left', fill='x', expand=True, padx=5)
-        ttk.Label(th_row, text="128", width=4, anchor='e').pack(side='left')
-        self.threshold_val_label = ttk.Label(th_row, text="128", width=4, anchor='w')
-        # 替换显示
-        self.threshold_scale.bind('<Motion>', lambda e: self._update_threshold_label())
+        self.threshold_scale, self.threshold_val_label = _make_img_slider_row(
+            img_frame, "二值化阈值:", self.img_threshold, 10, 245, 5, "{}")
 
         # 最小区域
-        turd_row = ttk.Frame(img_frame)
-        turd_row.pack(fill='x', padx=8, pady=(0, 8))
-        ttk.Label(turd_row, text="最小区域:", width=12).pack(side='left')
-        self.turd_scale = ttk.Scale(turd_row, from_=0, to=50, orient='horizontal',
-                                     variable=self.img_turdsize, command=self._on_img_param_change)
-        self.turd_scale.pack(side='left', fill='x', expand=True, padx=5)
-        ttk.Label(turd_row, text="像素", foreground='gray').pack(side='left')
+        self.turd_scale, self.turd_val_label = _make_img_slider_row(
+            img_frame, "最小区域(像素):", self.img_turdsize, 0, 50, 1, "{}")
+
+        # 彩色矢量化开关
+        color_row = ttk.Frame(img_frame)
+        color_row.pack(fill='x', padx=8, pady=(4, 2))
+        ttk.Checkbutton(color_row, text="彩色矢量化 (原色填充)",
+                        variable=self.img_color,
+                        command=self._on_img_color_mode).pack(side='left')
+
+        # 颜色数量（仅彩色模式显示，先创建后控制显示）
+        self.n_colors_row = ttk.Frame(img_frame)
+        self.nc_scale, self.nc_val_label = _make_img_slider_row(
+            self.n_colors_row, "颜色数量:", self.img_n_colors, 8, 128, 4, "{}", width=12)
+        # 默认隐藏
+        self._n_colors_visible = False
 
         # 输出模式
         out_frame = ttk.LabelFrame(left, text="输出模式")
@@ -344,8 +401,17 @@ class Image2WSDApp:
         self.orig_canvas.bind('<Configure>', lambda e: self._draw_orig_preview())
         self.wsd_canvas.bind('<Configure>', lambda e: self._draw_wsd_preview())
 
-    def _update_threshold_label(self):
-        pass  # scale值通过variable自动更新
+    def _schedule_img_update(self):
+        """调度图片参数更新（防抖：300ms内只执行最后一次）"""
+        if self._img_update_job is not None:
+            self.root.after_cancel(self._img_update_job)
+        self._img_update_job = self.root.after(300, self._do_img_update)
+
+    def _do_img_update(self):
+        """执行实际的图片参数更新"""
+        self._img_update_job = None
+        self.current_data = None
+        self._update_all_previews()
 
     # ===== 文件操作 =====
 
@@ -410,7 +476,7 @@ class Image2WSDApp:
         self._update_all_previews()
 
     def _on_geo_param_change(self, *args):
-        """几何参数变化时更新预览"""
+        """几何参数变化时更新预览（带防抖）"""
         # 更新数值标签
         self.min_area_val_label.config(text=f"{int(self.geo_min_area.get())}px")
         self.eps_val_label.config(text=f"{self.geo_epsilon.get():.3f}")
@@ -418,8 +484,19 @@ class Image2WSDApp:
         self.lt_val_label.config(text=f"{int(self.geo_line_threshold.get())}")
         self.cs_val_label.config(text=f"{int(self.geo_circle_sensitivity.get())}")
         if self.convert_mode.get() == 'geometric':
-            self.current_data = None
-            self._update_all_previews()
+            self._schedule_geo_update()
+
+    def _schedule_geo_update(self):
+        """调度几何参数更新（防抖：300ms内只执行最后一次）"""
+        if self._geo_update_job is not None:
+            self.root.after_cancel(self._geo_update_job)
+        self._geo_update_job = self.root.after(300, self._do_geo_update)
+
+    def _do_geo_update(self):
+        """执行实际的几何更新"""
+        self._geo_update_job = None
+        self.current_data = None
+        self._update_all_previews()
 
     def _auto_tune_geo_params(self):
         """根据当前图片尺寸自动调节几何参数"""
@@ -474,9 +551,12 @@ class Image2WSDApp:
         if self.color_mode.get() == 'single':
             self.color_entry.config(state='normal')
             self.color_btn.config(state='normal')
+            if hasattr(self, 'color_preview'):
+                self.color_preview.config(state='normal')
         else:
             self.color_entry.config(state='disabled')
             self.color_btn.config(state='disabled')
+        self._update_color_preview()
         self._update_all_previews()
 
     def _on_custom_size(self):
@@ -492,13 +572,39 @@ class Image2WSDApp:
         color = colorchooser.askcolor(color=self.fill_color.get(), title="选择填充颜色")
         if color and color[1]:
             self.fill_color.set(color[1])
+            self._update_color_preview()
             self._update_all_previews()
 
+    def _update_color_preview(self):
+        """更新颜色预览框显示"""
+        if hasattr(self, 'color_preview'):
+            try:
+                self.color_preview.config(bg=self.fill_color.get())
+            except tk.TclError:
+                pass
+
+    def _on_img_color_mode(self):
+        """切换彩色矢量化模式"""
+        if self.img_color.get():
+            self.n_colors_row.pack(fill='x', padx=8, pady=2)
+            self._n_colors_visible = True
+            # 彩色模式下自动切到原色填充
+            if self.color_mode.get() not in ('svg', 'none'):
+                self.color_mode.set('svg')
+        else:
+            self.n_colors_row.pack_forget()
+            self._n_colors_visible = False
+        self.current_data = None
+        self._update_all_previews()
+
     def _on_img_param_change(self, *args):
-        # 图片参数变化时重新矢量化
+        # 更新数值标签
+        self.threshold_val_label.config(text=f"{int(self.img_threshold.get())}")
+        self.turd_val_label.config(text=f"{int(self.img_turdsize.get())}")
+        self.nc_val_label.config(text=f"{int(self.img_n_colors.get())}")
+        # 图片参数变化时重新矢量化（带防抖）
         if self.current_file and self._is_image_file(self.current_file):
-            self.current_data = None
-            self._update_all_previews()
+            self._schedule_img_update()
 
     def _is_image_file(self, path):
         ext = os.path.splitext(path)[1].lower()
@@ -558,6 +664,8 @@ class Image2WSDApp:
                     self.current_file,
                     img_threshold=self.img_threshold.get(),
                     img_turdsize=self.img_turdsize.get(),
+                    img_color=self.img_color.get(),
+                    img_n_colors=self.img_n_colors.get(),
                 )
                 self.current_data = (subpaths, colors, bbox, ftype)
             return True
@@ -628,26 +736,33 @@ class Image2WSDApp:
         oy = pad + (h - 2*pad - sh * scale) / 2 - min_y * scale
 
         # 绘制填充/线条
+        no_fill = self.color_mode.get() == 'none'
         for i, sp in enumerate(subpaths):
-            if self.color_mode.get() == 'svg':
+            if no_fill:
+                color = ''
+            elif self.color_mode.get() == 'svg':
                 color = colors[i]
             elif self.color_mode.get() == 'single':
                 color = self.fill_color.get()
             else:
                 color = rainbow_color_hex(i, len(subpaths))
             if not color or color == 'none':
-                color = '#cccccc'
+                color = ''
 
             if is_geo:
                 # 几何模式：用线条绘制
                 pts = [(x*scale+ox, y*scale+oy) for x, y in sp]
                 flat = [coord for pt in pts for coord in pt]
-                canvas.create_line(flat, fill=color, width=2, capstyle='round', joinstyle='round')
+                line_color = color if color else '#666666'
+                canvas.create_line(flat, fill=line_color, width=2, capstyle='round', joinstyle='round')
             else:
                 poly = subpath_to_polygon(sp, samples_per_seg=6)
                 pts = [(x*scale+ox, y*scale+oy) for x, y in poly]
                 flat = [coord for pt in pts for coord in pt]
-                canvas.create_polygon(flat, fill=color, outline='', smooth=False)
+                outline_color = '#000000' if no_fill else ''
+                outline_width = 1 if no_fill else 0
+                canvas.create_polygon(flat, fill=color, outline=outline_color,
+                                      width=outline_width, smooth=False)
 
         # 绘制轮廓
         if self.outline.get() and not is_geo:
@@ -719,7 +834,11 @@ class Image2WSDApp:
 
         # 分配颜色
         fill_colors_hex = []
-        if self.color_mode.get() == 'rainbow':
+        no_fill = False
+        if self.color_mode.get() == 'none':
+            no_fill = True
+            fill_colors_hex = [''] * len(subpaths)
+        elif self.color_mode.get() == 'rainbow':
             if is_geo:
                 areas = [self._polyline_area(sp) for sp in subpaths]
             else:
@@ -737,20 +856,22 @@ class Image2WSDApp:
         # 绘制
         for i, sp in enumerate(subpaths):
             wsd_sp = [(int(x*sx+ox), int(y*sy+oy)) for x, y in sp]
-            color = fill_colors_hex[i]
-            if not color or color == 'none':
-                color = '#cccccc'
+            color = fill_colors_hex[i] if i < len(fill_colors_hex) else '#cccccc'
 
             if is_geo:
                 # 几何模式：用线条绘制
                 pts = [(x*dscale+dox, y*dscale+doy) for x, y in wsd_sp]
                 flat = [coord for pt in pts for coord in pt]
-                canvas.create_line(flat, fill=color, width=2, capstyle='round', joinstyle='round')
+                line_color = color if color else '#3366ff'
+                canvas.create_line(flat, fill=line_color, width=2, capstyle='round', joinstyle='round')
             else:
                 poly = subpath_to_polygon(wsd_sp, samples_per_seg=6)
                 pts = [(x*dscale+dox, y*dscale+doy) for x, y in poly]
                 flat = [coord for pt in pts for coord in pt]
-                canvas.create_polygon(flat, fill=color, outline='', smooth=False)
+                fill_color = color if (color and not no_fill) else ''
+                outline_color = '#000000' if no_fill else ''
+                canvas.create_polygon(flat, fill=fill_color, outline=outline_color,
+                                      width=1 if no_fill else 0, smooth=False)
 
         # 绘制轮廓（仅非几何模式）
         if self.outline.get() and not is_geo:
@@ -834,6 +955,8 @@ class Image2WSDApp:
                         custom_size=custom_size,
                         img_threshold=self.img_threshold.get(),
                         img_turdsize=self.img_turdsize.get(),
+                        img_color=self.img_color.get(),
+                        img_n_colors=self.img_n_colors.get(),
                         progress_cb=self._update_progress,
                     )
                 self._update_progress("完成！", 100)
@@ -893,6 +1016,8 @@ class Image2WSDApp:
                         custom_size=custom_size,
                         img_threshold=self.img_threshold.get(),
                         img_turdsize=self.img_turdsize.get(),
+                        img_color=self.img_color.get(),
+                        img_n_colors=self.img_n_colors.get(),
                         progress_cb=None,
                     )
                 success += 1
