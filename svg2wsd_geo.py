@@ -275,7 +275,7 @@ def _nms_circles(circles, overlap_thresh=0.15):
     return kept
 
 
-def _detect_circles_hough(gray, min_radius=20, skeleton=None):
+def _detect_circles_hough(gray, min_radius=20, skeleton=None, param2_base=120):
     """
     多尺度霍夫圆检测（大/中/小圆）
 
@@ -283,15 +283,16 @@ def _detect_circles_hough(gray, min_radius=20, skeleton=None):
     骨架图线条太细反而容易丢失梯度信息）。
     skeleton 参数保留但不使用，仅为接口兼容性。
 
-    多尺度参数：
-    - 大圆：dp=1.5, minDist=150, param1=100, param2=120, minRadius=200
-    - 中圆：dp=1.2, minDist=80, param1=80, param2=90, minRadius=80, maxRadius=250
-    - 小圆：dp=1.0, minDist=40, param1=50, param2=60, minRadius=20, maxRadius=100
+    多尺度参数（基于param2_base按比例缩放）：
+    - 大圆：param2 = param2_base
+    - 中圆：param2 = param2_base * 0.75
+    - 小圆：param2 = param2_base * 0.5
 
     参数:
         gray: 灰度图像
         min_radius: 最小半径（像素），作为小圆检测的下限补充
         skeleton: 骨架图像（保留但不用，圆检测用原图更好）
+        param2_base: 大圆的param2值，控制圆检测灵敏度（越小越灵敏）
 
     返回:
         list of (x, y, radius)
@@ -302,10 +303,14 @@ def _detect_circles_hough(gray, min_radius=20, skeleton=None):
     # 圆检测统一使用原图灰度图（骨架图线条太细，丢失梯度信息）
     detect_img = gray
 
+    param2_large = param2_base
+    param2_medium = int(param2_base * 0.75)
+    param2_small = int(param2_base * 0.5)
+
     # 大圆
     circles1 = cv2.HoughCircles(
         detect_img, cv2.HOUGH_GRADIENT, dp=1.5, minDist=150,
-        param1=100, param2=120,
+        param1=100, param2=param2_large,
         minRadius=200, maxRadius=0
     )
     if circles1 is not None:
@@ -314,7 +319,7 @@ def _detect_circles_hough(gray, min_radius=20, skeleton=None):
     # 中圆
     circles2 = cv2.HoughCircles(
         detect_img, cv2.HOUGH_GRADIENT, dp=1.2, minDist=80,
-        param1=80, param2=90,
+        param1=80, param2=param2_medium,
         minRadius=80, maxRadius=250
     )
     if circles2 is not None:
@@ -323,7 +328,7 @@ def _detect_circles_hough(gray, min_radius=20, skeleton=None):
     # 小圆
     circles3 = cv2.HoughCircles(
         detect_img, cv2.HOUGH_GRADIENT, dp=1.0, minDist=40,
-        param1=50, param2=60,
+        param1=50, param2=param2_small,
         minRadius=max(min_radius, 20), maxRadius=100
     )
     if circles3 is not None:
@@ -642,7 +647,7 @@ def _verify_line_straightness(skeleton, x1, y1, x2, y2, max_deviation=1.5):
     return avg_deviation <= max_deviation
 
 
-def _detect_lines_hough(gray, min_length=50, skeleton=None):
+def _detect_lines_hough(gray, min_length=50, skeleton=None, threshold=30):
     """
     霍夫直线检测 + 直线度验证 + 合并共线线段
 
@@ -651,12 +656,11 @@ def _detect_lines_hough(gray, min_length=50, skeleton=None):
     然后调用 _merge_colinear_segments 合并共线线段，
     将断续的短线段连接成长直线。
 
-    骨架图模式参数：threshold=30, minLineLength=80, maxLineGap=15
-
     参数:
         gray: 灰度图像
         min_length: 最小线段长度（像素）
         skeleton: 骨架图像（优先使用，提供则在骨架图上检测）
+        threshold: 霍夫直线检测阈值（越小越灵敏）
 
     返回:
         list of ((x1, y1), (x2, y2))
@@ -667,19 +671,19 @@ def _detect_lines_hough(gray, min_length=50, skeleton=None):
     if skeleton is not None:
         # 骨架图本身就是单像素线条，直接用于霍夫检测
         edges = skeleton
-        # 骨架图模式参数（提高最小长度到80，减少短线段误检）
-        threshold = 30
-        min_line_length = 80
+        # 骨架图模式参数
+        line_threshold = threshold
+        min_line_length = min_length
         max_line_gap = 15
     else:
         edges = cv2.Canny(gray, 50, 150)
-        threshold = 80
+        line_threshold = threshold
         min_line_length = min_length
         max_line_gap = 15
 
     lines = cv2.HoughLinesP(
         edges, rho=1, theta=math.pi / 180,
-        threshold=threshold, minLineLength=min_line_length, maxLineGap=max_line_gap
+        threshold=line_threshold, minLineLength=min_line_length, maxLineGap=max_line_gap
     )
 
     if lines is None:
@@ -781,6 +785,8 @@ def _contour_overlaps_hough_line(cnt_bbox, hough_lines, overlap_thresh=0.6):
 def detect_geometric_shapes(image_path, min_area=50, epsilon_ratio=0.02,
                             circularity_threshold=0.85,
                             min_line_length=50,
+                            line_threshold=30,
+                            circle_param2=120,
                             use_hough=True):
     """
     从图片中检测几何形状（支持线条图和实心填充图）
@@ -789,9 +795,9 @@ def detect_geometric_shapes(image_path, min_area=50, epsilon_ratio=0.02,
     use_hough=True（骨架+霍夫策略）：
       a. 二值化 + 骨架化
       b. 圆检测：在原图灰度图上做多尺度霍夫圆检测
-         （大圆param2=120, 中圆param2=90, 小圆param2=60）
+         （circle_param2为大圆参数，中圆和小圆按比例缩放）
       c. 直线检测：在骨架图上做霍夫直线检测 + 合并共线线段
-         （threshold=30, minLineLength=50, maxLineGap=15）
+         （threshold=line_threshold, minLineLength=min_line_length, maxLineGap=15）
       d. 轮廓检测作为补充（跳过与霍夫高度重叠的轮廓）
       e. 最终去重
     use_hough=False（纯轮廓策略）：
@@ -805,6 +811,8 @@ def detect_geometric_shapes(image_path, min_area=50, epsilon_ratio=0.02,
         epsilon_ratio: 轮廓近似精度比例
         circularity_threshold: 圆形度阈值
         min_line_length: 最小直线长度（像素）
+        line_threshold: 直线检测阈值（越小越灵敏）
+        circle_param2: 圆检测param2基准值（越小越灵敏）
         use_hough: 是否启用霍夫检测
 
     返回:
@@ -839,7 +847,8 @@ def detect_geometric_shapes(image_path, min_area=50, epsilon_ratio=0.02,
     # ========== 步骤1：霍夫圆检测（多尺度，在原图灰度图上检测） ==========
     if use_hough:
         circles = _detect_circles_hough(
-            gray, min_radius=max(10, min_area // 5), skeleton=skeleton
+            gray, min_radius=max(10, min_area // 5), skeleton=skeleton,
+            param2_base=circle_param2
         )
         for cx, cy, r in circles:
             shape = {
@@ -857,7 +866,8 @@ def detect_geometric_shapes(image_path, min_area=50, epsilon_ratio=0.02,
     # ========== 步骤2：霍夫直线检测（在骨架图上检测，合并共线线段） ==========
     if use_hough:
         lines = _detect_lines_hough(
-            gray, min_length=min_line_length, skeleton=skeleton
+            gray, min_length=min_line_length, skeleton=skeleton,
+            threshold=line_threshold
         )
         for (x1, y1), (x2, y2) in lines:
             length = math.hypot(x2 - x1, y2 - y1)
@@ -1251,6 +1261,10 @@ def convert_geo_to_wsd(input_path, wsd_path,
                        custom_size=None,
                        min_area=50,
                        epsilon_ratio=0.02,
+                       use_hough=True,
+                       min_line_length=50,
+                       line_threshold=30,
+                       circle_param2=120,
                        progress_cb=None):
     """
     几何转换：识别图片中的几何图形并转换为WSD
@@ -1268,12 +1282,18 @@ def convert_geo_to_wsd(input_path, wsd_path,
         custom_size: (width, height) 自定义输出大小(WSD单位)
         min_area: 最小面积（像素）
         epsilon_ratio: 轮廓近似精度
+        use_hough: 是否启用霍夫变换
+        min_line_length: 最小直线长度（像素）
+        line_threshold: 直线检测阈值
+        circle_param2: 圆检测param2基准值
     """
     if progress_cb:
         progress_cb("检测几何形状...", 0)
 
     shapes = detect_geometric_shapes(
-        input_path, min_area=min_area, epsilon_ratio=epsilon_ratio
+        input_path, min_area=min_area, epsilon_ratio=epsilon_ratio,
+        use_hough=use_hough, min_line_length=min_line_length,
+        line_threshold=line_threshold, circle_param2=circle_param2
     )
 
     if not shapes:
@@ -1392,6 +1412,10 @@ def convert_geo_to_wsd_multi(input_files, output_path, **kwargs):
     custom_size = kwargs.get('custom_size')
     min_area = kwargs.get('min_area', 50)
     epsilon_ratio = kwargs.get('epsilon_ratio', 0.02)
+    use_hough = kwargs.get('use_hough', True)
+    min_line_length = kwargs.get('min_line_length', 50)
+    line_threshold = kwargs.get('line_threshold', 30)
+    circle_param2 = kwargs.get('circle_param2', 120)
 
     all_shapes_data = []
     total_files = len(input_files)
@@ -1404,7 +1428,9 @@ def convert_geo_to_wsd_multi(input_files, output_path, **kwargs):
             )
 
         shapes = detect_geometric_shapes(
-            in_file, min_area=min_area, epsilon_ratio=epsilon_ratio
+            in_file, min_area=min_area, epsilon_ratio=epsilon_ratio,
+            use_hough=use_hough, min_line_length=min_line_length,
+            line_threshold=line_threshold, circle_param2=circle_param2
         )
 
         if not shapes:

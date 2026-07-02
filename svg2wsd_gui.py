@@ -101,6 +101,10 @@ class Image2WSDApp:
         # 几何转换参数
         self.geo_min_area = tk.IntVar(value=50)
         self.geo_epsilon = tk.DoubleVar(value=0.02)
+        self.geo_use_hough = tk.BooleanVar(value=True)
+        self.geo_min_line_length = tk.IntVar(value=80)
+        self.geo_line_threshold = tk.IntVar(value=30)
+        self.geo_circle_sensitivity = tk.IntVar(value=50)
 
         self.geo_frame = ttk.LabelFrame(left, text="几何转换参数")
         # 最小面积
@@ -115,13 +119,54 @@ class Image2WSDApp:
 
         # 近似精度
         eps_row = ttk.Frame(self.geo_frame)
-        eps_row.pack(fill='x', padx=8, pady=(0, 8))
+        eps_row.pack(fill='x', padx=8, pady=(0, 4))
         ttk.Label(eps_row, text="近似精度:", width=10).pack(side='left')
         self.eps_scale = ttk.Scale(eps_row, from_=0.005, to=0.05, orient='horizontal',
                                    variable=self.geo_epsilon, command=self._on_geo_param_change)
         self.eps_scale.pack(side='left', fill='x', expand=True, padx=5)
         self.eps_val_label = ttk.Label(eps_row, text="0.020", width=8)
         self.eps_val_label.pack(side='left')
+
+        # 启用霍夫变换
+        hough_row = ttk.Frame(self.geo_frame)
+        hough_row.pack(fill='x', padx=8, pady=2)
+        ttk.Checkbutton(hough_row, text="启用霍夫变换", variable=self.geo_use_hough,
+                        command=self._on_geo_param_change).pack(side='left')
+
+        # 最小直线长度
+        mll_row = ttk.Frame(self.geo_frame)
+        mll_row.pack(fill='x', padx=8, pady=2)
+        ttk.Label(mll_row, text="最小直线长度:", width=12).pack(side='left')
+        self.mll_scale = ttk.Scale(mll_row, from_=10, to=200, orient='horizontal',
+                                   variable=self.geo_min_line_length, command=self._on_geo_param_change)
+        self.mll_scale.pack(side='left', fill='x', expand=True, padx=5)
+        self.mll_val_label = ttk.Label(mll_row, text="80px", width=8)
+        self.mll_val_label.pack(side='left')
+
+        # 直线灵敏度
+        lt_row = ttk.Frame(self.geo_frame)
+        lt_row.pack(fill='x', padx=8, pady=2)
+        ttk.Label(lt_row, text="直线灵敏度:", width=12).pack(side='left')
+        self.lt_scale = ttk.Scale(lt_row, from_=10, to=100, orient='horizontal',
+                                  variable=self.geo_line_threshold, command=self._on_geo_param_change)
+        self.lt_scale.pack(side='left', fill='x', expand=True, padx=5)
+        self.lt_val_label = ttk.Label(lt_row, text="30", width=8)
+        self.lt_val_label.pack(side='left')
+
+        # 圆检测灵敏度
+        cs_row = ttk.Frame(self.geo_frame)
+        cs_row.pack(fill='x', padx=8, pady=2)
+        ttk.Label(cs_row, text="圆检测灵敏度:", width=12).pack(side='left')
+        self.cs_scale = ttk.Scale(cs_row, from_=20, to=100, orient='horizontal',
+                                  variable=self.geo_circle_sensitivity, command=self._on_geo_param_change)
+        self.cs_scale.pack(side='left', fill='x', expand=True, padx=5)
+        self.cs_val_label = ttk.Label(cs_row, text="50", width=8)
+        self.cs_val_label.pack(side='left')
+
+        # 自动调节参数按钮
+        auto_row = ttk.Frame(self.geo_frame)
+        auto_row.pack(fill='x', padx=8, pady=(4, 8))
+        ttk.Button(auto_row, text="自动调节参数", command=self._auto_tune_geo_params).pack(fill='x')
 
         # 文件列表
         self.batch_frame = ttk.LabelFrame(left, text="文件列表 (支持批量)")
@@ -369,9 +414,61 @@ class Image2WSDApp:
         # 更新数值标签
         self.min_area_val_label.config(text=f"{int(self.geo_min_area.get())}px")
         self.eps_val_label.config(text=f"{self.geo_epsilon.get():.3f}")
+        self.mll_val_label.config(text=f"{int(self.geo_min_line_length.get())}px")
+        self.lt_val_label.config(text=f"{int(self.geo_line_threshold.get())}")
+        self.cs_val_label.config(text=f"{int(self.geo_circle_sensitivity.get())}")
         if self.convert_mode.get() == 'geometric':
             self.current_data = None
             self._update_all_previews()
+
+    def _auto_tune_geo_params(self):
+        """根据当前图片尺寸自动调节几何参数"""
+        if not self.current_file:
+            messagebox.showwarning("提示", "请先加载图片")
+            return
+        try:
+            from PIL import Image
+            img = Image.open(self.current_file)
+            w, h = img.size
+            area = w * h
+            short_side = min(w, h)
+
+            # 最小面积：图片面积的0.01%，至少5px
+            min_area = max(5, int(area * 0.0001))
+            # 最小直线长度：短边的5%，限制在10-200
+            min_line_length = max(10, min(200, int(short_side * 0.05)))
+            # 直线灵敏度：根据图片大小调节，小图更灵敏
+            line_threshold = max(10, min(100, int(short_side * 0.03)))
+            # 圆检测灵敏度：中等默认，大图降低灵敏度减少误检
+            if short_side > 1000:
+                circle_sensitivity = 40
+            elif short_side > 500:
+                circle_sensitivity = 50
+            else:
+                circle_sensitivity = 60
+
+            # 更新变量
+            self.geo_min_area.set(min_area)
+            self.geo_min_line_length.set(min_line_length)
+            self.geo_line_threshold.set(line_threshold)
+            self.geo_circle_sensitivity.set(circle_sensitivity)
+
+            # 更新标签
+            self.min_area_val_label.config(text=f"{min_area}px")
+            self.mll_val_label.config(text=f"{min_line_length}px")
+            self.lt_val_label.config(text=f"{line_threshold}")
+            self.cs_val_label.config(text=f"{circle_sensitivity}")
+
+            # 触发预览刷新
+            self.current_data = None
+            self._update_all_previews()
+
+            self.status.config(
+                text=f"自动调节完成: 图尺寸{w}×{h}, "
+                     f"最小面积={min_area}px, 直线长度={min_line_length}px"
+            )
+        except Exception as e:
+            messagebox.showerror("错误", f"自动调节失败: {str(e)}")
 
     def _on_color_mode(self):
         if self.color_mode.get() == 'single':
@@ -430,10 +527,16 @@ class Image2WSDApp:
             if self.convert_mode.get() == 'geometric':
                 # 几何模式：检测几何形状
                 from svg2wsd_geo import detect_geometric_shapes, shape_to_polyline_points
+                # 圆检测灵敏度(0-100)转换为param2：灵敏度越高，param2越小
+                circle_param2 = int(200 - self.geo_circle_sensitivity.get() * 1.5)
                 shapes = detect_geometric_shapes(
                     self.current_file,
                     min_area=self.geo_min_area.get(),
                     epsilon_ratio=self.geo_epsilon.get(),
+                    use_hough=self.geo_use_hough.get(),
+                    min_line_length=self.geo_min_line_length.get(),
+                    line_threshold=self.geo_line_threshold.get(),
+                    circle_param2=circle_param2,
                 )
                 if not shapes:
                     raise ValueError("未检测到几何形状，请调整最小面积参数")
@@ -701,6 +804,7 @@ class Image2WSDApp:
                 self._update_progress("开始转换...", 0)
                 if is_geo:
                     from svg2wsd_geo import convert_geo_to_wsd_multi
+                    circle_param2 = int(200 - self.geo_circle_sensitivity.get() * 1.5)
                     result = convert_geo_to_wsd_multi(
                         self.input_files, out_file,
                         color_mode=self.color_mode.get(),
@@ -710,6 +814,10 @@ class Image2WSDApp:
                         custom_size=custom_size,
                         min_area=self.geo_min_area.get(),
                         epsilon_ratio=self.geo_epsilon.get(),
+                        use_hough=self.geo_use_hough.get(),
+                        min_line_length=self.geo_min_line_length.get(),
+                        line_threshold=self.geo_line_threshold.get(),
+                        circle_param2=circle_param2,
                         progress_cb=self._update_progress,
                     )
                 else:
@@ -756,6 +864,7 @@ class Image2WSDApp:
                 self._update_progress(f"转换中 {i+1}/{total}: {base}", int(100 * i / total))
                 if is_geo:
                     from svg2wsd_geo import convert_geo_to_wsd
+                    circle_param2 = int(200 - self.geo_circle_sensitivity.get() * 1.5)
                     convert_geo_to_wsd(
                         in_file, wsd_file,
                         color_mode=self.color_mode.get(),
@@ -765,6 +874,10 @@ class Image2WSDApp:
                         custom_size=custom_size,
                         min_area=self.geo_min_area.get(),
                         epsilon_ratio=self.geo_epsilon.get(),
+                        use_hough=self.geo_use_hough.get(),
+                        min_line_length=self.geo_min_line_length.get(),
+                        line_threshold=self.geo_line_threshold.get(),
+                        circle_param2=circle_param2,
                         progress_cb=None,
                     )
                 else:
