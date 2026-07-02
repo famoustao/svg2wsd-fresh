@@ -1402,7 +1402,7 @@ def _shape_to_gt_segs(shape, sx, sy, ox, oy, flip_v=False):
             return [make_line_seg(wsd_pts)], False
         return [], False
 
-    # 圆：用4段贝塞尔近似
+    # 圆：使用原生圆格式 (0x4284)
     elif shape_type == SHAPE_CIRCLE:
         center = _validate_point(shape.get('center'))
         if center is None:
@@ -1412,9 +1412,14 @@ def _shape_to_gt_segs(shape, sx, sy, ox, oy, flip_v=False):
             r_val = float(radius)
         except (TypeError, ValueError):
             return [], False
-        cx, cy = _transform(center[0], center[1])
+        # 原生圆用float32坐标，不需要取整
+        cx = center[0] * sx + ox
+        cy = center[1] * sy + oy
         r = r_val * abs(sx)
-        return make_circle_segs(cx, cy, r), True
+        # 使用原生圆段
+        from wsd_gt_build import make_circle_native_seg
+        seg = make_circle_native_seg(cx, cy, r)
+        return [seg], True
 
     # 圆弧：用贝塞尔分段近似
     elif shape_type == SHAPE_ARC:

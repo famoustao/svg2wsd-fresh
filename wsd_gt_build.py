@@ -32,6 +32,7 @@ import math
 SEG_LINE = 0x4701      # 直线/折线
 SEG_GON = 0x4702       # 多边形/闭合折线
 SEG_BEZIER = 0x4703    # 贝塞尔曲线
+SEG_CIRCLE = 0x4284    # 原生圆/椭圆/弧 (float32参数)
 
 PATH_TAG = 0x330f
 HDR4 = bytes.fromhex('cf100704')  # v2 Type-A 格式头
@@ -121,12 +122,42 @@ def make_bezier_seg(p0, p1, p2, p3):
     return make_seg(SEG_BEZIER, [p0, p1, p2, p3])
 
 
+def make_circle_native_seg(cx, cy, r, param4=0.0, mflag=0x00):
+    """
+    构建原生圆段 (0x4284)
+
+    经过实验验证的格式：
+      tag = 0x4284
+      mflag = 0x00 (完整圆) 或 0x40 (完整圆，区别待确定)
+      npts = 0
+      数据 = 4个float32: cx, cy, r, param4
+
+    Args:
+        cx, cy: 圆心（WSD单位，float）
+        r: 半径（WSD单位，float）
+        param4: 第4个参数（作用待确定，默认0.0）
+        mflag: 类型标志（0x00或0x40为完整圆）
+
+    Returns:
+        bytes: 圆段的二进制数据
+    """
+    b = bytearray()
+    b += struct.pack('<H', SEG_CIRCLE)   # u16 tag = 0x4284
+    b += bytes([mflag])                   # u8 mflag
+    b += struct.pack('<H', 0)            # u16 npts = 0
+    b += struct.pack('<f', float(cx))    # f32 cx
+    b += struct.pack('<f', float(cy))    # f32 cy
+    b += struct.pack('<f', float(r))     # f32 r
+    b += struct.pack('<f', float(param4))  # f32 param4
+    return bytes(b)
+
+
 def make_circle_segs(cx, cy, r):
     """
-    用4段贝塞尔曲线近似一个圆
+    用4段贝塞尔曲线近似一个圆（备用方案，优先使用原生圆）
 
     使用标准的圆贝塞尔近似公式:
-    k = 4/3 * tan(π/8) ≈ 0.5522847498
+    k = 4/3 * tan(pi/8) ~ 0.5522847498
 
     返回4个Bezier段（每个90度圆弧）
     """
@@ -374,15 +405,16 @@ def build_polyline(points, line_color='#000000', line_width_mm=0.2, closed=False
     return build_wsd([path])
 
 
-def build_circle(cx, cy, r, line_color='#000000', line_width_mm=0.2):
+def build_circle(cx, cy, r, line_color='#000000', line_width_mm=0.2, native=True):
     """
-    构建单个圆的WSD文件（便捷函数，用贝塞尔近似）
+    构建单个圆的WSD文件
 
     Args:
         cx, cy: 圆心（WSD单位）
         r: 半径（WSD单位）
         line_color: 线条颜色
         line_width_mm: 线宽（mm）
+        native: True=使用原生圆(0x4284), False=用贝塞尔近似
 
     Returns:
         bytes: WSD文件数据
@@ -390,8 +422,14 @@ def build_circle(cx, cy, r, line_color='#000000', line_width_mm=0.2):
     color_bgra = hex_to_bgra(line_color)
     line_width_wsd = line_width_mm * MM_TO_WSD
 
-    segs = make_circle_segs(cx, cy, r)
-    path = make_path([segs], color_bgra, line_width_wsd)
+    if native:
+        # 原生圆格式
+        seg = make_circle_native_seg(cx, cy, r)
+        path = make_path([[seg]], color_bgra, line_width_wsd)
+    else:
+        # 贝塞尔近似
+        segs = make_circle_segs(cx, cy, r)
+        path = make_path([segs], color_bgra, line_width_wsd)
     return build_wsd([path])
 
 
