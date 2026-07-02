@@ -714,11 +714,27 @@ def _detect_lines_hough(gray, min_length=50, skeleton=None, threshold=30):
 
     line_segments = [line[0].tolist() for line in lines]
 
+    # 验证所有线段格式：必须是4个值的tuple/list (x1, y1, x2, y2)
+    valid_segments = []
+    for seg in line_segments:
+        try:
+            if isinstance(seg, (tuple, list)) and len(seg) == 4:
+                valid_segments.append(
+                    (float(seg[0]), float(seg[1]), float(seg[2]), float(seg[3]))
+                )
+        except (TypeError, ValueError, IndexError):
+            continue
+    line_segments = valid_segments
+
+    if not line_segments:
+        return []
+
     # 骨架图模式：直线度验证，过滤弯曲的线段（如圆弧）
     # 在合并共线线段之前执行过滤
     if skeleton is not None:
         filtered_segments = []
         for seg in line_segments:
+            # seg 已经是验证过的 (x1, y1, x2, y2)
             sx1, sy1, sx2, sy2 = seg
             if _verify_line_straightness(skeleton, sx1, sy1, sx2, sy2, max_deviation=1.5):
                 filtered_segments.append(seg)
@@ -1486,14 +1502,24 @@ def convert_geo_to_wsd(input_path, wsd_path,
         line_threshold: 直线检测阈值
         circle_param2: 圆检测param2基准值
     """
+    import traceback
+
+    def _step(step_name, func):
+        """执行一个步骤，出错时附加步骤信息"""
+        try:
+            return func()
+        except Exception as e:
+            raise type(e)(f"[{step_name}] {e}") from e
+
+    # 步骤1：检测几何形状
     if progress_cb:
         progress_cb("检测几何形状...", 0)
 
-    shapes = detect_geometric_shapes(
+    shapes = _step("形状检测", lambda: detect_geometric_shapes(
         input_path, min_area=min_area, epsilon_ratio=epsilon_ratio,
         use_hough=use_hough, min_line_length=min_line_length,
         line_threshold=line_threshold, circle_param2=circle_param2
-    )
+    ))
 
     if not shapes:
         raise ValueError("图片中没有检测到几何形状")
@@ -1501,12 +1527,16 @@ def convert_geo_to_wsd(input_path, wsd_path,
     if progress_cb:
         progress_cb(f"检测到 {len(shapes)} 个形状", 20)
 
-    # 计算边界（用所有形状的点）
-    all_polylines = [shape_to_polyline_points(s) for s in shapes]
-    all_x = [x for poly in all_polylines for x, y in poly]
-    all_y = [y for poly in all_polylines for x, y in poly]
-    min_x, max_x = min(all_x), max(all_x)
-    min_y, max_y = min(all_y), max(all_y)
+    # 步骤2：计算边界
+    def _calc_bounds():
+        all_polylines = [shape_to_polyline_points(s) for s in shapes]
+        all_x = [x for poly in all_polylines for x, y in poly]
+        all_y = [y for poly in all_polylines for x, y in poly]
+        if not all_x or not all_y:
+            raise ValueError("没有有效的坐标点")
+        return all_polylines, min(all_x), max(all_x), min(all_y), max(all_y)
+
+    all_polylines, min_x, max_x, min_y, max_y = _step("计算边界", _calc_bounds)
     sw = max_x - min_x
     sh = max_y - min_y
 
@@ -1536,46 +1566,55 @@ def convert_geo_to_wsd(input_path, wsd_path,
     if progress_cb:
         progress_cb("分配颜色...", 40)
 
-    # 分配颜色（BGRA格式）
-    colors = []
-    if color_mode == 'rainbow':
-        areas = [s['area'] for s in shapes]
-        sorted_idx = sorted(range(len(shapes)), key=lambda i: -areas[i])
-        color_map = {}
-        for rank, idx in enumerate(sorted_idx):
-            color_map[idx] = rainbow_bgra(rank, len(sorted_idx))
-        colors = [color_map[i] for i in range(len(shapes))]
-    elif color_mode == 'single':
-        bgra = hex_to_bgra(fill_color)
-        colors = [bgra] * len(shapes)
-    else:
-        # 默认黑色
-        colors = [hex_to_bgra('#000000')] * len(shapes)
+    # 步骤3：分配颜色
+    def _assign_colors():
+        colors = []
+        if color_mode == 'rainbow':
+            areas = [s['area'] for s in shapes]
+            sorted_idx = sorted(range(len(shapes)), key=lambda i: -areas[i])
+            color_map = {}
+            for rank, idx in enumerate(sorted_idx):
+                color_map[idx] = rainbow_bgra(rank, len(sorted_idx))
+            colors = [color_map[i] for i in range(len(shapes))]
+        elif color_mode == 'single':
+            bgra = hex_to_bgra(fill_color)
+            colors = [bgra] * len(shapes)
+        else:
+            # 默认黑色
+            colors = [hex_to_bgra('#000000')] * len(shapes)
+        return colors
+
+    colors = _step("分配颜色", _assign_colors)
 
     if progress_cb:
         progress_cb("构建WSD记录...", 60)
 
-    # 为每个形状创建一个seglist（独立子路径，互不连接）
-    seglists = []
-    for i, shape in enumerate(shapes):
-        # 先验证shape的必要字段
-        is_valid, reason = _validate_shape(shape)
-        if not is_valid:
-            print(f"警告: 形状{i}验证失败，跳过 - {reason}")
-            continue
+    # 步骤4：为每个形状创建seglist
+    def _build_seglists():
+        seglists = []
+        for i, shape in enumerate(shapes):
+            # 先验证shape的必要字段
+            is_valid, reason = _validate_shape(shape)
+            if not is_valid:
+                print(f"警告: 形状{i}验证失败，跳过 - {reason}")
+                continue
 
-        try:
-            segs, _ = _shape_to_gt_segs(
-                shape, sx, sy, ox, oy, flip_v
-            )
-            if segs:
-                seglists.append(segs)
-        except Exception as e:
-            print(f"形状{i}转换失败: {e}")
+            try:
+                segs, _ = _shape_to_gt_segs(
+                    shape, sx, sy, ox, oy, flip_v
+                )
+                if segs:
+                    seglists.append(segs)
+            except Exception as e:
+                print(f"形状{i}转换失败: {e}")
+                traceback.print_exc()
 
-        if progress_cb and i % 5 == 0:
-            pct = 60 + int(35 * i / max(1, len(shapes)))
-            progress_cb(f"处理中... {i+1}/{len(shapes)}", pct)
+            if progress_cb and i % 5 == 0:
+                pct = 60 + int(35 * i / max(1, len(shapes)))
+                progress_cb(f"处理中... {i+1}/{len(shapes)}", pct)
+        return seglists
+
+    seglists = _step("构建WSD记录", _build_seglists)
 
     if not seglists:
         raise ValueError("没有可转换的形状")
@@ -1583,12 +1622,16 @@ def convert_geo_to_wsd(input_path, wsd_path,
     if progress_cb:
         progress_cb("组装文件...", 92)
 
-    # 构建路径（所有形状在一个路径中，作为独立的seglist）
-    path = make_path(seglists, colors[0], linewidth)
-    wsd_data = build_wsd([path])
+    # 步骤5：组装WSD文件
+    def _build_file():
+        # 构建路径（所有形状在一个路径中，作为独立的seglist）
+        path = make_path(seglists, colors[0], linewidth)
+        wsd_data = build_wsd([path])
+        with open(wsd_path, 'wb') as f:
+            f.write(wsd_data)
+        return wsd_data
 
-    with open(wsd_path, 'wb') as f:
-        f.write(wsd_data)
+    wsd_data = _step("组装文件", _build_file)
 
     if progress_cb:
         progress_cb("完成！", 100)
