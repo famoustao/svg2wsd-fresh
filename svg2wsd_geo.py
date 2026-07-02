@@ -440,6 +440,76 @@ def build_polyline_record(points, color_idx=b'\x01\xff\x00\x00', linewidth=DEFAU
     return rec
 
 
+from wsd_records import (
+    build_line_record,
+    build_arc_record,
+    build_circle_record,
+    build_polyline_native_record,
+    hex_to_argb,
+    rainbow_argb,
+)
+
+
+def _shape_to_native_record(shape, sx, sy, ox, oy, line_color, linewidth, flip_v=False):
+    """将检测到的形状转换为原生WSD几何记录"""
+    shape_type = shape['type']
+
+    def _transform(x, y):
+        """坐标变换"""
+        tx = x * sx + ox
+        ty = y * sy + oy
+        return (int(tx), int(ty))
+
+    if shape_type == SHAPE_LINE:
+        pts = shape['points']
+        if len(pts) >= 2:
+            x1, y1 = _transform(pts[0][0], pts[0][1])
+            x2, y2 = _transform(pts[-1][0], pts[-1][1])
+            return build_line_record(x1, y1, x2, y2, line_color, linewidth)
+
+    elif shape_type == SHAPE_CIRCLE:
+        cx, cy = _transform(shape['center'][0], shape['center'][1])
+        # 半径缩放
+        r = shape['radius'] * abs(sx)
+        return build_circle_record(cx, cy, r, line_color, linewidth)
+
+    elif shape_type == SHAPE_RECTANGLE:
+        # 矩形：用折线段记录（闭合）
+        pts = shape['points']
+        wsd_pts = [_transform(p[0], p[1]) for p in pts]
+        # 闭合：添加起点
+        if wsd_pts and wsd_pts[0] != wsd_pts[-1]:
+            wsd_pts.append(wsd_pts[0])
+        return build_polyline_native_record(wsd_pts, line_color, linewidth)
+
+    elif shape_type == SHAPE_TRIANGLE:
+        # 三角形：用折线段记录（闭合）
+        pts = shape['points']
+        wsd_pts = [_transform(p[0], p[1]) for p in pts]
+        if wsd_pts and wsd_pts[0] != wsd_pts[-1]:
+            wsd_pts.append(wsd_pts[0])
+        return build_polyline_native_record(wsd_pts, line_color, linewidth)
+
+    elif shape_type == SHAPE_POLYGON:
+        # 多边形：用折线段记录（闭合）
+        pts = shape['points']
+        wsd_pts = [_transform(p[0], p[1]) for p in pts]
+        if wsd_pts and wsd_pts[0] != wsd_pts[-1]:
+            wsd_pts.append(wsd_pts[0])
+        return build_polyline_native_record(wsd_pts, line_color, linewidth)
+
+    elif shape_type == SHAPE_POLYLINE:
+        # 折线：用折线段记录（开放）
+        pts = shape['points']
+        wsd_pts = [_transform(p[0], p[1]) for p in pts]
+        return build_polyline_native_record(wsd_pts, line_color, linewidth)
+
+    # 默认：用折线段
+    pts = shape_to_polyline_points(shape)
+    wsd_pts = [_transform(p[0], p[1]) for p in pts]
+    return build_polyline_native_record(wsd_pts, line_color, linewidth)
+
+
 def convert_geo_to_wsd(input_path, wsd_path,
                        color_mode='rainbow',
                        linewidth=DEFAULT_LINEWIDTH,
@@ -451,7 +521,8 @@ def convert_geo_to_wsd(input_path, wsd_path,
                        epsilon_ratio=0.02,
                        progress_cb=None):
     """
-    几何转换：识别图片中的几何图形，用WSD折线格式输出
+    几何转换：识别图片中的几何图形，用WSD原生几何类型输出
+    支持：直线、圆、圆弧、矩形、三角形、多边形、折线
     """
     if progress_cb:
         progress_cb("检测几何形状...", 0)
@@ -466,10 +537,8 @@ def convert_geo_to_wsd(input_path, wsd_path,
     if progress_cb:
         progress_cb(f"检测到 {len(shapes)} 个形状", 20)
 
-    # 转折线点
+    # 计算边界（用所有形状的点）
     all_polylines = [shape_to_polyline_points(s) for s in shapes]
-
-    # 计算边界
     all_x = [x for poly in all_polylines for x, y in poly]
     all_y = [y for poly in all_polylines for x, y in poly]
     min_x, max_x = min(all_x), max(all_x)
@@ -506,38 +575,35 @@ def convert_geo_to_wsd(input_path, wsd_path,
     # 分配颜色
     colors = []
     if color_mode == 'rainbow':
-        areas = [s['area'] for s in shapes]
-        sorted_idx = sorted(range(len(shapes)), key=lambda i: -areas[i])
-        color_map = {}
-        for rank, idx in enumerate(sorted_idx):
-            color_map[idx] = rainbow_color_bgr(rank, len(sorted_idx))
-        colors = [color_map[i] for i in range(len(shapes))]
+        for i in range(len(shapes)):
+            colors.append(rainbow_argb(i, len(shapes)))
     elif color_mode == 'single':
-        bgr = hex_to_bgr(fill_color)
-        colors = [bgr] * len(shapes)
+        argb = hex_to_argb(fill_color)
+        colors = [argb] * len(shapes)
     else:
-        colors = [b'\x00\x00\x00'] * len(shapes)
+        # 默认黑色
+        colors = [hex_to_argb('#000000')] * len(shapes)
 
     if progress_cb:
         progress_cb("构建WSD记录...", 60)
 
     records_data = bytearray()
     num_objects = 0
-    black_idx = bytes([0x01, 0xff, 0x00, 0x00])
 
-    for i, poly in enumerate(all_polylines):
-        if len(poly) < 2:
-            continue
-
-        wsd_pts = [(int(x * sx + ox), int(y * sy + oy)) for x, y in poly]
-        # 用折线记录
-        color_idx = black_idx  # 几何模式默认黑色线条
-        records_data += build_polyline_record(wsd_pts, color_idx, linewidth)
-        num_objects += 1
+    for i, shape in enumerate(shapes):
+        try:
+            rec = _shape_to_native_record(
+                shape, sx, sy, ox, oy, colors[i], linewidth, flip_v
+            )
+            if rec:
+                records_data += rec
+                num_objects += 1
+        except Exception as e:
+            print(f"形状{i}转换失败: {e}")
 
         if progress_cb and i % 5 == 0:
-            pct = 60 + int(35 * i / len(all_polylines))
-            progress_cb(f"处理中... {i+1}/{len(all_polylines)}", pct)
+            pct = 60 + int(35 * i / max(1, len(shapes)))
+            progress_cb(f"处理中... {i+1}/{len(shapes)}", pct)
 
     if progress_cb:
         progress_cb("组装文件...", 92)
@@ -650,26 +716,27 @@ def convert_geo_to_wsd_multi(input_files, output_path, **kwargs):
         # 颜色
         colors = []
         if color_mode == 'rainbow':
-            areas = [s['area'] for s in shapes]
-            sorted_idx = sorted(range(len(shapes)), key=lambda i: -areas[i])
-            color_map = {}
-            for rank, i in enumerate(sorted_idx):
-                color_map[i] = rainbow_color_bgr(rank, len(sorted_idx))
-            colors = [color_map[i] for i in range(len(shapes))]
+            for i in range(len(shapes)):
+                colors.append(rainbow_argb(i, len(shapes)))
         elif color_mode == 'single':
-            bgr = hex_to_bgr(fill_color)
-            colors = [bgr] * len(shapes)
+            argb = hex_to_argb(fill_color)
+            colors = [argb] * len(shapes)
+        else:
+            colors = [hex_to_argb('#000000')] * len(shapes)
 
         records_data = bytearray()
         num_objects = 0
-        black_idx = bytes([0x01, 0xff, 0x00, 0x00])
 
-        for poly in all_polylines:
-            if len(poly) < 2:
-                continue
-            wsd_pts = [(int(x * sx + ox), int(y * sy + oy)) for x, y in poly]
-            records_data += build_polyline_record(wsd_pts, black_idx, linewidth)
-            num_objects += 1
+        for i, shape in enumerate(shapes):
+            try:
+                rec = _shape_to_native_record(
+                    shape, sx, sy, ox, oy, colors[i], linewidth, flip_v
+                )
+                if rec:
+                    records_data += rec
+                    num_objects += 1
+            except Exception:
+                pass
 
         block = bytearray()
         block += _CANVAS_HEADER
