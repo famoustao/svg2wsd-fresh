@@ -760,15 +760,14 @@ def _parse_image_file_contour_color(img_path, min_area=50, step=3,
                                     scale=0.5, alphamax=1.0,
                                     progress_cb=None):
     """
-    基于灰度等高线的彩色矢量化方法
-    使用相邻阈值的差值提取每个亮度层的独立区域（类似地形等高线）
-    从暗到亮逐层提取，每层填充该层的平均颜色
-    暗层大区域先画（底色），亮层小区域后画在上层（亮部细节）
-    颜色数量远多于调色板量化方法，更接近抖音EE2效果
+    彩色矢量化方法（原色填充）
+    基于颜色量化 + 连通区域分析 + 原图采样平均颜色
+    每个独立区域填充该区域的原始平均颜色，颜色种类=区域数量
+    大区域先画（底色），小区域后画在上层（细节）
 
     参数:
         min_area: 最小区域面积（像素），越小则路径越多
-        step: 灰度阈值步长，越小则轮廓越多
+        step: 颜色精细度（越小颜色越丰富）
         scale: 处理时的缩放比例，越大越精细但越慢
         alphamax: potrace的alphamax参数
         progress_cb: 进度回调函数(msg, percent)
@@ -790,69 +789,70 @@ def _parse_image_file_contour_color(img_path, min_area=50, step=3,
         img = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
 
     img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-
-    orig_h, orig_w = gray.shape
+    orig_h, orig_w = img_rgb.shape[:2]
 
     # 缩放处理
     if scale != 1.0:
         new_w = int(orig_w * scale)
         new_h = int(orig_h * scale)
-        gray_small = cv2.resize(gray, (new_w, new_h))
         img_small = cv2.resize(img_rgb, (new_w, new_h))
     else:
         new_w, new_h = orig_w, orig_h
-        gray_small = gray
         img_small = img_rgb
 
     if progress_cb:
-        progress_cb("提取等高线区域...", 15)
+        progress_cb("颜色量化中...", 15)
 
-    # 使用相邻阈值差值法提取各亮度层区域
-    # 从低阈值到高阈值（从暗到亮）
-    # 每层区域 = 暗于当前阈值 AND 亮于上一阈值
-    thresholds = list(range(step, 256, step))
+    # step 映射为颜色量化级别：step越小，颜色越多
+    # step=1 -> 128色, step=5 -> 64色, step=10 -> 32色, step=15 -> 16色
+    n_quantize = max(8, min(128, int(144 - step * 8)))
+
+    # 颜色量化（K-means）
+    pixels = img_small.reshape(-1, 3).astype(np.float32)
+    criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 10, 1.0)
+    _, labels, palette = cv2.kmeans(
+        pixels, n_quantize, None, criteria, 3, cv2.KMEANS_PP_CENTERS
+    )
+    palette = palette.astype(np.uint8)
+    labels = labels.reshape(new_h, new_w)
+
+    if progress_cb:
+        progress_cb("提取颜色区域...", 30)
+
+    # 对每个量化颜色做连通区域分析
     all_regions = []  # (mask, area, color_hex)
+    total_colors = len(palette)
 
-    total_steps = len(thresholds)
-    prev_bw = np.zeros((new_h, new_w), dtype=bool)  # 上一阈值的暗区域
+    for ci in range(total_colors):
+        color_mask = (labels == ci)
+        if not np.any(color_mask):
+            continue
 
-    for ti, thresh in enumerate(thresholds):
-        # THRESH_BINARY_INV: 暗于阈值 -> 白(255/True)，亮于阈值 -> 黑(0/False)
-        # 当前暗区域（灰度 < thresh）
-        curr_bw = gray_small < thresh
+        # 连通区域分析
+        num_features, labeled, stats, _ = cv2.connectedComponentsWithStats(
+            color_mask.astype(np.uint8), connectivity=8
+        )
 
-        # 本层区域 = 当前暗区域 - 上一暗区域 = 灰度在 [thresh-step, thresh) 之间的像素
-        layer_bw = curr_bw & (~prev_bw)
+        for region_id in range(1, num_features):
+            area = stats[region_id, cv2.CC_STAT_AREA]
 
-        if np.any(layer_bw):
-            # 连通区域分析（用OpenCV替代scipy）
-            num_features, labeled, stats, _ = cv2.connectedComponentsWithStats(
-                layer_bw.astype(np.uint8), connectivity=8
-            )
+            if area < min_area:
+                continue
+            if area > new_w * new_h * 0.95:
+                continue
 
-            for region_id in range(1, num_features):
-                area = stats[region_id, cv2.CC_STAT_AREA]
+            region_mask = (labeled == region_id)
 
-                if area < min_area:
-                    continue
-                if area > new_w * new_h * 0.95:
-                    continue
+            # 从原图采样平均颜色（颜色种类远多于调色板颜色数）
+            mean_color = cv2.mean(img_small, mask=region_mask.astype(np.uint8) * 255)[:3]
+            r, g, b = int(mean_color[0]), int(mean_color[1]), int(mean_color[2])
+            color_hex = f'#{r:02x}{g:02x}{b:02x}'
 
-                region_mask = (labeled == region_id)
+            all_regions.append((region_mask, area, color_hex))
 
-                # 计算区域平均颜色
-                mean_color = cv2.mean(img_small, mask=region_mask.astype(np.uint8) * 255)[:3]
-                r, g, b = int(mean_color[0]), int(mean_color[1]), int(mean_color[2])
-                color_hex = f'#{r:02x}{g:02x}{b:02x}'
-
-                all_regions.append((region_mask, area, color_hex))
-
-        prev_bw = curr_bw
-
-        if progress_cb and ti % 5 == 0:
-            pct = 15 + int((ti / total_steps) * 40)
-            progress_cb(f"提取区域 {ti+1}/{total_steps}...", pct)
+        if progress_cb and ci % 8 == 0:
+            pct = 30 + int((ci / max(total_colors, 1)) * 25)
+            progress_cb(f"提取区域 {ci+1}/{total_colors}...", pct)
 
     if progress_cb:
         progress_cb(f"找到 {len(all_regions)} 个区域，矢量化中...", 55)
