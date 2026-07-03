@@ -2495,8 +2495,9 @@ def convert_geo_to_wsd(input_path, wsd_path,
     # 步骤3：分配颜色
     def _assign_colors():
         colors = []
-        if is_filled and (color_mode == 'original' or color_mode == 'rainbow'):
+        if is_filled and color_mode in ('original', 'svg', 'rainbow'):
             # filled模式：使用形状自身的颜色
+            # 'svg' 是GUI中"原色"按钮的值，等价于 'original'
             for s in shapes:
                 if 'color_bgr' in s:
                     b, g, r = s['color_bgr']
@@ -2584,9 +2585,11 @@ def convert_geo_to_wsd(input_path, wsd_path,
                 # 普通形状
                 if is_filled:
                     # 填充模式：设置填充颜色，线条颜色与填充相同
+                    # fill_color_bgra 需要传入3字节BGR（函数内部会加alpha）
+                    fill_bgr = color[:3] if len(color) >= 3 else color
                     path = make_path(
                         [segs], color, linewidth,
-                        fill_color_bgra=color, fill_alpha=0xff
+                        fill_color_bgra=fill_bgr, fill_alpha=0xff
                     )
                 else:
                     # 轮廓模式：只有线条
@@ -2761,8 +2764,9 @@ def convert_geo_to_wsd_multi(input_files, output_path, **kwargs):
 
             # 颜色分配
             shape_colors = []
-            if is_filled and color_mode in ('rainbow', 'original'):
+            if is_filled and color_mode in ('rainbow', 'original', 'svg'):
                 # filled模式：使用形状自身的颜色
+                # 'svg' 是GUI中"原色"按钮的值，等价于 'original'
                 for s in shapes:
                     if 'color_bgr' in s:
                         b, g, r = s['color_bgr']
@@ -2823,9 +2827,11 @@ def convert_geo_to_wsd_multi(input_files, output_path, **kwargs):
         for segs, color_bgra in seglists:
             if is_filled:
                 # 填充模式：设置填充颜色
+                # fill_color_bgra 需要传入3字节BGR（函数内部会加alpha）
+                fill_bgr = color_bgra[:3] if len(color_bgra) >= 3 else color_bgra
                 path = make_path(
                     [segs], color_bgra, linewidth,
-                    fill_color_bgra=color_bgra, fill_alpha=0xff
+                    fill_color_bgra=fill_bgr, fill_alpha=0xff
                 )
             else:
                 path = make_path([segs], color_bgra, linewidth)

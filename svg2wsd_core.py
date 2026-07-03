@@ -1812,15 +1812,17 @@ def convert_to_wsd(input_path, wsd_path, color_mode='rainbow',
     # 修正路径方向：确保填充路径为逆时针方向（SVG坐标系，y向下）
     # 图片矢量化(potrace)的路径方向可能与SVG相反，导致填充外部
     if file_type == 'image':
-        # 找到第一个非描边的填充路径作为参考
+        # 找到面积最大的填充路径作为参考（更可靠，避免用内孔作为参考）
         ref_idx = -1
+        max_area = 0
         for i in range(len(all_subpaths)):
             if i >= len(is_stroke_list) or not is_stroke_list[i]:
-                if path_area(all_subpaths[i]) > 100:  # 忽略太小的路径
+                area = path_area(all_subpaths[i])
+                if area > max_area:
+                    max_area = area
                     ref_idx = i
-                    break
         
-        if ref_idx >= 0:
+        if ref_idx >= 0 and max_area > 100:
             ref_signed = path_signed_area(all_subpaths[ref_idx])
             # SVG正常方向是逆时针（负面积），如果图片矢量化是顺时针（正面积），则全部反转
             if ref_signed > 0:
@@ -2189,12 +2191,16 @@ def convert_to_wsd_multi(input_files, output_path, color_mode='rainbow',
         # 修正路径方向：图片矢量化(potrace)的路径方向可能与SVG相反
         if ftype == 'image':
             is_stroke = extra_info.get('is_stroke', [False] * len(subpaths))
+            # 用面积最大的填充路径作为参考（更可靠）
             ref_idx = -1
+            max_area = 0
             for i in range(len(subpaths)):
-                if not is_stroke[i] and path_area(subpaths[i]) > 100:
-                    ref_idx = i
-                    break
-            if ref_idx >= 0:
+                if not is_stroke[i]:
+                    area = path_area(subpaths[i])
+                    if area > max_area:
+                        max_area = area
+                        ref_idx = i
+            if ref_idx >= 0 and max_area > 100:
                 ref_signed = path_signed_area(subpaths[ref_idx])
                 if ref_signed > 0:
                     subpaths = [reverse_path(sp) for sp in subpaths]
