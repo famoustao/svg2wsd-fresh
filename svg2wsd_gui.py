@@ -324,11 +324,31 @@ class Image2WSDApp:
                         variable=self.img_color,
                         command=self._on_img_color_mode).pack(side='left')
 
-        # 颜色数量（仅彩色模式显示，先创建后控制显示）
+        # 彩色矢量化方法
+        self.img_color_method = tk.StringVar(value='contour')
+        method_row = ttk.Frame(img_frame)
+        self._method_row = method_row
+        ttk.Label(method_row, text="方法:", width=12).pack(side='left')
+        ttk.Radiobutton(method_row, text="等高线", variable=self.img_color_method,
+                        value='contour', command=self._on_color_method).pack(side='left')
+        ttk.Radiobutton(method_row, text="调色板", variable=self.img_color_method,
+                        value='quantize', command=self._on_color_method).pack(side='left')
+
+        # 等高线参数行（默认显示）
+        self.contour_step = tk.IntVar(value=5)
+        self.contour_min_area = tk.IntVar(value=100)
+        self.contour_row1 = ttk.Frame(img_frame)
+        self.cs_scale, self.cs_val_label = _make_img_slider_row(
+            self.contour_row1, "等高线步长:", self.contour_step, 1, 15, 1, "{}", width=12)
+        self.contour_row2 = ttk.Frame(img_frame)
+        self.cma_scale, self.cma_val_label = _make_img_slider_row(
+            self.contour_row2, "最小区域:", self.contour_min_area, 20, 300, 10, "{}", width=12)
+
+        # 调色板颜色数量行（默认隐藏）
         self.n_colors_row = ttk.Frame(img_frame)
         self.nc_scale, self.nc_val_label = _make_img_slider_row(
             self.n_colors_row, "颜色数量:", self.img_n_colors, 8, 128, 4, "{}", width=12)
-        # 默认隐藏
+        # 默认隐藏调色板行
         self._n_colors_visible = False
 
         # 输出模式
@@ -586,22 +606,53 @@ class Image2WSDApp:
     def _on_img_color_mode(self):
         """切换彩色矢量化模式"""
         if self.img_color.get():
-            self.n_colors_row.pack(fill='x', padx=8, pady=2)
-            self._n_colors_visible = True
+            # 显示方法选择
+            self._method_row.pack(fill='x', padx=8, pady=2)
+            # 根据方法显示对应参数
+            self._update_color_method_ui()
             # 彩色模式下自动切到原色填充
             if self.color_mode.get() not in ('svg', 'none'):
                 self.color_mode.set('svg')
         else:
+            self._method_row.pack_forget()
+            self.contour_row1.pack_forget()
+            self.contour_row2.pack_forget()
             self.n_colors_row.pack_forget()
             self._n_colors_visible = False
         self.current_data = None
         self._update_all_previews()
+
+    def _on_color_method(self):
+        """切换彩色矢量化方法"""
+        self._update_color_method_ui()
+        self.current_data = None
+        self._update_all_previews()
+
+    def _update_color_method_ui(self):
+        """根据当前方法更新UI显示"""
+        method = self.img_color_method.get()
+        if method == 'contour':
+            # 显示等高线参数
+            self.contour_row1.pack(fill='x', padx=8, pady=2)
+            self.contour_row2.pack(fill='x', padx=8, pady=2)
+            # 隐藏调色板参数
+            self.n_colors_row.pack_forget()
+            self._n_colors_visible = False
+        else:
+            # 隐藏等高线参数
+            self.contour_row1.pack_forget()
+            self.contour_row2.pack_forget()
+            # 显示调色板参数
+            self.n_colors_row.pack(fill='x', padx=8, pady=2)
+            self._n_colors_visible = True
 
     def _on_img_param_change(self, *args):
         # 更新数值标签
         self.threshold_val_label.config(text=f"{int(self.img_threshold.get())}")
         self.turd_val_label.config(text=f"{int(self.img_turdsize.get())}")
         self.nc_val_label.config(text=f"{int(self.img_n_colors.get())}")
+        self.cs_val_label.config(text=f"{int(self.contour_step.get())}")
+        self.cma_val_label.config(text=f"{int(self.contour_min_area.get())}")
         # 图片参数变化时重新矢量化（带防抖）
         if self.current_file and self._is_image_file(self.current_file):
             self._schedule_img_update()
@@ -666,6 +717,9 @@ class Image2WSDApp:
                     img_turdsize=self.img_turdsize.get(),
                     img_color=self.img_color.get(),
                     img_n_colors=self.img_n_colors.get(),
+                    img_color_method=self.img_color_method.get(),
+                    img_contour_step=self.contour_step.get(),
+                    img_contour_min_area=self.contour_min_area.get(),
                 )
                 self.current_data = (subpaths, colors, bbox, ftype)
             return True
@@ -957,6 +1011,9 @@ class Image2WSDApp:
                         img_turdsize=self.img_turdsize.get(),
                         img_color=self.img_color.get(),
                         img_n_colors=self.img_n_colors.get(),
+                        img_color_method=self.img_color_method.get(),
+                        img_contour_step=self.contour_step.get(),
+                        img_contour_min_area=self.contour_min_area.get(),
                         progress_cb=self._update_progress,
                     )
                 self._update_progress("完成！", 100)
@@ -1018,6 +1075,9 @@ class Image2WSDApp:
                         img_turdsize=self.img_turdsize.get(),
                         img_color=self.img_color.get(),
                         img_n_colors=self.img_n_colors.get(),
+                        img_color_method=self.img_color_method.get(),
+                        img_contour_step=self.contour_step.get(),
+                        img_contour_min_area=self.contour_min_area.get(),
                         progress_cb=None,
                     )
                 success += 1
