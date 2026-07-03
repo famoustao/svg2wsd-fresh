@@ -212,7 +212,7 @@ class Image2WSDApp:
         ttk.Radiobutton(row, text="单色", variable=self.color_mode, value='single',
                         command=self._on_color_mode).pack(side='left')
         ttk.Radiobutton(row, text="原色", variable=self.color_mode, value='svg',
-                        command=self._update_all_previews).pack(side='left')
+                        command=self._on_svg_color_mode).pack(side='left')
         ttk.Radiobutton(row, text="无色", variable=self.color_mode, value='none',
                         command=self._update_all_previews).pack(side='left')
 
@@ -579,6 +579,14 @@ class Image2WSDApp:
         self._update_color_preview()
         self._update_all_previews()
 
+    def _on_svg_color_mode(self):
+        """选择原色模式时：如果是图片，自动启用彩色矢量化"""
+        if self.current_file and self._is_image_file(self.current_file):
+            if not self.img_color.get():
+                self.img_color.set(True)
+                self._on_img_color_mode()
+        self._on_color_mode()  # 处理单色UI的启用/禁用
+
     def _on_custom_size(self):
         if self.use_custom_size.get():
             self.w_entry.config(state='normal')
@@ -619,6 +627,9 @@ class Image2WSDApp:
             self.contour_row2.pack_forget()
             self.n_colors_row.pack_forget()
             self._n_colors_visible = False
+            # 取消彩色矢量化时，如果当前是原色模式，自动切回彩虹
+            if self.color_mode.get() == 'svg':
+                self.color_mode.set('rainbow')
         self.current_data = None
         self._update_all_previews()
 
