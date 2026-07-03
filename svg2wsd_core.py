@@ -659,7 +659,7 @@ def _parse_image_file_quantize_color(img_path, turdsize=2, n_colors=32, alphamax
     """
     from PIL import Image
     import numpy as np
-    from scipy import ndimage
+    import cv2
 
     # 读取图片
     img = Image.open(img_path).convert('RGB')
@@ -692,12 +692,14 @@ def _parse_image_file_quantize_color(img_path, turdsize=2, n_colors=32, alphamax
         if not np.any(color_mask):
             continue
 
-        # 连通区域标记
-        labeled, num_features = ndimage.label(color_mask)
+        # 连通区域标记（用OpenCV替代scipy）
+        num_features, labeled, stats, _ = cv2.connectedComponentsWithStats(
+            color_mask.astype(np.uint8), connectivity=8
+        )
 
-        for region_id in range(1, num_features + 1):
+        for region_id in range(1, num_features):
             region_mask = (labeled == region_id)
-            area = np.sum(region_mask)
+            area = stats[region_id, cv2.CC_STAT_AREA]
 
             if area <= turdsize * 20:
                 continue
@@ -776,7 +778,6 @@ def _parse_image_file_contour_color(img_path, min_area=50, step=3,
     import cv2
     import numpy as np
     from PIL import Image
-    from scipy import ndimage
     import potrace
 
     if progress_cb:
@@ -825,17 +826,20 @@ def _parse_image_file_contour_color(img_path, min_area=50, step=3,
         layer_bw = curr_bw & (~prev_bw)
 
         if np.any(layer_bw):
-            # 连通区域分析
-            labeled, num_features = ndimage.label(layer_bw)
+            # 连通区域分析（用OpenCV替代scipy）
+            num_features, labeled, stats, _ = cv2.connectedComponentsWithStats(
+                layer_bw.astype(np.uint8), connectivity=8
+            )
 
-            for region_id in range(1, num_features + 1):
-                region_mask = (labeled == region_id)
-                area = np.sum(region_mask)
+            for region_id in range(1, num_features):
+                area = stats[region_id, cv2.CC_STAT_AREA]
 
                 if area < min_area:
                     continue
                 if area > new_w * new_h * 0.95:
                     continue
+
+                region_mask = (labeled == region_id)
 
                 # 计算区域平均颜色
                 mean_color = cv2.mean(img_small, mask=region_mask.astype(np.uint8) * 255)[:3]
