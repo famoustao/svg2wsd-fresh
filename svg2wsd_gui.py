@@ -515,6 +515,12 @@ class Image2WSDApp:
             self.current_file = self.input_files[index]
             self.file_listbox.selection_clear(0, 'end')
             self.file_listbox.selection_set(index)
+            # 如果当前是原色模式且选中的是图片，自动启用彩色矢量化
+            if (self.color_mode.get() == 'svg' and 
+                self._is_image_file(self.current_file) and 
+                not self.img_color.get()):
+                self.img_color.set(True)
+                self._on_img_color_mode()
             self._invalidate_data()
 
     # ===== 选项事件 =====
@@ -1123,6 +1129,14 @@ class Image2WSDApp:
         if not self.input_files:
             messagebox.showwarning("提示", "请先添加文件")
             return
+
+        # 如果是原色模式且有图片文件，确保彩色矢量化已启用
+        if (self.color_mode.get() == 'svg' and 
+            not self.convert_mode.get() == 'geometric'):
+            has_image = any(self._is_image_file(f) for f in self.input_files)
+            if has_image and not self.img_color.get():
+                self.img_color.set(True)
+                self._on_img_color_mode()
 
         custom_size = None
         if self.use_custom_size.get():

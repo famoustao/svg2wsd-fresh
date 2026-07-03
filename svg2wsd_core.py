@@ -312,7 +312,7 @@ def _normalize_color(color):
         if len(hex_color) == 3:
             hex_color = ''.join(c * 2 for c in hex_color)
         return '#' + hex_color.lower()
-    elif color.startswith('rgb('):
+    elif color.lower().startswith('rgb('):
         # rgb(r, g, b) 格式
         m = re.match(r'rgb\s*\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*\)', color, re.IGNORECASE)
         if m:
