@@ -8,6 +8,7 @@ import struct
 import re
 import os
 import sys
+import math
 import colorsys
 import xml.etree.ElementTree as ET
 
@@ -1618,12 +1619,68 @@ def convert_to_wsd(input_path, wsd_path, color_mode='rainbow',
         # 检查 TikZ 形状类型
         shape_type = 'bezier'
         shape_data = {}
+        is_stroke_only = False  # 是否是纯描边（TikZ中 \draw 而非 \fill）
         if tikz_shapes is not None and i < len(tikz_shapes):
             shape = tikz_shapes[i]
             shape_type = shape['type']
             shape_data = shape['data']
+            # do_draw=False 表示这是纯描边的，被当作填充加入了列表
+            is_stroke_only = not shape.get('do_draw', True)
 
-        # 无填充模式下跳过填充记录
+        # 纯描边形状（\draw）：用描边方式构建，颜色用形状自身颜色
+        if is_stroke_only:
+            stroke_color = fill_colors[i]  # 颜色存在 fill_colors 里
+            if shape_type == 'circle':
+                cx = int(shape_data['cx'] * sx + ox)
+                cy = int(shape_data['cy'] * sy + oy)
+                r = shape_data['r'] * abs(sx)
+                records_data += build_native_circle_stroke(
+                    cx, cy, r, stroke_color, linewidth
+                )
+            elif shape_type == 'rect':
+                x1 = int(shape_data['x1'] * sx + ox)
+                y1 = int(shape_data['y1'] * sy + oy)
+                x2 = int(shape_data['x2'] * sx + ox)
+                y2 = int(shape_data['y2'] * sy + oy)
+                records_data += build_native_rect_stroke(
+                    x1, y1, x2, y2, stroke_color, linewidth
+                )
+            elif shape_type == 'polygon':
+                from wsd_gt_build import make_line_seg, make_path
+                verts = [wsd_sp[j] for j in range(0, len(wsd_sp), 3)]
+                if verts[0] != verts[-1]:
+                    verts = verts + [verts[0]]
+                seg = make_line_seg(verts)
+                line_color_bgra = stroke_color + bytes([0xff])
+                records_data += make_path([[seg]], line_color_bgra, linewidth, fill_color_bgra=None)
+            elif shape_type == 'polyline':
+                from wsd_gt_build import make_line_seg, make_path
+                verts = [wsd_sp[j] for j in range(0, len(wsd_sp), 3)]
+                seg = make_line_seg(verts)
+                line_color_bgra = stroke_color + bytes([0xff])
+                records_data += make_path([[seg]], line_color_bgra, linewidth, fill_color_bgra=None)
+            elif shape_type == 'arc':
+                # 正圆弧描边：使用WSD原生圆弧格式
+                from wsd_gt_build import make_arc_native_path
+                cx = int(shape_data['cx'] * sx + ox)
+                cy = int(shape_data['cy'] * sy + oy)
+                r = shape_data['r'] * abs(sx)
+                start_angle = math.radians(shape_data['start_angle'])
+                end_angle = math.radians(shape_data['end_angle'])
+                line_color_bgra = stroke_color + bytes([0xff])
+                records_data += make_arc_native_path(
+                    cx, cy, r, start_angle, end_angle,
+                    line_color_bgra, linewidth
+                )
+            else:
+                records_data += build_native_bezier_stroke(
+                    wsd_sp, stroke_color, linewidth
+                )
+            num_objects += 1
+            # outline 模式下纯描边不需要再画轮廓
+            continue
+
+        # 填充形状（\fill）
         if fill_colors[i] is not None:
             if shape_type == 'circle':
                 cx = int(shape_data['cx'] * sx + ox)
@@ -1637,22 +1694,19 @@ def convert_to_wsd(input_path, wsd_path, color_mode='rainbow',
                 y2 = int(shape_data['y2'] * sy + oy)
                 records_data += build_native_rect_fill(x1, y1, x2, y2, fill_colors[i])
             elif shape_type == 'polygon':
-                # 从贝塞尔点中提取顶点 (索引 0, 3, 6, ...)
                 verts = [wsd_sp[j] for j in range(0, len(wsd_sp), 3)]
                 records_data += build_native_polygon_fill(verts, fill_colors[i])
             elif shape_type == 'polyline':
-                # 开放折线一般不填充，用贝塞尔近似
                 records_data += build_native_bezier_fill(wsd_sp, fill_colors[i])
             elif shape_type == 'arc':
-                # 圆弧一般不填充，作为描边用，这里用贝塞尔近似
-                records_data += build_fill_record(wsd_sp, fill_colors[i])
+                # 圆弧填充（扇形）：用贝塞尔近似
+                records_data += build_native_bezier_fill(wsd_sp, fill_colors[i])
             else:
-                # bezier 或其他：用原生贝塞尔段
                 records_data += build_native_bezier_fill(wsd_sp, fill_colors[i])
             num_objects += 1
 
-        # 轮廓：无填充模式下也绘制轮廓
-        if outline or fill_colors[i] is None:
+        # 轮廓：填充形状加轮廓
+        if outline and fill_colors[i] is not None:
             bgr_black = bytes([0x00, 0x00, 0x00])
             if shape_type == 'circle':
                 cx = int(shape_data['cx'] * sx + ox)
@@ -1670,27 +1724,32 @@ def convert_to_wsd(input_path, wsd_path, color_mode='rainbow',
                     x1, y1, x2, y2, bgr_black, linewidth
                 )
             elif shape_type == 'polygon':
-                # 多边形描边：用折线（闭合）
                 from wsd_gt_build import make_line_seg, make_path
                 verts = [wsd_sp[j] for j in range(0, len(wsd_sp), 3)]
-                # 确保闭合
                 if verts[0] != verts[-1]:
                     verts = verts + [verts[0]]
                 seg = make_line_seg(verts)
                 line_color_bgra = bgr_black + bytes([0xff])
                 records_data += make_path([[seg]], line_color_bgra, linewidth, fill_color_bgra=None)
             elif shape_type == 'polyline':
-                # 开放折线描边
                 from wsd_gt_build import make_line_seg, make_path
                 verts = [wsd_sp[j] for j in range(0, len(wsd_sp), 3)]
                 seg = make_line_seg(verts)
                 line_color_bgra = bgr_black + bytes([0xff])
                 records_data += make_path([[seg]], line_color_bgra, linewidth, fill_color_bgra=None)
             elif shape_type == 'arc':
-                # 圆弧用贝塞尔近似描边
-                records_data += build_bezier_record(wsd_sp, black_idx, linewidth)
+                from wsd_gt_build import make_arc_native_path
+                cx = int(shape_data['cx'] * sx + ox)
+                cy = int(shape_data['cy'] * sy + oy)
+                r = shape_data['r'] * abs(sx)
+                start_angle = math.radians(shape_data['start_angle'])
+                end_angle = math.radians(shape_data['end_angle'])
+                line_color_bgra = bgr_black + bytes([0xff])
+                records_data += make_arc_native_path(
+                    cx, cy, r, start_angle, end_angle,
+                    line_color_bgra, linewidth
+                )
             else:
-                # bezier 或其他
                 records_data += build_native_bezier_stroke(
                     wsd_sp, bgr_black, linewidth
                 )
