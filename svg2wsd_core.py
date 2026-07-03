@@ -611,7 +611,7 @@ def _vectorize_mask(bw_mask, turdsize=2, alphamax=1.0):
 def _parse_image_file_color(img_path, turdsize=2, n_colors=32, alphamax=1.0,
                             sample_colors_from_original=True,
                             method='contour', contour_step=3, contour_min_area=50,
-                            scale=0.5, smooth_level=1,
+                            scale=0.5, smooth_level=1, dilate_size=2,
                             progress_cb=None):
     """
     将彩色图片矢量化为带颜色的贝塞尔路径
@@ -624,6 +624,7 @@ def _parse_image_file_color(img_path, turdsize=2, n_colors=32, alphamax=1.0,
         contour_min_area: 等高线模式下的最小区域面积
         scale: 图片处理缩放比例（越大越精细但越慢）
         smooth_level: 颜色平滑等级 0=无 1=轻微 2=中等 3=强
+        dilate_size: 区域膨胀大小（像素），消除色块间缝隙
         progress_cb: 进度回调函数(msg, percent)
 
     返回: (子路径列表, 颜色列表, 边界框)
@@ -636,6 +637,7 @@ def _parse_image_file_color(img_path, turdsize=2, n_colors=32, alphamax=1.0,
             scale=scale,
             alphamax=alphamax,
             smooth_level=smooth_level,
+            dilate_size=dilate_size,
             progress_cb=progress_cb
         )
     else:
@@ -763,7 +765,7 @@ def _parse_image_file_quantize_color(img_path, turdsize=2, n_colors=32, alphamax
 
 def _parse_image_file_contour_color(img_path, min_area=50, step=3,
                                     scale=0.5, alphamax=1.0,
-                                    smooth_level=1,
+                                    smooth_level=1, dilate_size=2,
                                     progress_cb=None):
     """
     彩色矢量化方法（原色填充）- 高精度版
@@ -777,6 +779,7 @@ def _parse_image_file_contour_color(img_path, min_area=50, step=3,
         scale: 处理时的缩放比例，越大越精细但越慢
         alphamax: potrace的alphamax参数（越小曲线越锐利）
         smooth_level: 颜色平滑等级 0=无 1=轻微 2=中等 3=强
+        dilate_size: 区域膨胀大小（像素），用于消除色块间缝隙，0=不膨胀
         progress_cb: 进度回调函数(msg, percent)
 
     返回: (子路径列表, 颜色列表, 边界框)
@@ -949,9 +952,28 @@ def _parse_image_file_contour_color(img_path, min_area=50, step=3,
     # potrace的turdsize：比min_area小一些，避免丢掉小区域的细节
     potrace_turd = max(1, min_area // 5)
 
+    # 膨胀核：用于消除色块间的缝隙
+    # 每个区域向外膨胀若干像素，让相邻色块有重叠
+    # 因为大区域先画，小区域后画在上层，重叠处会被上层覆盖，视觉上无缝隙
+    if dilate_size > 0:
+        dilate_kernel = cv2.getStructuringElement(
+            cv2.MORPH_ELLIPSE, (dilate_size * 2 + 1, dilate_size * 2 + 1)
+        )
+    else:
+        dilate_kernel = None
+
     for ri, (bw_mask, area, color_hex) in enumerate(all_regions):
+        # 区域膨胀：消除色块间的缝隙
+        # 每个色块稍微放大一点，与相邻色块重叠
+        if dilate_kernel is not None:
+            mask_uint8 = bw_mask.astype(np.uint8)
+            mask_dilated = cv2.dilate(mask_uint8, dilate_kernel, iterations=1)
+            bw_mask_for_trace = mask_dilated > 0
+        else:
+            bw_mask_for_trace = bw_mask
+
         # potrace矢量化（取反，因为potrace矢量化的是值为0的区域）
-        bmp = potrace.Bitmap(~bw_mask)
+        bmp = potrace.Bitmap(~bw_mask_for_trace)
         path = bmp.trace(
             alphamax=alphamax,
             turdsize=potrace_turd,
@@ -1118,7 +1140,7 @@ def parse_input_file(file_path, img_threshold=128, img_turdsize=2,
                      img_color=False, img_n_colors=16,
                      img_color_method='contour',
                      img_contour_step=5, img_contour_min_area=100,
-                     img_scale=0.5, img_smooth_level=1,
+                     img_scale=0.5, img_smooth_level=1, img_dilate_size=2,
                      progress_cb=None):
     """
     统一解析输入文件（SVG或图片）
@@ -1139,6 +1161,7 @@ def parse_input_file(file_path, img_threshold=128, img_turdsize=2,
                 contour_min_area=img_contour_min_area,
                 scale=img_scale,
                 smooth_level=img_smooth_level,
+                dilate_size=img_dilate_size,
                 progress_cb=progress_cb
             )
         else:
@@ -1161,6 +1184,7 @@ def parse_input_file(file_path, img_threshold=128, img_turdsize=2,
                         contour_step=img_contour_step,
                         contour_min_area=img_contour_min_area,
                         smooth_level=img_smooth_level,
+                        dilate_size=img_dilate_size,
                         progress_cb=progress_cb
                     )
                 else:
@@ -1224,7 +1248,7 @@ def convert_to_wsd(input_path, wsd_path, color_mode='rainbow',
                    img_color=False, img_n_colors=16,
                    img_color_method='contour',
                    img_contour_step=5, img_contour_min_area=100,
-                   img_scale=0.5, img_smooth_level=1,
+                   img_scale=0.5, img_smooth_level=1, img_dilate_size=2,
                    progress_cb=None):
     """
     将SVG或图片转换为WSD
@@ -1272,6 +1296,7 @@ def convert_to_wsd(input_path, wsd_path, color_mode='rainbow',
         img_contour_min_area=img_contour_min_area,
         img_scale=img_scale,
         img_smooth_level=img_smooth_level,
+        img_dilate_size=img_dilate_size,
         progress_cb=progress_cb
     )
 
@@ -1470,7 +1495,7 @@ def convert_to_wsd_multi(input_files, output_path, color_mode='rainbow',
                          img_color=False, img_n_colors=16,
                          img_color_method='contour',
                          img_contour_step=5, img_contour_min_area=100,
-                         img_scale=0.5, img_smooth_level=1,
+                         img_scale=0.5, img_smooth_level=1, img_dilate_size=2,
                          progress_cb=None):
     """
     将多个输入文件合并到同一个WSD的不同画布
@@ -1520,6 +1545,7 @@ def convert_to_wsd_multi(input_files, output_path, color_mode='rainbow',
             img_contour_min_area=img_contour_min_area,
             img_scale=img_scale,
             img_smooth_level=img_smooth_level,
+            img_dilate_size=img_dilate_size,
             progress_cb=None  # 多文件时外层统一控制进度
         )
 

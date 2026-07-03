@@ -346,6 +346,7 @@ class Image2WSDApp:
         self.contour_min_area = tk.IntVar(value=10)
         self.contour_scale = tk.DoubleVar(value=0.75)
         self.contour_smooth = tk.IntVar(value=1)
+        self.contour_dilate = tk.IntVar(value=2)
         self.contour_row1 = ttk.Frame(img_frame)
         self.cs_scale, self.cs_val_label = _make_img_slider_row(
             self.contour_row1, "颜色精细度:", self.contour_step, 1, 10, 1, "{}", width=12)
@@ -360,6 +361,10 @@ class Image2WSDApp:
         # 平滑等级
         self.csm_scale, self.csm_val_label = _make_img_slider_row(
             self.contour_row4, "平滑等级:", self.contour_smooth, 0, 3, 1, "{}", width=12)
+        self.contour_row5 = ttk.Frame(img_frame)
+        # 膨胀大小（消除缝隙）
+        self.cdl_scale, self.cdl_val_label = _make_img_slider_row(
+            self.contour_row5, "消除缝隙:", self.contour_dilate, 0, 4, 1, "{}px", width=12)
 
         # 调色板颜色数量行（默认隐藏）
         self.n_colors_row = ttk.Frame(img_frame)
@@ -649,6 +654,9 @@ class Image2WSDApp:
             self._method_row.pack_forget()
             self.contour_row1.pack_forget()
             self.contour_row2.pack_forget()
+            self.contour_row3.pack_forget()
+            self.contour_row4.pack_forget()
+            self.contour_row5.pack_forget()
             self.n_colors_row.pack_forget()
             self._n_colors_visible = False
             # 取消彩色矢量化时，如果当前是原色模式，自动切回彩虹
@@ -670,6 +678,7 @@ class Image2WSDApp:
             self.contour_row2.pack(fill='x', padx=8, pady=2)
             self.contour_row3.pack(fill='x', padx=8, pady=2)
             self.contour_row4.pack(fill='x', padx=8, pady=2)
+            self.contour_row5.pack(fill='x', padx=8, pady=2)
             # 隐藏调色板参数
             self.n_colors_row.pack_forget()
             self._n_colors_visible = False
@@ -679,6 +688,7 @@ class Image2WSDApp:
             self.contour_row2.pack_forget()
             self.contour_row3.pack_forget()
             self.contour_row4.pack_forget()
+            self.contour_row5.pack_forget()
             # 显示调色板参数
             self.n_colors_row.pack(fill='x', padx=8, pady=2)
             self._n_colors_visible = True
@@ -692,6 +702,7 @@ class Image2WSDApp:
         self.cma_val_label.config(text=f"{int(self.contour_min_area.get())}")
         self.csc_val_label.config(text=f"{self.contour_scale.get():.2f}")
         self.csm_val_label.config(text=f"{int(self.contour_smooth.get())}")
+        self.cdl_val_label.config(text=f"{int(self.contour_dilate.get())}px")
         # 图片参数变化时重新矢量化（带防抖）
         if self.current_file and self._is_image_file(self.current_file):
             self._schedule_img_update()
@@ -804,6 +815,7 @@ class Image2WSDApp:
                         img_contour_min_area=self.contour_min_area.get(),
                         img_scale=self.contour_scale.get(),
                         img_smooth_level=self.contour_smooth.get(),
+                        img_dilate_size=self.contour_dilate.get(),
                         progress_cb=_progress_cb,
                     )
                     result = (subpaths, colors, bbox, ftype)
@@ -1149,6 +1161,7 @@ class Image2WSDApp:
                         img_contour_min_area=self.contour_min_area.get(),
                         img_scale=self.contour_scale.get(),
                         img_smooth_level=self.contour_smooth.get(),
+                        img_dilate_size=self.contour_dilate.get(),
                         progress_cb=self._update_progress,
                     )
                 self._update_progress("完成！", 100)
@@ -1215,6 +1228,7 @@ class Image2WSDApp:
                         img_contour_min_area=self.contour_min_area.get(),
                         img_scale=self.contour_scale.get(),
                         img_smooth_level=self.contour_smooth.get(),
+                        img_dilate_size=self.contour_dilate.get(),
                         progress_cb=None,
                     )
                 success += 1
