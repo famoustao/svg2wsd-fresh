@@ -1357,6 +1357,133 @@ def build_native_circle_stroke(cx, cy, r, bgr_color, linewidth=DEFAULT_LINEWIDTH
     return path_bytes
 
 
+def build_native_rect_fill(x1, y1, x2, y2, bgr_color, linewidth=DEFAULT_FILL_LW):
+    """
+    构建原生矩形填充记录（使用 WSD 多边形段 0x4702）
+    """
+    from wsd_gt_build import make_gon_seg, make_path
+
+    line_color_bgra = bgr_color + bytes([0xff])
+    fill_color_bgr = bgr_color
+
+    # 矩形4个角点
+    pts = [(x1, y1), (x2, y1), (x2, y2), (x1, y2)]
+    seg = make_gon_seg(pts)
+
+    path_bytes = make_path(
+        [[seg]],
+        line_color_bgra,
+        linewidth,
+        fill_color_bgra=fill_color_bgr,
+        fill_alpha=0xff
+    )
+
+    return path_bytes
+
+
+def build_native_rect_stroke(x1, y1, x2, y2, bgr_color, linewidth=DEFAULT_LINEWIDTH):
+    """
+    构建原生矩形描边记录（使用 WSD 折线段 0x4701）
+    """
+    from wsd_gt_build import make_line_seg, make_path
+
+    line_color_bgra = bgr_color + bytes([0xff])
+
+    pts = [(x1, y1), (x2, y1), (x2, y2), (x1, y2), (x1, y1)]
+    seg = make_line_seg(pts)
+
+    path_bytes = make_path(
+        [[seg]],
+        line_color_bgra,
+        linewidth,
+        fill_color_bgra=None,
+    )
+
+    return path_bytes
+
+
+def build_native_polygon_fill(points, bgr_color, linewidth=DEFAULT_FILL_LW):
+    """
+    构建原生多边形填充记录（使用 WSD 多边形段 0x4702）
+    """
+    from wsd_gt_build import make_gon_seg, make_path
+
+    line_color_bgra = bgr_color + bytes([0xff])
+    fill_color_bgr = bgr_color
+
+    seg = make_gon_seg(points)
+
+    path_bytes = make_path(
+        [[seg]],
+        line_color_bgra,
+        linewidth,
+        fill_color_bgra=fill_color_bgr,
+        fill_alpha=0xff
+    )
+
+    return path_bytes
+
+
+def build_native_bezier_fill(points, bgr_color, linewidth=DEFAULT_FILL_LW):
+    """
+    构建原生贝塞尔填充记录（使用 WSD 贝塞尔段 0x4703）
+    points: [p0, c1, c2, p3, ...] 每4个点一段
+    """
+    from wsd_gt_build import make_bezier_seg, make_path
+
+    line_color_bgra = bgr_color + bytes([0xff])
+    fill_color_bgr = bgr_color
+
+    # 把连续的贝塞尔点拆分成多段
+    segs = []
+    n = len(points)
+    if n >= 4:
+        # 第一段: p0, c1, c2, p3
+        segs.append(make_bezier_seg(points[0], points[1], points[2], points[3]))
+        # 后续段以上一段终点为起点
+        i = 4
+        while i + 2 < n:
+            segs.append(make_bezier_seg(points[i-1], points[i], points[i+1], points[i+2]))
+            i += 3
+
+    path_bytes = make_path(
+        [segs],
+        line_color_bgra,
+        linewidth,
+        fill_color_bgra=fill_color_bgr,
+        fill_alpha=0xff
+    )
+
+    return path_bytes
+
+
+def build_native_bezier_stroke(points, bgr_color, linewidth=DEFAULT_LINEWIDTH):
+    """
+    构建原生贝塞尔描边记录（使用 WSD 贝塞尔段 0x4703）
+    """
+    from wsd_gt_build import make_bezier_seg, make_path
+
+    line_color_bgra = bgr_color + bytes([0xff])
+
+    segs = []
+    n = len(points)
+    if n >= 4:
+        segs.append(make_bezier_seg(points[0], points[1], points[2], points[3]))
+        i = 4
+        while i + 2 < n:
+            segs.append(make_bezier_seg(points[i-1], points[i], points[i+1], points[i+2]))
+            i += 3
+
+    path_bytes = make_path(
+        [segs],
+        line_color_bgra,
+        linewidth,
+        fill_color_bgra=None,
+    )
+
+    return path_bytes
+
+
 # ========== 主转换函数 ==========
 
 def convert_to_wsd(input_path, wsd_path, color_mode='rainbow',
@@ -1488,39 +1615,61 @@ def convert_to_wsd(input_path, wsd_path, color_mode='rainbow',
             continue
         wsd_sp = [(int(x*sx+ox), int(y*sy+oy)) for x, y in sp]
 
-        # 检查是否为 TikZ 原生圆
-        is_tikz_native_circle = False
-        circle_cx = circle_cy = circle_r = 0
+        # 检查 TikZ 形状类型
+        shape_type = 'bezier'
+        shape_data = {}
         if tikz_shapes is not None and i < len(tikz_shapes):
             shape = tikz_shapes[i]
-            if shape['type'] == 'circle' and 'cx' in shape['data']:
-                is_tikz_native_circle = True
-                cx = shape['data']['cx']
-                cy = shape['data']['cy']
-                r = shape['data']['r']
-                # 应用同样的缩放和偏移
-                circle_cx = int(cx * sx + ox)
-                circle_cy = int(cy * sy + oy)
-                circle_r = r * abs(sx)  # 等比缩放
+            shape_type = shape['type']
+            shape_data = shape['data']
 
         # 无填充模式下跳过填充记录
         if fill_colors[i] is not None:
-            if is_tikz_native_circle:
-                records_data += build_native_circle_fill(
-                    circle_cx, circle_cy, circle_r, fill_colors[i]
-                )
-            else:
+            if shape_type == 'circle':
+                cx = int(shape_data['cx'] * sx + ox)
+                cy = int(shape_data['cy'] * sy + oy)
+                r = shape_data['r'] * abs(sx)
+                records_data += build_native_circle_fill(cx, cy, r, fill_colors[i])
+            elif shape_type == 'rect':
+                x1 = int(shape_data['x1'] * sx + ox)
+                y1 = int(shape_data['y1'] * sy + oy)
+                x2 = int(shape_data['x2'] * sx + ox)
+                y2 = int(shape_data['y2'] * sy + oy)
+                records_data += build_native_rect_fill(x1, y1, x2, y2, fill_colors[i])
+            elif shape_type == 'arc':
+                # 圆弧一般不填充，作为描边用，这里用贝塞尔近似
                 records_data += build_fill_record(wsd_sp, fill_colors[i])
+            else:
+                # bezier 或其他：用原生贝塞尔段
+                records_data += build_native_bezier_fill(wsd_sp, fill_colors[i])
             num_objects += 1
+
         # 轮廓：无填充模式下也绘制轮廓
         if outline or fill_colors[i] is None:
-            if is_tikz_native_circle:
+            bgr_black = bytes([0x00, 0x00, 0x00])
+            if shape_type == 'circle':
+                cx = int(shape_data['cx'] * sx + ox)
+                cy = int(shape_data['cy'] * sy + oy)
+                r = shape_data['r'] * abs(sx)
                 records_data += build_native_circle_stroke(
-                    circle_cx, circle_cy, circle_r,
-                    bytes([0x00, 0x00, 0x00]), linewidth
+                    cx, cy, r, bgr_black, linewidth
                 )
-            else:
+            elif shape_type == 'rect':
+                x1 = int(shape_data['x1'] * sx + ox)
+                y1 = int(shape_data['y1'] * sy + oy)
+                x2 = int(shape_data['x2'] * sx + ox)
+                y2 = int(shape_data['y2'] * sy + oy)
+                records_data += build_native_rect_stroke(
+                    x1, y1, x2, y2, bgr_black, linewidth
+                )
+            elif shape_type == 'arc':
+                # 圆弧用贝塞尔近似描边
                 records_data += build_bezier_record(wsd_sp, black_idx, linewidth)
+            else:
+                # bezier 或其他
+                records_data += build_native_bezier_stroke(
+                    wsd_sp, bgr_black, linewidth
+                )
             num_objects += 1
         if progress_cb and i % 10 == 0:
             pct = 55 + int(35 * i / total)

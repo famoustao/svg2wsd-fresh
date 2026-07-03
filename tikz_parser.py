@@ -1055,6 +1055,16 @@ class TikZPathParser:
                             self.current_sp = transformed
                             self.subpaths[-1] = transformed
                             self.current_pos = transformed[-1]
+                            # 设置形状信息
+                            p1 = self.transform.transform_point(x1, y1)
+                            p2 = self.transform.transform_point(x2, y2)
+                            self._current_shape_type = 'rect'
+                            self._current_shape_data = {
+                                'x1': min(p1[0], p2[0]),
+                                'y1': min(p1[1], p2[1]),
+                                'x2': max(p1[0], p2[0]),
+                                'y2': max(p1[1], p2[1]),
+                            }
                         i += 1
 
                 elif op == 'circle':
@@ -1231,6 +1241,19 @@ class TikZPathParser:
                                 self.current_sp.extend(transformed)
                                 if transformed:
                                     self.current_pos = transformed[-1]
+
+                                # 正圆弧 → 标记为 arc 形状（可用于原生圆段）
+                                if abs(rx - ry) < 1e-6:
+                                    cx_t, cy_t = self.transform.transform_point(cx, cy)
+                                    r_t = rx * math.sqrt(self.transform.a ** 2 + self.transform.b ** 2)
+                                    self._current_shape_type = 'arc'
+                                    self._current_shape_data = {
+                                        'cx': cx_t,
+                                        'cy': cy_t,
+                                        'r': r_t,
+                                        'start_angle': start_angle,
+                                        'end_angle': end_angle,
+                                    }
 
                 elif op == 'cycle':
                     self._close_path()
