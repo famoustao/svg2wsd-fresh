@@ -1155,7 +1155,7 @@ def parse_input_file(file_path, img_threshold=128, img_turdsize=2,
     elif ext in TIKZ_EXTENSIONS:
         if progress_cb:
             progress_cb("解析 TikZ 代码...", 10)
-        subpaths, colors, bbox = _parse_tikz_file(file_path)
+        subpaths, colors, bbox, _ = _parse_tikz_file(file_path)
         return subpaths, colors, bbox, 'tikz'
     elif ext in IMAGE_EXTENSIONS:
         if img_color:
@@ -1184,7 +1184,7 @@ def parse_input_file(file_path, img_threshold=128, img_turdsize=2,
             if 'tikzpicture' in content or '\\draw' in content or '\\fill' in content:
                 if progress_cb:
                     progress_cb("解析 TikZ 代码...", 10)
-                subpaths, colors, bbox = _parse_tikz_file(file_path)
+                subpaths, colors, bbox, _ = _parse_tikz_file(file_path)
                 return subpaths, colors, bbox, 'tikz'
         except:
             pass
@@ -1219,7 +1219,8 @@ def _parse_tikz_file(file_path):
     解析 TikZ 代码文件，直接转换为贝塞尔子路径和颜色
     TikZ 坐标系 y 轴向上，需要翻转为 WSD 的 y 轴向下
 
-    返回: (子路径列表, 颜色列表, 边界框)
+    返回: (subpaths, colors, bbox, shapes)
+        shapes: 形状信息列表，每个元素包含 type/color/data
     """
     from tikz_parser import TikZParser
 
@@ -1228,10 +1229,11 @@ def _parse_tikz_file(file_path):
 
     parser = TikZParser()
     subpaths, colors, bbox = parser.parse(code)
+    shapes = parser.shapes
 
     # 如果没解析到路径，返回空结果
     if not subpaths:
-        return [], [], (0, 0, 100, 100)
+        return [], [], (0, 0, 100, 100), []
 
     # y 轴翻转 (TikZ y向上 → WSD y向下)
     min_y = bbox[1]
@@ -1243,10 +1245,19 @@ def _parse_tikz_file(file_path):
         flipped = [(x, 2 * mid_y - y) for x, y in sp]
         flipped_subpaths.append(flipped)
 
+    # 翻转 shapes 中的圆心 y 坐标
+    flipped_shapes = []
+    for shape in shapes:
+        new_shape = shape.copy()
+        new_shape['data'] = shape['data'].copy()
+        if shape['type'] == 'circle' and 'cy' in shape['data']:
+            new_shape['data']['cy'] = 2 * mid_y - shape['data']['cy']
+        flipped_shapes.append(new_shape)
+
     # 重新计算 bbox (y 翻转后 min/max 互换)
     flipped_bbox = (bbox[0], min_y, bbox[2], max_y)
 
-    return flipped_subpaths, colors, flipped_bbox
+    return flipped_subpaths, colors, flipped_bbox, flipped_shapes
 
 
 def is_supported_image(filename):
@@ -1290,6 +1301,60 @@ def build_bezier_record(points, color_idx=b'\x01\xff\x00\x00', linewidth=DEFAULT
         rec += struct.pack('<I', y & 0xFFFFFFFF)
     rec += bytes([0x64])
     return rec
+
+
+def build_native_circle_fill(cx, cy, r, bgr_color, linewidth=DEFAULT_FILL_LW):
+    """
+    构建原生圆填充记录（使用 WSD 原生圆段 0x4284）
+
+    参数:
+        cx, cy: 圆心（WSD单位，整数）
+        r: 半径（WSD单位，浮点数）
+        bgr_color: BGR 颜色 (3字节)
+        linewidth: 线宽（WSD单位）
+
+    返回: 记录的字节数据
+    """
+    # 使用 wsd_gt_build 中的原生圆段 + 路径构建
+    from wsd_gt_build import make_circle_native_seg, make_path
+
+    # 线颜色（填充模式下描边颜色和填充相同即可，实际不显示）
+    line_color_bgra = bgr_color + bytes([0xff])  # BGRA
+    fill_color_bgr = bgr_color  # BGR
+
+    # 构建原生圆段
+    seg = make_circle_native_seg(cx, cy, r)
+
+    # 构建路径记录
+    path_bytes = make_path(
+        [[seg]],
+        line_color_bgra,
+        linewidth,
+        fill_color_bgra=fill_color_bgr,
+        fill_alpha=0xff
+    )
+
+    return path_bytes
+
+
+def build_native_circle_stroke(cx, cy, r, bgr_color, linewidth=DEFAULT_LINEWIDTH):
+    """
+    构建原生圆描边记录（使用 WSD 原生圆段 0x4284）
+    """
+    from wsd_gt_build import make_circle_native_seg, make_path
+
+    line_color_bgra = bgr_color + bytes([0xff])
+
+    seg = make_circle_native_seg(cx, cy, r)
+
+    path_bytes = make_path(
+        [[seg]],
+        line_color_bgra,
+        linewidth,
+        fill_color_bgra=None,
+    )
+
+    return path_bytes
 
 
 # ========== 主转换函数 ==========
@@ -1352,6 +1417,11 @@ def convert_to_wsd(input_path, wsd_path, color_mode='rainbow',
         img_dilate_size=img_dilate_size,
         progress_cb=progress_cb
     )
+
+    # TikZ 额外获取形状信息（用于原生圆/圆弧）
+    tikz_shapes = None
+    if file_type == 'tikz':
+        _, _, _, tikz_shapes = _parse_tikz_file(input_path)
 
     if not all_subpaths:
         raise ValueError("文件中没有找到路径")
@@ -1417,13 +1487,40 @@ def convert_to_wsd(input_path, wsd_path, color_mode='rainbow',
         if len(sp) < 2:
             continue
         wsd_sp = [(int(x*sx+ox), int(y*sy+oy)) for x, y in sp]
+
+        # 检查是否为 TikZ 原生圆
+        is_tikz_native_circle = False
+        circle_cx = circle_cy = circle_r = 0
+        if tikz_shapes is not None and i < len(tikz_shapes):
+            shape = tikz_shapes[i]
+            if shape['type'] == 'circle' and 'cx' in shape['data']:
+                is_tikz_native_circle = True
+                cx = shape['data']['cx']
+                cy = shape['data']['cy']
+                r = shape['data']['r']
+                # 应用同样的缩放和偏移
+                circle_cx = int(cx * sx + ox)
+                circle_cy = int(cy * sy + oy)
+                circle_r = r * abs(sx)  # 等比缩放
+
         # 无填充模式下跳过填充记录
         if fill_colors[i] is not None:
-            records_data += build_fill_record(wsd_sp, fill_colors[i])
+            if is_tikz_native_circle:
+                records_data += build_native_circle_fill(
+                    circle_cx, circle_cy, circle_r, fill_colors[i]
+                )
+            else:
+                records_data += build_fill_record(wsd_sp, fill_colors[i])
             num_objects += 1
         # 轮廓：无填充模式下也绘制轮廓
         if outline or fill_colors[i] is None:
-            records_data += build_bezier_record(wsd_sp, black_idx, linewidth)
+            if is_tikz_native_circle:
+                records_data += build_native_circle_stroke(
+                    circle_cx, circle_cy, circle_r,
+                    bytes([0x00, 0x00, 0x00]), linewidth
+                )
+            else:
+                records_data += build_bezier_record(wsd_sp, black_idx, linewidth)
             num_objects += 1
         if progress_cb and i % 10 == 0:
             pct = 55 + int(35 * i / total)

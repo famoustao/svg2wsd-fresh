@@ -697,6 +697,9 @@ class TikZPathParser:
         self.transform = TransformMatrix()
         self.scale_x = 28.452755906  # 1cm = 28.45pt (xyz 坐标系统)
         self.scale_y = 28.452755906
+        self.shape_info = []  # 每个子路径的形状信息: {type: 'circle'|'bezier'|'rect', ...}
+        self._current_shape_type = 'bezier'
+        self._current_shape_data = {}
 
     def _add_point(self, x, y):
         """添加点到当前子路径"""
@@ -708,11 +711,19 @@ class TikZPathParser:
 
     def _move_to(self, x, y):
         """移动到新位置，开始新子路径"""
+        # 保存上一个子路径的形状信息
+        if self.current_sp is not None and len(self.current_sp) >= 4:
+            self.shape_info.append({
+                'type': self._current_shape_type,
+                'data': self._current_shape_data.copy()
+            })
         x, y = self.transform.transform_point(x, y)
         self.current_pos = (x, y)
         self.move_origin = (x, y)
         self.current_sp = [(x, y)]
         self.subpaths.append(self.current_sp)
+        self._current_shape_type = 'bezier'
+        self._current_shape_data = {}
 
     def _line_to(self, x, y):
         """直线到目标点"""
@@ -750,6 +761,20 @@ class TikZPathParser:
         # 用 tokenizer 来分割路径操作
         tokens = self._tokenize(path_spec)
         self._parse_tokens(tokens)
+
+        # 保存最后一个子路径的形状信息
+        if self.current_sp is not None and len(self.current_sp) >= 4:
+            # 确保 shape_info 数量与 subpaths 一致
+            while len(self.shape_info) < len(self.subpaths) - 1:
+                self.shape_info.append({'type': 'bezier', 'data': {}})
+            self.shape_info.append({
+                'type': self._current_shape_type,
+                'data': self._current_shape_data.copy()
+            })
+
+        # 确保 shape_info 和 subpaths 数量一致
+        while len(self.shape_info) < len(self.subpaths):
+            self.shape_info.append({'type': 'bezier', 'data': {}})
 
         return self.subpaths
 
@@ -1059,6 +1084,10 @@ class TikZPathParser:
 
                     if radius is not None:
                         cx, cy = self.current_pos
+                        # 变换后的圆心和半径
+                        cx_t, cy_t = self.transform.transform_point(cx, cy)
+                        # 半径缩放（等比缩放时，取x方向缩放）
+                        r_t = radius * math.sqrt(self.transform.a ** 2 + self.transform.b ** 2)
                         circle_sps = circle_to_bezier(cx, cy, radius)
                         if circle_sps:
                             transformed = []
@@ -1069,6 +1098,13 @@ class TikZPathParser:
                             self.current_sp = transformed
                             self.subpaths[-1] = transformed
                             self.current_pos = transformed[-1]
+                            # 设置形状信息
+                            self._current_shape_type = 'circle'
+                            self._current_shape_data = {
+                                'cx': cx_t,
+                                'cy': cy_t,
+                                'r': r_t,
+                            }
 
                 elif op == 'ellipse':
                     # 椭圆
@@ -1218,8 +1254,9 @@ class TikZParser:
 
     def __init__(self):
         self.color_defs = {}
-        self.subpaths = []  # 所有子路径
+        self.subpaths = []  # 所有子路径（贝塞尔点列表，兼容旧接口）
         self.colors = []    # 每个子路径的填充颜色 (#rrggbb)
+        self.shapes = []    # 形状列表，每个是 dict: {type, color, ...}
         self.bbox = None
 
     def parse(self, tikz_code):
@@ -1230,6 +1267,7 @@ class TikZParser:
             subpaths: 子路径列表，每个子路径是贝塞尔点列表
             colors: 每个子路径的填充颜色 (#rrggbb)
             bbox: (min_x, min_y, max_x, max_y)
+        同时填充 self.shapes 列表，包含形状类型信息
         """
         # 预处理: 提取 tikzpicture 环境
         tikz_code = self._extract_tikzpicture(tikz_code)
@@ -1342,16 +1380,33 @@ class TikZParser:
             subpaths = parser.parse(path_spec)
 
             # 添加到结果
-            for sp in subpaths:
+            for idx, sp in enumerate(subpaths):
                 if len(sp) < 4:
                     continue
+                shape_type = parser.shape_info[idx]['type'] if idx < len(parser.shape_info) else 'bezier'
+                shape_data = parser.shape_info[idx]['data'] if idx < len(parser.shape_info) else {}
+
                 if do_fill and fill_color is not None:
                     self.subpaths.append(sp)
                     self.colors.append(color_to_hex(fill_color))
+                    self.shapes.append({
+                        'type': shape_type,
+                        'color': color_to_hex(fill_color),
+                        'data': shape_data,
+                        'do_draw': do_draw,
+                        'draw_color': color_to_hex(draw_color) if draw_color else None,
+                    })
                 elif do_draw and draw_color is not None:
                     # 纯描边的也当作填充 (WSD 主要是填充)
                     self.subpaths.append(sp)
                     self.colors.append(color_to_hex(draw_color))
+                    self.shapes.append({
+                        'type': shape_type,
+                        'color': color_to_hex(draw_color),
+                        'data': shape_data,
+                        'do_draw': False,
+                        'draw_color': None,
+                    })
 
     def _find_statement_end(self, code, start):
         """找到语句结束的分号位置（处理嵌套括号）"""
