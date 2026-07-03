@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 通用图像 → WSD 转换器
-支持格式: SVG, PNG, JPG, JPEG, BMP, GIF, WebP, TIFF, ICO
+支持格式: SVG, PNG, JPG, JPEG, BMP, GIF, WebP, TIFF, ICO, TikZ/LaTeX
 """
 
 import struct
@@ -35,6 +35,7 @@ SVG_TY = 880.0
 # 支持的图片格式
 IMAGE_EXTENSIONS = {'.png', '.jpg', '.jpeg', '.bmp', '.gif', '.webp', '.tiff', '.tif', '.ico'}
 SVG_EXTENSIONS = {'.svg'}
+TIKZ_EXTENSIONS = {'.tikz', '.tex'}
 
 
 # ========== SVG路径解析 ==========
@@ -1143,14 +1144,19 @@ def parse_input_file(file_path, img_threshold=128, img_turdsize=2,
                      img_scale=0.5, img_smooth_level=1, img_dilate_size=2,
                      progress_cb=None):
     """
-    统一解析输入文件（SVG或图片）
+    统一解析输入文件（SVG/图片/TikZ）
     返回: (subpaths, colors, bbox, file_type)
-    file_type: 'svg' 或 'image'
+    file_type: 'svg' 或 'image' 或 'tikz'
     """
     ext = os.path.splitext(file_path)[1].lower()
     if ext in SVG_EXTENSIONS:
         subpaths, colors, bbox = _parse_svg_file(file_path)
         return subpaths, colors, bbox, 'svg'
+    elif ext in TIKZ_EXTENSIONS:
+        if progress_cb:
+            progress_cb("解析 TikZ 代码...", 10)
+        subpaths, colors, bbox = _parse_tikz_file(file_path)
+        return subpaths, colors, bbox, 'tikz'
     elif ext in IMAGE_EXTENSIONS:
         if img_color:
             # 彩色矢量化模式
@@ -1171,6 +1177,18 @@ def parse_input_file(file_path, img_threshold=128, img_turdsize=2,
             )
         return subpaths, colors, bbox, 'image'
     else:
+        # 尝试当作TikZ处理 (检查内容是否包含 tikzpicture)
+        try:
+            with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+                content = f.read()
+            if 'tikzpicture' in content or '\\draw' in content or '\\fill' in content:
+                if progress_cb:
+                    progress_cb("解析 TikZ 代码...", 10)
+                subpaths, colors, bbox = _parse_tikz_file(file_path)
+                return subpaths, colors, bbox, 'tikz'
+        except:
+            pass
+
         # 尝试当作SVG处理
         try:
             subpaths, colors, bbox = _parse_svg_file(file_path)
@@ -1196,9 +1214,44 @@ def parse_input_file(file_path, img_threshold=128, img_turdsize=2,
                 raise ValueError(f"不支持的文件格式: {ext}")
 
 
+def _parse_tikz_file(file_path):
+    """
+    解析 TikZ 代码文件，直接转换为贝塞尔子路径和颜色
+    TikZ 坐标系 y 轴向上，需要翻转为 WSD 的 y 轴向下
+
+    返回: (子路径列表, 颜色列表, 边界框)
+    """
+    from tikz_parser import TikZParser
+
+    with open(file_path, 'r', encoding='utf-8') as f:
+        code = f.read()
+
+    parser = TikZParser()
+    subpaths, colors, bbox = parser.parse(code)
+
+    # 如果没解析到路径，返回空结果
+    if not subpaths:
+        return [], [], (0, 0, 100, 100)
+
+    # y 轴翻转 (TikZ y向上 → WSD y向下)
+    min_y = bbox[1]
+    max_y = bbox[3]
+    mid_y = (min_y + max_y) / 2
+
+    flipped_subpaths = []
+    for sp in subpaths:
+        flipped = [(x, 2 * mid_y - y) for x, y in sp]
+        flipped_subpaths.append(flipped)
+
+    # 重新计算 bbox (y 翻转后 min/max 互换)
+    flipped_bbox = (bbox[0], min_y, bbox[2], max_y)
+
+    return flipped_subpaths, colors, flipped_bbox
+
+
 def is_supported_image(filename):
     ext = os.path.splitext(filename)[1].lower()
-    return ext in IMAGE_EXTENSIONS or ext in SVG_EXTENSIONS
+    return ext in IMAGE_EXTENSIONS or ext in SVG_EXTENSIONS or ext in TIKZ_EXTENSIONS
 
 
 # ========== WSD记录构建 ==========

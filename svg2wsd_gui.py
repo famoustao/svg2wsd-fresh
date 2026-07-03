@@ -202,7 +202,7 @@ class Image2WSDApp:
         self.file_listbox.bind('<<ListboxSelect>>', self._on_file_select)
 
         # 支持格式说明
-        fmt_label = ttk.Label(left, text="支持: SVG, PNG, JPG, BMP, GIF, WebP, TIFF",
+        fmt_label = ttk.Label(left, text="支持: SVG, PNG, JPG, BMP, GIF, WebP, TIFF, TikZ",
                               foreground='gray', font=('Arial', 8))
         fmt_label.pack(pady=(0, 5))
 
@@ -472,8 +472,9 @@ class Image2WSDApp:
         files = filedialog.askopenfilenames(
             title="选择图像文件",
             filetypes=[
-                ("所有支持的格式", "*.svg *.png *.jpg *.jpeg *.bmp *.gif *.webp *.tif *.tiff"),
+                ("所有支持的格式", "*.svg *.png *.jpg *.jpeg *.bmp *.gif *.webp *.tif *.tiff *.tikz *.tex"),
                 ("SVG文件", "*.svg"),
+                ("TikZ/LaTeX文件", "*.tikz *.tex"),
                 ("图片文件", "*.png *.jpg *.jpeg *.bmp *.gif *.webp *.tif *.tiff"),
                 ("所有文件", "*.*"),
             ]
