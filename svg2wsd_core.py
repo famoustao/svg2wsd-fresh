@@ -359,6 +359,59 @@ def path_area(sp):
         signed += (x2 - x1) * (y2 + y1)
     return abs(signed)
 
+def path_signed_area(sp):
+    """计算路径的有符号面积，用于判断路径方向
+    正值表示顺时针，负值表示逆时针（取决于坐标系）
+    """
+    anchors = sp[::3]
+    if anchors and anchors[0] == anchors[-1]:
+        anchors = anchors[:-1]
+    if len(anchors) < 3:
+        return 0
+    signed = 0
+    for j in range(len(anchors)):
+        x1, y1 = anchors[j]
+        x2, y2 = anchors[(j+1) % len(anchors)]
+        signed += (x2 - x1) * (y2 + y1)
+    return signed
+
+def reverse_path(sp):
+    """反转路径方向（保持贝塞尔曲线的形状）"""
+    if len(sp) < 2:
+        return sp
+    # 贝塞尔路径反转：p0, c1, c2, p3, c3, c4, p5, ... 
+    # 反转后: p5, c4, c3, p3, c2, c1, p0
+    # 也就是每段的控制点交换顺序
+    result = []
+    # 收集所有段
+    segments = []
+    i = 0
+    while i + 3 < len(sp):
+        p0 = sp[i]
+        c1 = sp[i+1]
+        c2 = sp[i+2]
+        p3 = sp[i+3]
+        segments.append((p0, c1, c2, p3))
+        i += 3
+    
+    if not segments:
+        return sp
+    
+    # 反转段的顺序，并交换每段的控制点
+    reversed_segs = list(reversed(segments))
+    
+    # 第一段的起点是原最后一段的终点
+    result.append(reversed_segs[0][3])  # p3 of last seg
+    
+    for seg in reversed_segs:
+        p0, c1, c2, p3 = seg
+        # 反转后：控制点交换，新的c1 = 原c2, 新的c2 = 原c1
+        result.append(c2)
+        result.append(c1)
+        result.append(p0)  # 终点是原起点
+    
+    return result
+
 
 # ========== SVG transform 解析 ==========
 
@@ -1756,6 +1809,24 @@ def convert_to_wsd(input_path, wsd_path, color_mode='rainbow',
     else:
         raise ValueError(f"未知颜色模式: {color_mode}")
 
+    # 修正路径方向：确保填充路径为逆时针方向（SVG坐标系，y向下）
+    # 图片矢量化(potrace)的路径方向可能与SVG相反，导致填充外部
+    if file_type == 'image':
+        # 找到第一个非描边的填充路径作为参考
+        ref_idx = -1
+        for i in range(len(all_subpaths)):
+            if i >= len(is_stroke_list) or not is_stroke_list[i]:
+                if path_area(all_subpaths[i]) > 100:  # 忽略太小的路径
+                    ref_idx = i
+                    break
+        
+        if ref_idx >= 0:
+            ref_signed = path_signed_area(all_subpaths[ref_idx])
+            # SVG正常方向是逆时针（负面积），如果图片矢量化是顺时针（正面积），则全部反转
+            if ref_signed > 0:
+                if progress_cb: progress_cb("修正路径方向...", 45)
+                all_subpaths = [reverse_path(sp) for sp in all_subpaths]
+
     if progress_cb: progress_cb("构建WSD记录...", 55)
 
     records_data = bytearray()
@@ -2114,6 +2185,19 @@ def convert_to_wsd_multi(input_files, output_path, color_mode='rainbow',
             colors = [hex_to_bgr(c) for c in svg_colors]
         elif color_mode == 'none':
             colors = [None] * len(subpaths)
+
+        # 修正路径方向：图片矢量化(potrace)的路径方向可能与SVG相反
+        if ftype == 'image':
+            is_stroke = extra_info.get('is_stroke', [False] * len(subpaths))
+            ref_idx = -1
+            for i in range(len(subpaths)):
+                if not is_stroke[i] and path_area(subpaths[i]) > 100:
+                    ref_idx = i
+                    break
+            if ref_idx >= 0:
+                ref_signed = path_signed_area(subpaths[ref_idx])
+                if ref_signed > 0:
+                    subpaths = [reverse_path(sp) for sp in subpaths]
 
         block, obj_count = _build_canvas_block(
             subpaths, colors, color_mode, linewidth, outline, flip_v, custom_size
