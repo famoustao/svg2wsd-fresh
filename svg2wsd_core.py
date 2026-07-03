@@ -611,6 +611,7 @@ def _vectorize_mask(bw_mask, turdsize=2, alphamax=1.0):
 def _parse_image_file_color(img_path, turdsize=2, n_colors=32, alphamax=1.0,
                             sample_colors_from_original=True,
                             method='contour', contour_step=3, contour_min_area=50,
+                            scale=0.5, smooth_level=1,
                             progress_cb=None):
     """
     将彩色图片矢量化为带颜色的贝塞尔路径
@@ -619,8 +620,10 @@ def _parse_image_file_color(img_path, turdsize=2, n_colors=32, alphamax=1.0,
         method: 'quantize' - 颜色量化法（N色调色板）
                 'contour' - 灰度等高线法（颜色更丰富，接近抖音EE2效果）
         sample_colors_from_original: quantize模式下从原图采样颜色
-        contour_step: 等高线模式下的灰度步长（越小路径越多）
+        contour_step: 等高线模式下的颜色精细度（越小颜色越多）
         contour_min_area: 等高线模式下的最小区域面积
+        scale: 图片处理缩放比例（越大越精细但越慢）
+        smooth_level: 颜色平滑等级 0=无 1=轻微 2=中等 3=强
         progress_cb: 进度回调函数(msg, percent)
 
     返回: (子路径列表, 颜色列表, 边界框)
@@ -630,8 +633,9 @@ def _parse_image_file_color(img_path, turdsize=2, n_colors=32, alphamax=1.0,
             img_path,
             min_area=contour_min_area,
             step=contour_step,
-            scale=0.5,
+            scale=scale,
             alphamax=alphamax,
+            smooth_level=smooth_level,
             progress_cb=progress_cb
         )
     else:
@@ -759,18 +763,20 @@ def _parse_image_file_quantize_color(img_path, turdsize=2, n_colors=32, alphamax
 
 def _parse_image_file_contour_color(img_path, min_area=50, step=3,
                                     scale=0.5, alphamax=1.0,
+                                    smooth_level=1,
                                     progress_cb=None):
     """
-    彩色矢量化方法（原色填充）
-    基于颜色量化 + 连通区域分析 + 原图采样平均颜色
+    彩色矢量化方法（原色填充）- 高精度版
+    基于LAB颜色空间K-means量化 + 连通区域分析 + 高分辨率原图采样颜色
     每个独立区域填充该区域的原始平均颜色，颜色种类=区域数量
     大区域先画（底色），小区域后画在上层（细节）
 
     参数:
         min_area: 最小区域面积（像素），越小则路径越多
-        step: 颜色精细度（越小颜色越丰富）
+        step: 颜色精细度（越小颜色越丰富，1=最多颜色）
         scale: 处理时的缩放比例，越大越精细但越慢
-        alphamax: potrace的alphamax参数
+        alphamax: potrace的alphamax参数（越小曲线越锐利）
+        smooth_level: 颜色平滑等级 0=无 1=轻微 2=中等 3=强
         progress_cb: 进度回调函数(msg, percent)
 
     返回: (子路径列表, 颜色列表, 边界框)
@@ -781,7 +787,7 @@ def _parse_image_file_contour_color(img_path, min_area=50, step=3,
     import potrace
 
     if progress_cb:
-        progress_cb("读取图片...", 5)
+        progress_cb("读取图片...", 3)
 
     # 读取图片
     img = cv2.imread(img_path)
@@ -792,53 +798,108 @@ def _parse_image_file_contour_color(img_path, min_area=50, step=3,
     img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
     orig_h, orig_w = img_rgb.shape[:2]
 
-    # 缩放处理
+    # 用于颜色采样的高分辨率版本（尽量接近原图）
+    # 如果scale >= 0.5，直接用原图采样颜色；否则用一个中间分辨率
+    color_sample_scale = min(1.0, max(scale, 0.75))
+    if color_sample_scale != 1.0:
+        sample_w = int(orig_w * color_sample_scale)
+        sample_h = int(orig_h * color_sample_scale)
+        img_color_sample = cv2.resize(img_rgb, (sample_w, sample_h),
+                                      interpolation=cv2.INTER_AREA)
+    else:
+        img_color_sample = img_rgb
+        sample_w, sample_h = orig_w, orig_h
+
+    # 缩放处理（用于区域分割的分辨率）
     if scale != 1.0:
         new_w = int(orig_w * scale)
         new_h = int(orig_h * scale)
-        img_small = cv2.resize(img_rgb, (new_w, new_h))
+        img_small = cv2.resize(img_rgb, (new_w, new_h),
+                               interpolation=cv2.INTER_AREA)
     else:
         new_w, new_h = orig_w, orig_h
         img_small = img_rgb
 
     if progress_cb:
-        progress_cb("颜色平滑中...", 12)
+        progress_cb("颜色预处理中...", 8)
 
-    # 均值偏移滤波：平滑颜色但保留边缘，减少细碎区域
-    # 让连通区域更大更完整，提高覆盖率
-    img_smooth = cv2.pyrMeanShiftFiltering(img_small, 10, 15)
+    # 根据平滑等级选择预处理方式
+    # smooth_level 0: 仅双边滤波（保留边缘的轻微平滑）
+    # smooth_level 1: 轻量均值偏移
+    # smooth_level 2: 中等均值偏移（原默认）
+    # smooth_level 3: 强均值偏移
+    if smooth_level <= 0:
+        # 无均值偏移，仅用双边滤波做极轻微降噪（保留边缘细节）
+        img_smooth = cv2.bilateralFilter(img_small, 5, 15, 15)
+    elif smooth_level == 1:
+        # 轻微均值偏移 - 保留更多细节
+        img_smooth = cv2.pyrMeanShiftFiltering(img_small, 4, 8)
+    elif smooth_level == 2:
+        # 中等均值偏移 - 平衡细节和连续性
+        img_smooth = cv2.pyrMeanShiftFiltering(img_small, 7, 12)
+    else:
+        # 强均值偏移 - 更平滑但细节少
+        img_smooth = cv2.pyrMeanShiftFiltering(img_small, 12, 18)
 
     if progress_cb:
-        progress_cb("颜色量化中...", 15)
+        progress_cb("LAB颜色空间转换中...", 12)
+
+    # 转换到LAB颜色空间进行量化（LAB更符合人眼感知，颜色区分更准确）
+    img_lab = cv2.cvtColor(img_smooth, cv2.COLOR_RGB2LAB)
+
+    if progress_cb:
+        progress_cb("颜色量化中 (K-means)...", 15)
 
     # step 映射为颜色量化级别：step越小，颜色越多
-    # step=1 -> 128色, step=5 -> 64色, step=10 -> 32色, step=15 -> 16色
-    n_quantize = max(8, min(128, int(144 - step * 8)))
+    # step=1 -> 256色, step=2 -> 192色, step=3 -> 128色, step=5 -> 64色, step=8 -> 32色
+    n_quantize = max(16, min(512, int(280 - step * 24)))
 
-    # 颜色量化（K-means）
-    pixels = img_smooth.reshape(-1, 3).astype(np.float32)
-    criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 10, 1.0)
-    _, labels, palette = cv2.kmeans(
-        pixels, n_quantize, None, criteria, 3, cv2.KMEANS_PP_CENTERS
+    # K-means颜色量化（在LAB空间）
+    pixels_lab = img_lab.reshape(-1, 3).astype(np.float32)
+    criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 20, 0.5)
+    _, labels, palette_lab = cv2.kmeans(
+        pixels_lab, n_quantize, None, criteria, 5, cv2.KMEANS_PP_CENTERS
     )
-    palette = palette.astype(np.uint8)
     labels = labels.reshape(new_h, new_w)
 
+    # 将LAB调色板转换回RGB（仅用于显示/参考）
+    palette_lab_uint8 = palette_lab.astype(np.uint8).reshape(1, -1, 3)
+    palette_rgb = cv2.cvtColor(palette_lab_uint8, cv2.COLOR_LAB2RGB).reshape(-1, 3)
+
     if progress_cb:
-        progress_cb("提取颜色区域...", 30)
+        progress_cb(f"量化完成 ({n_quantize}色)，提取区域中...", 28)
+
+    # 形态学闭运算的核大小（根据min_area自适应）
+    # min_area越小，需要填补的空洞越小，核也越小
+    close_kernel_size = max(2, min(5, int(np.sqrt(min_area) * 0.5)))
+    close_kernel = cv2.getStructuringElement(
+        cv2.MORPH_ELLIPSE, (close_kernel_size, close_kernel_size)
+    )
 
     # 对每个量化颜色做连通区域分析
     all_regions = []  # (mask, area, color_hex)
-    total_colors = len(palette)
+    total_colors = len(palette_rgb)
+
+    # 预计算颜色采样图的缩放因子
+    sx_sample = sample_w / new_w
+    sy_sample = sample_h / new_h
 
     for ci in range(total_colors):
         color_mask = (labels == ci)
         if not np.any(color_mask):
             continue
 
+        # 形态学闭运算：先膨胀后腐蚀，填补小空洞
+        mask_uint8 = color_mask.astype(np.uint8)
+        if close_kernel_size > 1:
+            mask_closed = cv2.morphologyEx(mask_uint8, cv2.MORPH_CLOSE, close_kernel)
+        else:
+            mask_closed = mask_uint8
+        color_mask_closed = mask_closed > 0
+
         # 连通区域分析
         num_features, labeled, stats, _ = cv2.connectedComponentsWithStats(
-            color_mask.astype(np.uint8), connectivity=8
+            color_mask_closed.astype(np.uint8), connectivity=8
         )
 
         for region_id in range(1, num_features):
@@ -846,20 +907,33 @@ def _parse_image_file_contour_color(img_path, min_area=50, step=3,
 
             if area < min_area:
                 continue
-            if area > new_w * new_h * 0.95:
+            if area > new_w * new_h * 0.98:
                 continue
 
             region_mask = (labeled == region_id)
 
-            # 从原图采样平均颜色（颜色种类远多于调色板颜色数）
-            mean_color = cv2.mean(img_small, mask=region_mask.astype(np.uint8) * 255)[:3]
-            r, g, b = int(mean_color[0]), int(mean_color[1]), int(mean_color[2])
-            color_hex = f'#{r:02x}{g:02x}{b:02x}'
+            # 从高分辨率颜色采样图获取平均颜色
+            # 将区域掩码放大到颜色采样图的尺寸
+            if sx_sample != 1.0 or sy_sample != 1.0:
+                mask_uint8_r = region_mask.astype(np.uint8) * 255
+                mask_big = cv2.resize(mask_uint8_r, (sample_w, sample_h),
+                                      interpolation=cv2.INTER_NEAREST)
+                mask_big_bool = mask_big > 128
+                if np.any(mask_big_bool):
+                    region_pixels = img_color_sample[mask_big_bool]
+                    avg_color = np.mean(region_pixels, axis=0)
+                    r, g, b = np.clip(avg_color, 0, 255).astype(np.uint8)
+                else:
+                    r, g, b = palette_rgb[ci]
+            else:
+                mean_color = cv2.mean(img_small, mask=region_mask.astype(np.uint8) * 255)[:3]
+                r, g, b = int(mean_color[0]), int(mean_color[1]), int(mean_color[2])
 
+            color_hex = f'#{r:02x}{g:02x}{b:02x}'
             all_regions.append((region_mask, area, color_hex))
 
-        if progress_cb and ci % 8 == 0:
-            pct = 30 + int((ci / max(total_colors, 1)) * 25)
+        if progress_cb and ci % 16 == 0:
+            pct = 28 + int((ci / max(total_colors, 1)) * 27)
             progress_cb(f"提取区域 {ci+1}/{total_colors}...", pct)
 
     if progress_cb:
@@ -872,12 +946,15 @@ def _parse_image_file_contour_color(img_path, min_area=50, step=3,
     all_colors = []
 
     total_regions = len(all_regions)
+    # potrace的turdsize：比min_area小一些，避免丢掉小区域的细节
+    potrace_turd = max(1, min_area // 5)
+
     for ri, (bw_mask, area, color_hex) in enumerate(all_regions):
         # potrace矢量化（取反，因为potrace矢量化的是值为0的区域）
         bmp = potrace.Bitmap(~bw_mask)
         path = bmp.trace(
             alphamax=alphamax,
-            turdsize=max(1, min_area // 4),
+            turdsize=potrace_turd,
             turnpolicy=potrace.POTRACE_TURNPOLICY_MINORITY
         )
 
@@ -922,12 +999,12 @@ def _parse_image_file_contour_color(img_path, min_area=50, step=3,
                 all_subpaths.append(sp)
                 all_colors.append(color_hex)
 
-        if progress_cb and ri % 20 == 0:
-            pct = 55 + int((ri / max(total_regions, 1)) * 40)
+        if progress_cb and ri % 30 == 0:
+            pct = 55 + int((ri / max(total_regions, 1)) * 42)
             progress_cb(f"矢量化 {ri+1}/{total_regions}...", pct)
 
     if progress_cb:
-        progress_cb("完成！", 95)
+        progress_cb("完成！", 97)
 
     if not all_subpaths:
         return _parse_image_file(img_path, threshold=128, turdsize=min_area//4, alphamax=alphamax)
@@ -1041,6 +1118,7 @@ def parse_input_file(file_path, img_threshold=128, img_turdsize=2,
                      img_color=False, img_n_colors=16,
                      img_color_method='contour',
                      img_contour_step=5, img_contour_min_area=100,
+                     img_scale=0.5, img_smooth_level=1,
                      progress_cb=None):
     """
     统一解析输入文件（SVG或图片）
@@ -1059,6 +1137,8 @@ def parse_input_file(file_path, img_threshold=128, img_turdsize=2,
                 method=img_color_method,
                 contour_step=img_contour_step,
                 contour_min_area=img_contour_min_area,
+                scale=img_scale,
+                smooth_level=img_smooth_level,
                 progress_cb=progress_cb
             )
         else:
@@ -1080,6 +1160,7 @@ def parse_input_file(file_path, img_threshold=128, img_turdsize=2,
                         method=img_color_method,
                         contour_step=img_contour_step,
                         contour_min_area=img_contour_min_area,
+                        smooth_level=img_smooth_level,
                         progress_cb=progress_cb
                     )
                 else:
@@ -1143,6 +1224,7 @@ def convert_to_wsd(input_path, wsd_path, color_mode='rainbow',
                    img_color=False, img_n_colors=16,
                    img_color_method='contour',
                    img_contour_step=5, img_contour_min_area=100,
+                   img_scale=0.5, img_smooth_level=1,
                    progress_cb=None):
     """
     将SVG或图片转换为WSD
@@ -1161,8 +1243,10 @@ def convert_to_wsd(input_path, wsd_path, color_mode='rainbow',
         img_color: 是否使用彩色矢量化 (仅图片)
         img_n_colors: 彩色矢量化时的颜色数量（调色板模式）
         img_color_method: 彩色矢量化方法 ('contour' 或 'quantize')
-        img_contour_step: 等高线法的灰度步长
+        img_contour_step: 等高线法的颜色精细度（越小颜色越多）
         img_contour_min_area: 等高线法的最小区域面积
+        img_scale: 图片处理缩放比例（越大越精细但越慢）
+        img_smooth_level: 颜色平滑等级 0=无 1=轻微 2=中等 3=强
         progress_cb: 进度回调函数(msg, percent)
     """
 
@@ -1186,6 +1270,8 @@ def convert_to_wsd(input_path, wsd_path, color_mode='rainbow',
         img_color_method=img_color_method,
         img_contour_step=img_contour_step,
         img_contour_min_area=img_contour_min_area,
+        img_scale=img_scale,
+        img_smooth_level=img_smooth_level,
         progress_cb=progress_cb
     )
 
@@ -1384,6 +1470,7 @@ def convert_to_wsd_multi(input_files, output_path, color_mode='rainbow',
                          img_color=False, img_n_colors=16,
                          img_color_method='contour',
                          img_contour_step=5, img_contour_min_area=100,
+                         img_scale=0.5, img_smooth_level=1,
                          progress_cb=None):
     """
     将多个输入文件合并到同一个WSD的不同画布
@@ -1431,6 +1518,8 @@ def convert_to_wsd_multi(input_files, output_path, color_mode='rainbow',
             img_color_method=img_color_method,
             img_contour_step=img_contour_step,
             img_contour_min_area=img_contour_min_area,
+            img_scale=img_scale,
+            img_smooth_level=img_smooth_level,
             progress_cb=None  # 多文件时外层统一控制进度
         )
 

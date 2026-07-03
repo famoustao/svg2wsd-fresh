@@ -342,14 +342,24 @@ class Image2WSDApp:
                         value='quantize', command=self._on_color_method).pack(side='left')
 
         # 等高线参数行（默认显示）
-        self.contour_step = tk.IntVar(value=5)
-        self.contour_min_area = tk.IntVar(value=50)
+        self.contour_step = tk.IntVar(value=2)
+        self.contour_min_area = tk.IntVar(value=10)
+        self.contour_scale = tk.DoubleVar(value=0.75)
+        self.contour_smooth = tk.IntVar(value=1)
         self.contour_row1 = ttk.Frame(img_frame)
         self.cs_scale, self.cs_val_label = _make_img_slider_row(
-            self.contour_row1, "等高线步长:", self.contour_step, 1, 15, 1, "{}", width=12)
+            self.contour_row1, "颜色精细度:", self.contour_step, 1, 10, 1, "{}", width=12)
         self.contour_row2 = ttk.Frame(img_frame)
         self.cma_scale, self.cma_val_label = _make_img_slider_row(
-            self.contour_row2, "最小区域:", self.contour_min_area, 20, 300, 10, "{}", width=12)
+            self.contour_row2, "最小区域:", self.contour_min_area, 2, 200, 2, "{}", width=12)
+        self.contour_row3 = ttk.Frame(img_frame)
+        # 分辨率滑块（浮点值）
+        self.csc_scale, self.csc_val_label = _make_img_slider_row(
+            self.contour_row3, "分辨率:", self.contour_scale, 0.25, 1.5, 0.05, "{:.2f}", width=12)
+        self.contour_row4 = ttk.Frame(img_frame)
+        # 平滑等级
+        self.csm_scale, self.csm_val_label = _make_img_slider_row(
+            self.contour_row4, "平滑等级:", self.contour_smooth, 0, 3, 1, "{}", width=12)
 
         # 调色板颜色数量行（默认隐藏）
         self.n_colors_row = ttk.Frame(img_frame)
@@ -658,6 +668,8 @@ class Image2WSDApp:
             # 显示等高线参数
             self.contour_row1.pack(fill='x', padx=8, pady=2)
             self.contour_row2.pack(fill='x', padx=8, pady=2)
+            self.contour_row3.pack(fill='x', padx=8, pady=2)
+            self.contour_row4.pack(fill='x', padx=8, pady=2)
             # 隐藏调色板参数
             self.n_colors_row.pack_forget()
             self._n_colors_visible = False
@@ -665,6 +677,8 @@ class Image2WSDApp:
             # 隐藏等高线参数
             self.contour_row1.pack_forget()
             self.contour_row2.pack_forget()
+            self.contour_row3.pack_forget()
+            self.contour_row4.pack_forget()
             # 显示调色板参数
             self.n_colors_row.pack(fill='x', padx=8, pady=2)
             self._n_colors_visible = True
@@ -676,6 +690,8 @@ class Image2WSDApp:
         self.nc_val_label.config(text=f"{int(self.img_n_colors.get())}")
         self.cs_val_label.config(text=f"{int(self.contour_step.get())}")
         self.cma_val_label.config(text=f"{int(self.contour_min_area.get())}")
+        self.csc_val_label.config(text=f"{self.contour_scale.get():.2f}")
+        self.csm_val_label.config(text=f"{int(self.contour_smooth.get())}")
         # 图片参数变化时重新矢量化（带防抖）
         if self.current_file and self._is_image_file(self.current_file):
             self._schedule_img_update()
@@ -786,6 +802,8 @@ class Image2WSDApp:
                         img_color_method=self.img_color_method.get(),
                         img_contour_step=self.contour_step.get(),
                         img_contour_min_area=self.contour_min_area.get(),
+                        img_scale=self.contour_scale.get(),
+                        img_smooth_level=self.contour_smooth.get(),
                         progress_cb=_progress_cb,
                     )
                     result = (subpaths, colors, bbox, ftype)
@@ -1129,6 +1147,8 @@ class Image2WSDApp:
                         img_color_method=self.img_color_method.get(),
                         img_contour_step=self.contour_step.get(),
                         img_contour_min_area=self.contour_min_area.get(),
+                        img_scale=self.contour_scale.get(),
+                        img_smooth_level=self.contour_smooth.get(),
                         progress_cb=self._update_progress,
                     )
                 self._update_progress("完成！", 100)
@@ -1193,6 +1213,8 @@ class Image2WSDApp:
                         img_color_method=self.img_color_method.get(),
                         img_contour_step=self.contour_step.get(),
                         img_contour_min_area=self.contour_min_area.get(),
+                        img_scale=self.contour_scale.get(),
+                        img_smooth_level=self.contour_smooth.get(),
                         progress_cb=None,
                     )
                 success += 1
