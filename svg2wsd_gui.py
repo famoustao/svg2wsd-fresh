@@ -7,6 +7,7 @@
 
 import os
 import sys
+import threading
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 from tkinter import colorchooser
@@ -57,6 +58,12 @@ class Image2WSDApp:
         self.img_turdsize = tk.IntVar(value=2)
         self.img_color = tk.BooleanVar(value=False)  # 彩色矢量化
         self.img_n_colors = tk.IntVar(value=32)  # 颜色数量
+
+        # 解析线程管理
+        self._parse_thread = None
+        self._parse_lock = threading.Lock()
+        self._parse_cancel = False
+        self._parse_token = 0  # 用于取消旧的解析任务
 
         self._build_ui()
 
@@ -397,6 +404,18 @@ class Image2WSDApp:
         right = ttk.Frame(main)
         main.add(right, weight=1)
 
+        # 解析进度条（预览上方）
+        self.parse_progress_frame = ttk.Frame(right)
+        self.parse_progress_frame.pack(fill='x', padx=5, pady=(5, 0))
+
+        self.parse_progress_label = ttk.Label(self.parse_progress_frame, text="", foreground='gray')
+        self.parse_progress_label.pack(side='left')
+
+        self.parse_progress = ttk.Progressbar(self.parse_progress_frame, mode='determinate', length=200)
+        self.parse_progress.pack(side='right', padx=(5, 0))
+        # 初始隐藏
+        self.parse_progress_frame.pack_forget()
+
         # 预览标签页
         nb = ttk.Notebook(right)
         nb.pack(fill='both', expand=True)
@@ -430,8 +449,7 @@ class Image2WSDApp:
     def _do_img_update(self):
         """执行实际的图片参数更新"""
         self._img_update_job = None
-        self.current_data = None
-        self._update_all_previews()
+        self._invalidate_data()
 
     # ===== 文件操作 =====
 
@@ -481,8 +499,7 @@ class Image2WSDApp:
             self.current_file = self.input_files[index]
             self.file_listbox.selection_clear(0, 'end')
             self.file_listbox.selection_set(index)
-            self.current_data = None
-            self._update_all_previews()
+            self._invalidate_data()
 
     # ===== 选项事件 =====
 
@@ -492,8 +509,7 @@ class Image2WSDApp:
             self.geo_frame.pack(fill='x', padx=5, pady=5, before=self.batch_frame)
         else:
             self.geo_frame.pack_forget()
-        self.current_data = None
-        self._update_all_previews()
+        self._invalidate_data()
 
     def _on_geo_param_change(self, *args):
         """几何参数变化时更新预览（带防抖）"""
@@ -515,8 +531,7 @@ class Image2WSDApp:
     def _do_geo_update(self):
         """执行实际的几何更新"""
         self._geo_update_job = None
-        self.current_data = None
-        self._update_all_previews()
+        self._invalidate_data()
 
     def _auto_tune_geo_params(self):
         """根据当前图片尺寸自动调节几何参数"""
@@ -557,8 +572,7 @@ class Image2WSDApp:
             self.cs_val_label.config(text=f"{circle_sensitivity}")
 
             # 触发预览刷新
-            self.current_data = None
-            self._update_all_previews()
+            self._invalidate_data()
 
             self.status.config(
                 text=f"自动调节完成: 图尺寸{w}×{h}, "
@@ -630,14 +644,12 @@ class Image2WSDApp:
             # 取消彩色矢量化时，如果当前是原色模式，自动切回彩虹
             if self.color_mode.get() == 'svg':
                 self.color_mode.set('rainbow')
-        self.current_data = None
-        self._update_all_previews()
+        self._invalidate_data()
 
     def _on_color_method(self):
         """切换彩色矢量化方法"""
         self._update_color_method_ui()
-        self.current_data = None
-        self._update_all_previews()
+        self._invalidate_data()
 
     def _update_color_method_ui(self):
         """根据当前方法更新UI显示"""
@@ -685,60 +697,148 @@ class Image2WSDApp:
         self._draw_orig_preview()
         self._draw_wsd_preview()
 
+    def _invalidate_data(self):
+        """清除缓存数据并触发异步重新解析"""
+        self.current_data = None
+        if self.current_file:
+            # 启动异步解析，完成后自动刷新预览
+            self._ensure_data_async()
+
     def _ensure_data(self):
-        """确保当前文件的路径数据已加载"""
+        """确保当前文件的路径数据已加载（同步版本，用于转换等需要结果的场景）
+        如果正在后台解析，会阻塞等待完成
+        """
         if self.current_data is not None:
             return True
         if not self.current_file:
             return False
-        try:
-            if self.convert_mode.get() == 'geometric':
-                # 几何模式：检测几何形状
-                from svg2wsd_geo import detect_geometric_shapes, shape_to_polyline_points
-                # 圆检测灵敏度(0-100)转换为param2：灵敏度越高，param2越小
-                circle_param2 = int(200 - self.geo_circle_sensitivity.get() * 1.5)
-                shapes = detect_geometric_shapes(
-                    self.current_file,
-                    min_area=self.geo_min_area.get(),
-                    epsilon_ratio=self.geo_epsilon.get(),
-                    use_hough=self.geo_use_hough.get(),
-                    min_line_length=self.geo_min_line_length.get(),
-                    line_threshold=self.geo_line_threshold.get(),
-                    circle_param2=circle_param2,
-                )
-                if not shapes:
-                    raise ValueError("未检测到几何形状，请调整最小面积参数")
-                # 转折线点用于预览
-                subpaths = [shape_to_polyline_points(s) for s in shapes]
-                colors = []
-                # 用彩虹色区分不同形状
-                from svg2wsd_core import rainbow_color_hex
-                for i in range(len(shapes)):
-                    colors.append(rainbow_color_hex(i, len(shapes)))
-                # 计算边界
-                all_x = [x for sp in subpaths for x, y in sp]
-                all_y = [y for sp in subpaths for x, y in sp]
-                bbox = (min(all_x), min(all_y), max(all_x), max(all_y))
-                self.current_data = (subpaths, colors, bbox, 'geometric')
-                self._shape_info = [(s['type'], s['area']) for s in shapes]
-            else:
-                subpaths, colors, bbox, ftype = parse_input_file(
-                    self.current_file,
-                    img_threshold=self.img_threshold.get(),
-                    img_turdsize=self.img_turdsize.get(),
-                    img_color=self.img_color.get(),
-                    img_n_colors=self.img_n_colors.get(),
-                    img_color_method=self.img_color_method.get(),
-                    img_contour_step=self.contour_step.get(),
-                    img_contour_min_area=self.contour_min_area.get(),
-                )
-                self.current_data = (subpaths, colors, bbox, ftype)
+        # 如果有正在运行的解析线程，等待它完成
+        if self._parse_thread and self._parse_thread.is_alive():
+            self._parse_thread.join(timeout=30)
+        return self.current_data is not None
+
+    def _ensure_data_async(self, callback=None):
+        """异步加载数据，完成后调用 callback(success)
+        用于预览刷新等不需要立即返回结果的场景
+        """
+        if self.current_data is not None:
+            if callback:
+                callback(True)
             return True
-        except Exception as e:
-            err_msg = str(e)
-            print(f"[svg2wsd_gui] 解析失败: {err_msg}", file=sys.stderr)
-            self.status.config(text=f"解析失败: {err_msg[:80]}")
+        if not self.current_file:
+            if callback:
+                callback(False)
             return False
+
+        # 如果已有解析线程在运行，不重复启动
+        with self._parse_lock:
+            if self._parse_thread and self._parse_thread.is_alive():
+                return False
+
+        # 生成新的token，取消旧的解析
+        self._parse_token += 1
+        current_token = self._parse_token
+
+        # 显示进度条
+        self._show_parse_progress()
+
+        def _progress_cb(msg, pct):
+            """进度回调：在主线程更新UI"""
+            if self._parse_token != current_token:
+                return  # 已被取消
+            self.root.after(0, lambda: self._update_parse_progress(msg, pct))
+
+        def _parse_worker():
+            """后台解析线程"""
+            try:
+                if self.convert_mode.get() == 'geometric':
+                    # 几何模式：检测几何形状
+                    from svg2wsd_geo import detect_geometric_shapes, shape_to_polyline_points
+                    circle_param2 = int(200 - self.geo_circle_sensitivity.get() * 1.5)
+                    shapes = detect_geometric_shapes(
+                        self.current_file,
+                        min_area=self.geo_min_area.get(),
+                        epsilon_ratio=self.geo_epsilon.get(),
+                        use_hough=self.geo_use_hough.get(),
+                        min_line_length=self.geo_min_line_length.get(),
+                        line_threshold=self.geo_line_threshold.get(),
+                        circle_param2=circle_param2,
+                    )
+                    if not shapes:
+                        raise ValueError("未检测到几何形状，请调整最小面积参数")
+                    subpaths = [shape_to_polyline_points(s) for s in shapes]
+                    colors = []
+                    from svg2wsd_core import rainbow_color_hex
+                    for i in range(len(shapes)):
+                        colors.append(rainbow_color_hex(i, len(shapes)))
+                    all_x = [x for sp in subpaths for x, y in sp]
+                    all_y = [y for sp in subpaths for x, y in sp]
+                    bbox = (min(all_x), min(all_y), max(all_x), max(all_y))
+                    result = (subpaths, colors, bbox, 'geometric')
+                    shape_info = [(s['type'], s['area']) for s in shapes]
+                else:
+                    subpaths, colors, bbox, ftype = parse_input_file(
+                        self.current_file,
+                        img_threshold=self.img_threshold.get(),
+                        img_turdsize=self.img_turdsize.get(),
+                        img_color=self.img_color.get(),
+                        img_n_colors=self.img_n_colors.get(),
+                        img_color_method=self.img_color_method.get(),
+                        img_contour_step=self.contour_step.get(),
+                        img_contour_min_area=self.contour_min_area.get(),
+                        progress_cb=_progress_cb,
+                    )
+                    result = (subpaths, colors, bbox, ftype)
+                    shape_info = None
+
+                # 检查是否被取消
+                if self._parse_token != current_token:
+                    return
+
+                # 保存结果（在主线程中执行）
+                def _apply_result():
+                    if self._parse_token != current_token:
+                        return
+                    self.current_data = result
+                    if shape_info is not None:
+                        self._shape_info = shape_info
+                    self._hide_parse_progress()
+                    if callback:
+                        callback(True)
+                    # 刷新预览
+                    self._draw_orig_preview()
+                    self._draw_wsd_preview()
+
+                self.root.after(0, _apply_result)
+
+            except Exception as e:
+                err_msg = str(e)
+                print(f"[svg2wsd_gui] 解析失败: {err_msg}", file=sys.stderr)
+                def _apply_error():
+                    self.status.config(text=f"解析失败: {err_msg[:80]}")
+                    self._hide_parse_progress()
+                    if callback:
+                        callback(False)
+                self.root.after(0, _apply_error)
+
+        self._parse_thread = threading.Thread(target=_parse_worker, daemon=True)
+        self._parse_thread.start()
+        return False
+
+    def _show_parse_progress(self):
+        """显示解析进度条"""
+        self.parse_progress_frame.pack(fill='x', padx=5, pady=(5, 0))
+        self.parse_progress['value'] = 0
+        self.parse_progress_label.config(text="准备解析...")
+
+    def _hide_parse_progress(self):
+        """隐藏解析进度条"""
+        self.parse_progress_frame.pack_forget()
+
+    def _update_parse_progress(self, msg, pct):
+        """更新解析进度条"""
+        self.parse_progress['value'] = pct
+        self.parse_progress_label.config(text=msg)
 
     def _polyline_area(self, pts):
         """计算折线围成的面积（shoelace公式），开曲线返回0"""
@@ -784,7 +884,9 @@ class Image2WSDApp:
                 pass
 
         # SVG 或 矢量化结果 或 几何模式：绘制路径预览
-        if not self._ensure_data():
+        if self.current_data is None:
+            # 没有数据，启动异步加载
+            self._ensure_data_async()
             return
         subpaths, colors, bbox, ftype = self.current_data
         is_geo = self._is_geometric_mode()
@@ -843,7 +945,9 @@ class Image2WSDApp:
         canvas = self.wsd_canvas
         canvas.delete('all')
 
-        if not self._ensure_data():
+        if self.current_data is None:
+            # 没有数据，启动异步加载
+            self._ensure_data_async()
             return
         subpaths, colors, bbox, ftype = self.current_data
         is_geo = self._is_geometric_mode()

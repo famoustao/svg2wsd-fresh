@@ -609,7 +609,8 @@ def _vectorize_mask(bw_mask, turdsize=2, alphamax=1.0):
 
 def _parse_image_file_color(img_path, turdsize=2, n_colors=32, alphamax=1.0,
                             sample_colors_from_original=True,
-                            method='contour', contour_step=3, contour_min_area=50):
+                            method='contour', contour_step=3, contour_min_area=50,
+                            progress_cb=None):
     """
     将彩色图片矢量化为带颜色的贝塞尔路径
 
@@ -619,6 +620,7 @@ def _parse_image_file_color(img_path, turdsize=2, n_colors=32, alphamax=1.0,
         sample_colors_from_original: quantize模式下从原图采样颜色
         contour_step: 等高线模式下的灰度步长（越小路径越多）
         contour_min_area: 等高线模式下的最小区域面积
+        progress_cb: 进度回调函数(msg, percent)
 
     返回: (子路径列表, 颜色列表, 边界框)
     """
@@ -628,7 +630,8 @@ def _parse_image_file_color(img_path, turdsize=2, n_colors=32, alphamax=1.0,
             min_area=contour_min_area,
             step=contour_step,
             scale=0.5,
-            alphamax=alphamax
+            alphamax=alphamax,
+            progress_cb=progress_cb
         )
     else:
         return _parse_image_file_quantize_color(
@@ -752,10 +755,13 @@ def _parse_image_file_quantize_color(img_path, turdsize=2, n_colors=32, alphamax
 
 
 def _parse_image_file_contour_color(img_path, min_area=50, step=3,
-                                    scale=0.5, alphamax=1.0):
+                                    scale=0.5, alphamax=1.0,
+                                    progress_cb=None):
     """
     基于灰度等高线的彩色矢量化方法
-    在多个灰度阈值上提取轮廓，每个轮廓内填充该区域的平均颜色
+    使用相邻阈值的差值提取每个亮度层的独立区域（类似地形等高线）
+    从暗到亮逐层提取，每层填充该层的平均颜色
+    暗层大区域先画（底色），亮层小区域后画在上层（亮部细节）
     颜色数量远多于调色板量化方法，更接近抖音EE2效果
 
     参数:
@@ -763,18 +769,22 @@ def _parse_image_file_contour_color(img_path, min_area=50, step=3,
         step: 灰度阈值步长，越小则轮廓越多
         scale: 处理时的缩放比例，越大越精细但越慢
         alphamax: potrace的alphamax参数
+        progress_cb: 进度回调函数(msg, percent)
 
     返回: (子路径列表, 颜色列表, 边界框)
     """
     import cv2
     import numpy as np
     from PIL import Image
+    from scipy import ndimage
     import potrace
+
+    if progress_cb:
+        progress_cb("读取图片...", 5)
 
     # 读取图片
     img = cv2.imread(img_path)
     if img is None:
-        # 用PIL读取
         pil_img = Image.open(img_path).convert('RGB')
         img = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
 
@@ -794,42 +804,63 @@ def _parse_image_file_contour_color(img_path, min_area=50, step=3,
         gray_small = gray
         img_small = img_rgb
 
-    # 在多个灰度阈值上提取轮廓
-    thresholds = list(range(step, 255, step))
+    if progress_cb:
+        progress_cb("提取等高线区域...", 15)
 
+    # 使用相邻阈值差值法提取各亮度层区域
+    # 从低阈值到高阈值（从暗到亮）
+    # 每层区域 = 暗于当前阈值 AND 亮于上一阈值
+    thresholds = list(range(step, 256, step))
     all_regions = []  # (mask, area, color_hex)
 
-    for thresh in thresholds:
-        _, bw = cv2.threshold(gray_small, thresh, 255, cv2.THRESH_BINARY_INV)
-        contours, _ = cv2.findContours(bw, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
+    total_steps = len(thresholds)
+    prev_bw = np.zeros((new_h, new_w), dtype=bool)  # 上一阈值的暗区域
 
-        for cnt in contours:
-            area = cv2.contourArea(cnt)
-            if area < min_area or area > new_w * new_h * 0.9:
-                continue
-            if len(cnt) < 5:
-                continue
+    for ti, thresh in enumerate(thresholds):
+        # THRESH_BINARY_INV: 暗于阈值 -> 白(255/True)，亮于阈值 -> 黑(0/False)
+        # 当前暗区域（灰度 < thresh）
+        curr_bw = gray_small < thresh
 
-            # 创建掩码计算平均颜色
-            mask = np.zeros((new_h, new_w), dtype=np.uint8)
-            cv2.drawContours(mask, [cnt], -1, 255, -1)
+        # 本层区域 = 当前暗区域 - 上一暗区域 = 灰度在 [thresh-step, thresh) 之间的像素
+        layer_bw = curr_bw & (~prev_bw)
 
-            if np.sum(mask > 0) > 0:
-                mean_color = cv2.mean(img_small, mask=mask)[:3]
+        if np.any(layer_bw):
+            # 连通区域分析
+            labeled, num_features = ndimage.label(layer_bw)
+
+            for region_id in range(1, num_features + 1):
+                region_mask = (labeled == region_id)
+                area = np.sum(region_mask)
+
+                if area < min_area:
+                    continue
+                if area > new_w * new_h * 0.95:
+                    continue
+
+                # 计算区域平均颜色
+                mean_color = cv2.mean(img_small, mask=region_mask.astype(np.uint8) * 255)[:3]
                 r, g, b = int(mean_color[0]), int(mean_color[1]), int(mean_color[2])
                 color_hex = f'#{r:02x}{g:02x}{b:02x}'
 
-                # 将布尔掩码用于potrace矢量化
-                bw_mask = mask > 128
-                all_regions.append((bw_mask, area, color_hex))
+                all_regions.append((region_mask, area, color_hex))
 
-    # 按面积从大到小排序（先画大区域，再画小区域）
+        prev_bw = curr_bw
+
+        if progress_cb and ti % 5 == 0:
+            pct = 15 + int((ti / total_steps) * 40)
+            progress_cb(f"提取区域 {ti+1}/{total_steps}...", pct)
+
+    if progress_cb:
+        progress_cb(f"找到 {len(all_regions)} 个区域，矢量化中...", 55)
+
+    # 按面积从大到小排序（先画大区域底色，再画小区域细节在上层）
     all_regions.sort(key=lambda x: -x[1])
 
     all_subpaths = []
     all_colors = []
 
-    for bw_mask, area, color_hex in all_regions:
+    total_regions = len(all_regions)
+    for ri, (bw_mask, area, color_hex) in enumerate(all_regions):
         # potrace矢量化
         bmp = potrace.Bitmap(bw_mask)
         path = bmp.trace(
@@ -878,6 +909,13 @@ def _parse_image_file_contour_color(img_path, min_area=50, step=3,
             if len(sp) >= 4:
                 all_subpaths.append(sp)
                 all_colors.append(color_hex)
+
+        if progress_cb and ri % 20 == 0:
+            pct = 55 + int((ri / max(total_regions, 1)) * 40)
+            progress_cb(f"矢量化 {ri+1}/{total_regions}...", pct)
+
+    if progress_cb:
+        progress_cb("完成！", 95)
 
     if not all_subpaths:
         return _parse_image_file(img_path, threshold=128, turdsize=min_area//4, alphamax=alphamax)
@@ -990,7 +1028,8 @@ def _parse_image_file(img_path, threshold=128, turdsize=2, alphamax=1.0):
 def parse_input_file(file_path, img_threshold=128, img_turdsize=2,
                      img_color=False, img_n_colors=16,
                      img_color_method='contour',
-                     img_contour_step=5, img_contour_min_area=100):
+                     img_contour_step=5, img_contour_min_area=100,
+                     progress_cb=None):
     """
     统一解析输入文件（SVG或图片）
     返回: (subpaths, colors, bbox, file_type)
@@ -1007,7 +1046,8 @@ def parse_input_file(file_path, img_threshold=128, img_turdsize=2,
                 file_path, turdsize=img_turdsize, n_colors=img_n_colors,
                 method=img_color_method,
                 contour_step=img_contour_step,
-                contour_min_area=img_contour_min_area
+                contour_min_area=img_contour_min_area,
+                progress_cb=progress_cb
             )
         else:
             # 黑白矢量化模式
@@ -1027,7 +1067,8 @@ def parse_input_file(file_path, img_threshold=128, img_turdsize=2,
                         file_path, turdsize=img_turdsize, n_colors=img_n_colors,
                         method=img_color_method,
                         contour_step=img_contour_step,
-                        contour_min_area=img_contour_min_area
+                        contour_min_area=img_contour_min_area,
+                        progress_cb=progress_cb
                     )
                 else:
                     subpaths, colors, bbox = _parse_image_file(
@@ -1132,7 +1173,8 @@ def convert_to_wsd(input_path, wsd_path, color_mode='rainbow',
         img_color=img_color, img_n_colors=img_n_colors,
         img_color_method=img_color_method,
         img_contour_step=img_contour_step,
-        img_contour_min_area=img_contour_min_area
+        img_contour_min_area=img_contour_min_area,
+        progress_cb=progress_cb
     )
 
     if not all_subpaths:
@@ -1376,7 +1418,8 @@ def convert_to_wsd_multi(input_files, output_path, color_mode='rainbow',
             img_color=img_color, img_n_colors=img_n_colors,
             img_color_method=img_color_method,
             img_contour_step=img_contour_step,
-            img_contour_min_area=img_contour_min_area
+            img_contour_min_area=img_contour_min_area,
+            progress_cb=None  # 多文件时外层统一控制进度
         )
 
         if not subpaths:
