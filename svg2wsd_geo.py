@@ -33,6 +33,7 @@ SHAPE_RECTANGLE = 'rectangle'
 SHAPE_TRIANGLE = 'triangle'
 SHAPE_CIRCLE = 'circle'
 SHAPE_ARC = 'arc'
+SHAPE_STAR = 'star'
 
 
 def _skeletonize(binary):
@@ -1031,23 +1032,33 @@ def detect_geometric_shapes(image_path, min_area=50, epsilon_ratio=0.02,
                             min_line_length=50,
                             line_threshold=30,
                             circle_param2=120,
-                            use_hough=True):
+                            use_hough=True,
+                            mode='auto',
+                            max_colors=8):
     """
-    从图片中检测几何形状（支持线条图和实心填充图）
+    从图片中检测几何形状（支持线条图和彩色填充图）
 
-    检测策略：
-    use_hough=True（骨架+霍夫策略）：
-      a. 二值化 + 骨架化
-      b. 圆检测：在原图灰度图上做多尺度霍夫圆检测
-         （circle_param2为大圆参数，中圆和小圆按比例缩放）
-      c. 直线检测：在骨架图上做霍夫直线检测 + 合并共线线段
-         （threshold=line_threshold, minLineLength=min_line_length, maxLineGap=15）
-      d. 轮廓检测作为补充（跳过与霍夫高度重叠的轮廓）
-      e. 最终去重
-    use_hough=False（纯轮廓策略）：
-      a. 二值化后直接做轮廓检测
-      b. 分类为圆、三角形、矩形、多边形、直线、折线等
-      c. 最终去重
+    检测模式:
+      mode='auto'（默认）：自动判断图片类型
+        - 颜色丰富且大面积色块 → 彩色填充模式
+        - 黑白/灰阶线条图 → 线条图模式
+
+      mode='line'（线条图模式）：
+        use_hough=True: 骨架+霍夫策略
+          a. 二值化 + 骨架化
+          b. 圆检测：霍夫圆检测
+          c. 直线检测：霍夫直线检测 + 合并共线线段
+          d. 轮廓检测作为补充
+          e. 最终去重
+        use_hough=False: 纯轮廓策略
+          a. 二值化后直接做轮廓检测
+          b. 分类为圆、三角形、矩形、多边形、直线、折线等
+
+      mode='filled'（彩色填充模式）：
+        a. K-means颜色量化，提取主要颜色
+        b. 对每个颜色层做二值化，检测填充区域轮廓
+        c. 分类形状类型（圆、矩形、多边形等）
+        d. 每个形状携带颜色信息
 
     参数:
         image_path: 图片路径
@@ -1057,10 +1068,13 @@ def detect_geometric_shapes(image_path, min_area=50, epsilon_ratio=0.02,
         min_line_length: 最小直线长度（像素）
         line_threshold: 直线检测阈值（越小越灵敏）
         circle_param2: 圆检测param2基准值（越小越灵敏）
-        use_hough: 是否启用霍夫检测
+        use_hough: 是否启用霍夫检测（仅line模式）
+        mode: 检测模式 'auto'|'line'|'filled'
+        max_colors: 最大颜色数（仅filled模式）
 
     返回:
         list of dict，每个 dict 包含 type, points, area, bbox 等字段
+        filled模式下额外包含 color (hex颜色) 和 color_bgr (BGR元组)
     """
     import cv2
     from PIL import Image
@@ -1072,6 +1086,20 @@ def detect_geometric_shapes(image_path, min_area=50, epsilon_ratio=0.02,
         img_color = np.array(img_pil)
         img_color = cv2.cvtColor(img_color, cv2.COLOR_RGB2BGR)
 
+    # 自动判断模式
+    if mode == 'auto':
+        mode = _detect_image_mode(img_color)
+
+    # 彩色填充模式
+    if mode == 'filled':
+        shapes = detect_filled_colored_shapes(
+            img_color, min_area=min_area, epsilon_ratio=epsilon_ratio,
+            circularity_threshold=circularity_threshold,
+            max_colors=max_colors,
+        )
+        return shapes
+
+    # 线条图模式（原有逻辑）
     gray = cv2.cvtColor(img_color, cv2.COLOR_BGR2GRAY)
 
     shapes = []
@@ -1409,6 +1437,225 @@ def detect_geometric_shapes(image_path, min_area=50, epsilon_ratio=0.02,
     return shapes
 
 
+def _detect_image_mode(img_color):
+    """
+    自动判断图片是线条图还是彩色填充图
+
+    判断逻辑：
+      - 统计图片中颜色的丰富程度
+      - 如果大部分像素只有少数几种颜色，且有大面积同色区域 → filled模式
+      - 如果颜色层次丰富（渐变、照片）或接近黑白 → line模式
+    """
+    import cv2
+
+    h, w = img_color.shape[:2]
+    total = h * w
+
+    # 缩小图片加速计算
+    scale = max(1, min(h, w) // 200)
+    small = cv2.resize(img_color, (w // scale, h // scale))
+
+    # 转换到HSV空间，判断颜色丰富度
+    hsv = cv2.cvtColor(small, cv2.COLOR_BGR2HSV)
+
+    # 统计饱和度：低饱和度像素占比（接近灰度）
+    saturation = hsv[:, :, 1]
+    low_sat_ratio = np.sum(saturation < 30) / saturation.size
+
+    # 如果低饱和度像素占比很高（接近黑白/灰度图）→ line模式
+    if low_sat_ratio > 0.85:
+        return 'line'
+
+    # 统计主要颜色数量
+    pixels = small.reshape(-1, 3).astype(np.float32)
+    criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 10, 1.0)
+    _, labels, centers = cv2.kmeans(pixels, 4, None, criteria, 2, cv2.KMEANS_PP_CENTERS)
+
+    unique, counts = np.unique(labels, return_counts=True)
+    # 最大颜色占比
+    max_color_ratio = np.max(counts) / counts.sum()
+
+    # 如果前2种颜色占了绝大部分 → 大面积色块 → filled模式
+    sorted_counts = np.sort(counts)[::-1]
+    top2_ratio = sorted_counts[:2].sum() / counts.sum()
+
+    if top2_ratio > 0.7 and low_sat_ratio < 0.8:
+        return 'filled'
+
+    # 默认line模式（更保守）
+    return 'line'
+
+
+def detect_filled_colored_shapes(img_color, min_area=50, epsilon_ratio=0.02,
+                                   circularity_threshold=0.85,
+                                   max_colors=8):
+    """
+    从彩色填充图片中检测几何形状（按颜色分割区域）
+
+    适用于：彩色填充图形（如国旗、图标、彩色几何图等）
+    不适用于：线条图、黑白图
+
+    策略：
+      1. K-means 颜色量化，提取主要颜色
+      2. 对每个颜色层做二值化，检测填充区域轮廓
+      3. 分类形状类型（圆、矩形、三角形、多边形、五角星等）
+      4. 每个形状携带颜色信息
+
+    参数:
+        img_color: BGR格式图片 (numpy array)
+        min_area: 最小面积（像素）
+        epsilon_ratio: 轮廓近似精度比例
+        circularity_threshold: 圆形度阈值
+        max_colors: 最大颜色数（K-means的K值）
+
+    返回:
+        list of dict，每个 dict 包含 type, points, area, bbox, color 等字段
+    """
+    import cv2
+
+    h, w = img_color.shape[:2]
+    total_pixels = h * w
+
+    # ========== 步骤1：颜色量化（K-means） ==========
+    pixels = img_color.reshape(-1, 3).astype(np.float32)
+    criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 20, 1.0)
+    _, labels, centers = cv2.kmeans(
+        pixels, max_colors, None, criteria, 3, cv2.KMEANS_PP_CENTERS
+    )
+
+    centers = centers.astype(np.uint8)
+    unique_labels, counts = np.unique(labels, return_counts=True)
+    color_order = np.argsort(-counts)
+
+    # ========== 步骤1.5：识别背景色 ==========
+    # 背景色判定逻辑：
+    #   1. 颜色是浅色/接近白色（亮度 > 200）
+    #   2. 接触图像的4条边（边缘像素占比 > 80%）
+    #   3. 占比相对较大（> 10%）
+    # 这样国旗的红色旗面不会被误判为背景
+    bg_label = None
+    for label_idx in color_order:
+        color_bgr = centers[label_idx]
+        color_area = counts[label_idx]
+        ratio = color_area / total_pixels
+
+        # 颜色必须浅（接近白色/灰色）
+        brightness = np.mean(color_bgr)
+        if brightness < 200:
+            continue
+
+        # 占比不能太小
+        if ratio < 0.1:
+            continue
+
+        # 检查是否接触图像的4条边
+        mask = (labels.reshape(h, w) == label_idx)
+        edge_total = 2 * (h + w)
+        edge_pixels = (np.sum(mask[0, :]) + np.sum(mask[-1, :]) +
+                       np.sum(mask[:, 0]) + np.sum(mask[:, -1]))
+        edge_ratio = edge_pixels / max(1, edge_total)
+
+        if edge_ratio > 0.8:
+            bg_label = label_idx
+            break
+
+    shapes = []
+
+    # ========== 步骤2：对每个颜色层检测轮廓 ==========
+    for rank, label_idx in enumerate(color_order):
+        color_bgr = centers[label_idx].tolist()
+        color_area = counts[label_idx]
+
+        # 跳过明确的背景色
+        if label_idx == bg_label:
+            continue
+        # 跳过太小的颜色区域
+        if color_area < min_area * 0.5:
+            continue
+
+        # 创建该颜色的二值图
+        mask = (labels.reshape(h, w) == label_idx).astype(np.uint8) * 255
+
+        # 形态学操作：去噪
+        kernel = np.ones((2, 2), np.uint8)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+
+        # 检测轮廓（外轮廓）
+        contours, _ = cv2.findContours(
+            mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+        )
+
+        for cnt in contours:
+            area = cv2.contourArea(cnt)
+            if area < min_area:
+                continue
+
+            x, y, cw, ch = cv2.boundingRect(cnt)
+            bbox = (x, y, cw, ch)
+
+            # 近似轮廓
+            epsilon = epsilon_ratio * cv2.arcLength(cnt, True)
+            approx = cv2.approxPolyDP(cnt, epsilon, True)
+            pts = [(float(p[0][0]), float(p[0][1])) for p in approx]
+            n = len(pts)
+
+            # 跳过贴满整个图像边框的轮廓（真正的背景边框）
+            bx, by, bw, bh = bbox
+            touches_all_edges = (bx <= 1 and by <= 1 and
+                                 bx + bw >= w - 2 and by + bh >= h - 2)
+            if touches_all_edges and label_idx == bg_label:
+                continue
+
+            # 形状分类
+            shape_type = SHAPE_POLYGON
+            extra = {}
+
+            # 检查圆形度
+            (cx, cy), radius = cv2.minEnclosingCircle(cnt)
+            circularity = area / (math.pi * radius * radius)
+
+            if circularity > circularity_threshold and n > 6:
+                shape_type = SHAPE_CIRCLE
+                extra['center'] = (float(cx), float(cy))
+                extra['radius'] = float(radius)
+            elif n == 3:
+                shape_type = SHAPE_TRIANGLE
+            elif n == 4:
+                shape_type = SHAPE_RECTANGLE
+            elif n == 5:
+                shape_type = SHAPE_POLYGON
+            elif n == 10:
+                # 10个顶点 → 五角星（5个外点+5个内点）
+                shape_type = SHAPE_STAR
+                extra['points_count'] = 5
+            elif n == 12:
+                # 12个顶点 → 六角星（如大卫之星）
+                shape_type = SHAPE_STAR
+                extra['points_count'] = 6
+            else:
+                shape_type = SHAPE_POLYGON
+
+            # BGR转RGB hex color
+            bgr = tuple(int(c) for c in color_bgr)
+            hex_color = f'#{bgr[2]:02x}{bgr[1]:02x}{bgr[0]:02x}'
+
+            shape = {
+                'type': shape_type,
+                'points': pts,
+                'area': float(area),
+                'bbox': bbox,
+                'color': hex_color,
+                'color_bgr': bgr,
+            }
+            shape.update(extra)
+            shapes.append(shape)
+
+    # ========== 步骤3：按面积排序 ==========
+    shapes.sort(key=lambda s: s['area'], reverse=True)
+
+    return shapes
+
+
 def _deduplicate_shapes(shapes, overlap_threshold=0.8):
     """
     去除高度重叠的形状
@@ -1533,8 +1780,8 @@ def shape_to_polyline_points(shape):
             y = cy + r * math.sin(angle)
             pts.append((x, y))
         return pts
-    elif shape['type'] in (SHAPE_RECTANGLE, SHAPE_TRIANGLE, SHAPE_POLYGON):
-        # 闭合多边形：首尾相连
+    elif shape['type'] in (SHAPE_RECTANGLE, SHAPE_TRIANGLE, SHAPE_POLYGON, SHAPE_STAR):
+        # 闭合多边形/五角星：首尾相连
         pts = shape['points']
         if pts and pts[0] != pts[-1]:
             pts = list(pts) + [pts[0]]
@@ -1607,7 +1854,7 @@ def _validate_shape(shape):
 
     # 需要 points 字段的形状
     if shape_type in (SHAPE_LINE, SHAPE_POLYLINE, SHAPE_RECTANGLE,
-                      SHAPE_TRIANGLE, SHAPE_POLYGON):
+                      SHAPE_TRIANGLE, SHAPE_POLYGON, SHAPE_STAR):
         pts = shape.get('points')
         if pts is None:
             return False, f"形状类型{shape_type}缺少points字段"
@@ -1702,8 +1949,8 @@ def _shape_to_gt_segs(shape, sx, sy, ox, oy, flip_v=False):
         # 返回格式: (['__arc_path__', cx, cy, r, start_angle, end_angle], False)
         return [('__arc_path__', cx, cy, r, start_angle, end_angle)], False
 
-    # 闭合多边形类：矩形、三角形、多边形
-    elif shape_type in (SHAPE_RECTANGLE, SHAPE_TRIANGLE, SHAPE_POLYGON):
+    # 闭合多边形类：矩形、三角形、多边形、五角星
+    elif shape_type in (SHAPE_RECTANGLE, SHAPE_TRIANGLE, SHAPE_POLYGON, SHAPE_STAR):
         pts = _validate_points(shape.get('points', []))
         if not pts:
             return [], False
@@ -1744,6 +1991,8 @@ def convert_geo_to_wsd(input_path, wsd_path,
                        min_line_length=50,
                        line_threshold=30,
                        circle_param2=120,
+                       mode='auto',
+                       max_colors=8,
                        progress_cb=None):
     """
     几何转换：识别图片中的几何图形并转换为WSD
@@ -1758,18 +2007,21 @@ def convert_geo_to_wsd(input_path, wsd_path,
       其他     → 贝塞尔段 (0x4703)
 
     参数:
-        color_mode: 颜色模式 ('rainbow', 'single', 'black')
+        color_mode: 颜色模式 ('rainbow', 'single', 'black', 'original')
+                    'original': 使用图片中检测到的原始颜色（filled模式）
         linewidth: 线宽（WSD单位，40=0.1mm）
         fill_color: 单色填充时的颜色 (#rrggbb)
-        outline: 是否仅轮廓（当前仅支持轮廓模式）
+        outline: 是否仅轮廓（line模式下默认是轮廓）
         flip_v: 垂直翻转
         custom_size: (width, height) 自定义输出大小(WSD单位)
         min_area: 最小面积（像素）
         epsilon_ratio: 轮廓近似精度
-        use_hough: 是否启用霍夫变换
-        min_line_length: 最小直线长度（像素）
-        line_threshold: 直线检测阈值
-        circle_param2: 圆检测param2基准值
+        use_hough: 是否启用霍夫变换（仅line模式）
+        min_line_length: 最小直线长度（仅line模式）
+        line_threshold: 直线检测阈值（仅line模式）
+        circle_param2: 圆检测param2基准值（仅line模式）
+        mode: 检测模式 'auto'|'line'|'filled'
+        max_colors: 最大颜色数（仅filled模式）
     """
     import traceback
 
@@ -1787,7 +2039,8 @@ def convert_geo_to_wsd(input_path, wsd_path,
     shapes = _step("形状检测", lambda: detect_geometric_shapes(
         input_path, min_area=min_area, epsilon_ratio=epsilon_ratio,
         use_hough=use_hough, min_line_length=min_line_length,
-        line_threshold=line_threshold, circle_param2=circle_param2
+        line_threshold=line_threshold, circle_param2=circle_param2,
+        mode=mode, max_colors=max_colors,
     ))
 
     if not shapes:
@@ -1795,6 +2048,9 @@ def convert_geo_to_wsd(input_path, wsd_path,
 
     if progress_cb:
         progress_cb(f"检测到 {len(shapes)} 个形状", 20)
+
+    # 判断是否为filled模式（检测到的形状带有color字段）
+    is_filled = shapes and 'color' in shapes[0]
 
     # 步骤2：计算边界
     def _calc_bounds():
@@ -1838,7 +2094,17 @@ def convert_geo_to_wsd(input_path, wsd_path,
     # 步骤3：分配颜色
     def _assign_colors():
         colors = []
-        if color_mode == 'rainbow':
+        if is_filled and (color_mode == 'original' or color_mode == 'rainbow'):
+            # filled模式：使用形状自身的颜色
+            for s in shapes:
+                if 'color_bgr' in s:
+                    b, g, r = s['color_bgr']
+                    colors.append(bytes([b, g, r, 0xff]))
+                elif 'color' in s:
+                    colors.append(hex_to_bgra(s['color']))
+                else:
+                    colors.append(hex_to_bgra('#000000'))
+        elif color_mode == 'rainbow':
             areas = [s['area'] for s in shapes]
             sorted_idx = sorted(range(len(shapes)), key=lambda i: -areas[i])
             color_map = {}
@@ -1909,7 +2175,15 @@ def convert_geo_to_wsd(input_path, wsd_path,
                 paths.append(path)
             else:
                 # 普通形状
-                path = make_path([segs], color, linewidth)
+                if is_filled:
+                    # 填充模式：设置填充颜色，线条颜色与填充相同
+                    path = make_path(
+                        [segs], color, linewidth,
+                        fill_color_bgra=color, fill_alpha=0xff
+                    )
+                else:
+                    # 轮廓模式：只有线条
+                    path = make_path([segs], color, linewidth)
                 paths.append(path)
         wsd_data = build_wsd(paths)
         with open(wsd_path, 'wb') as f:
@@ -1949,6 +2223,8 @@ def convert_geo_to_wsd_multi(input_files, output_path, **kwargs):
     min_line_length = kwargs.get('min_line_length', 50)
     line_threshold = kwargs.get('line_threshold', 30)
     circle_param2 = kwargs.get('circle_param2', 120)
+    mode = kwargs.get('mode', 'auto')
+    max_colors = kwargs.get('max_colors', 8)
 
     all_shapes_data = []
     total_files = len(input_files)
@@ -1965,7 +2241,8 @@ def convert_geo_to_wsd_multi(input_files, output_path, **kwargs):
             shapes = detect_geometric_shapes(
                 in_file, min_area=min_area, epsilon_ratio=epsilon_ratio,
                 use_hough=use_hough, min_line_length=min_line_length,
-                line_threshold=line_threshold, circle_param2=circle_param2
+                line_threshold=line_threshold, circle_param2=circle_param2,
+                mode=mode, max_colors=max_colors,
             )
         except Exception as e:
             err_msg = f"形状检测失败: {e}"
@@ -1975,6 +2252,9 @@ def convert_geo_to_wsd_multi(input_files, output_path, **kwargs):
 
         if not shapes:
             continue
+
+        # 判断是否为filled模式
+        is_filled = shapes and 'color' in shapes[0]
 
         try:
             all_polylines = [shape_to_polyline_points(s) for s in shapes]
@@ -2011,8 +2291,19 @@ def convert_geo_to_wsd_multi(input_files, output_path, **kwargs):
             else:
                 oy = CANVAS_MIN + (canvas_range - sh * sy) / 2 - min_y * sy
 
-            # 颜色
-            if color_mode == 'rainbow':
+            # 颜色分配
+            shape_colors = []
+            if is_filled and color_mode in ('rainbow', 'original'):
+                # filled模式：使用形状自身的颜色
+                for s in shapes:
+                    if 'color_bgr' in s:
+                        b, g, r = s['color_bgr']
+                        shape_colors.append(bytes([b, g, r, 0xff]))
+                    elif 'color' in s:
+                        shape_colors.append(hex_to_bgra(s['color']))
+                    else:
+                        shape_colors.append(hex_to_bgra('#000000'))
+            elif color_mode == 'rainbow':
                 areas = [s['area'] for s in shapes]
                 sorted_idx = sorted(range(len(shapes)), key=lambda i: -areas[i])
                 color_map = {}
@@ -2040,12 +2331,12 @@ def convert_geo_to_wsd_multi(input_files, output_path, **kwargs):
                         shape, sx, sy, ox, oy, flip_v
                     )
                     if segs:
-                        seglists.append(segs)
+                        seglists.append((segs, shape_colors[i] if i < len(shape_colors) else shape_colors[0]))
                 except Exception:
                     pass
 
             if seglists:
-                all_shapes_data.append((seglists, shape_colors[0]))
+                all_shapes_data.append((seglists, is_filled))
         except Exception as e:
             err_msg = f"转换失败: {e}"
             print(f"警告: 文件 {in_file} {err_msg}")
@@ -2058,11 +2349,19 @@ def convert_geo_to_wsd_multi(input_files, output_path, **kwargs):
     if progress_cb:
         progress_cb(f"组装 {len(all_shapes_data)} 个画布...", 70)
 
-    # 每个画布一个路径
+    # 每个画布一个或多个路径
     paths = []
-    for seglists, color_bgra in all_shapes_data:
-        path = make_path(seglists, color_bgra, linewidth)
-        paths.append(path)
+    for seglists, is_filled in all_shapes_data:
+        for segs, color_bgra in seglists:
+            if is_filled:
+                # 填充模式：设置填充颜色
+                path = make_path(
+                    [segs], color_bgra, linewidth,
+                    fill_color_bgra=color_bgra, fill_alpha=0xff
+                )
+            else:
+                path = make_path([segs], color_bgra, linewidth)
+            paths.append(path)
 
     wsd_data = build_wsd(paths)
 
