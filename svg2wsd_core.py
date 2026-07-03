@@ -1636,6 +1636,13 @@ def convert_to_wsd(input_path, wsd_path, color_mode='rainbow',
                 x2 = int(shape_data['x2'] * sx + ox)
                 y2 = int(shape_data['y2'] * sy + oy)
                 records_data += build_native_rect_fill(x1, y1, x2, y2, fill_colors[i])
+            elif shape_type == 'polygon':
+                # 从贝塞尔点中提取顶点 (索引 0, 3, 6, ...)
+                verts = [wsd_sp[j] for j in range(0, len(wsd_sp), 3)]
+                records_data += build_native_polygon_fill(verts, fill_colors[i])
+            elif shape_type == 'polyline':
+                # 开放折线一般不填充，用贝塞尔近似
+                records_data += build_native_bezier_fill(wsd_sp, fill_colors[i])
             elif shape_type == 'arc':
                 # 圆弧一般不填充，作为描边用，这里用贝塞尔近似
                 records_data += build_fill_record(wsd_sp, fill_colors[i])
@@ -1662,6 +1669,23 @@ def convert_to_wsd(input_path, wsd_path, color_mode='rainbow',
                 records_data += build_native_rect_stroke(
                     x1, y1, x2, y2, bgr_black, linewidth
                 )
+            elif shape_type == 'polygon':
+                # 多边形描边：用折线（闭合）
+                from wsd_gt_build import make_line_seg, make_path
+                verts = [wsd_sp[j] for j in range(0, len(wsd_sp), 3)]
+                # 确保闭合
+                if verts[0] != verts[-1]:
+                    verts = verts + [verts[0]]
+                seg = make_line_seg(verts)
+                line_color_bgra = bgr_black + bytes([0xff])
+                records_data += make_path([[seg]], line_color_bgra, linewidth, fill_color_bgra=None)
+            elif shape_type == 'polyline':
+                # 开放折线描边
+                from wsd_gt_build import make_line_seg, make_path
+                verts = [wsd_sp[j] for j in range(0, len(wsd_sp), 3)]
+                seg = make_line_seg(verts)
+                line_color_bgra = bgr_black + bytes([0xff])
+                records_data += make_path([[seg]], line_color_bgra, linewidth, fill_color_bgra=None)
             elif shape_type == 'arc':
                 # 圆弧用贝塞尔近似描边
                 records_data += build_bezier_record(wsd_sp, black_idx, linewidth)

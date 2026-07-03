@@ -697,9 +697,10 @@ class TikZPathParser:
         self.transform = TransformMatrix()
         self.scale_x = 28.452755906  # 1cm = 28.45pt (xyz 坐标系统)
         self.scale_y = 28.452755906
-        self.shape_info = []  # 每个子路径的形状信息: {type: 'circle'|'bezier'|'rect', ...}
+        self.shape_info = []  # 每个子路径的形状信息: {type: 'circle'|'bezier'|'rect'|'polygon'|'polyline', ...}
         self._current_shape_type = 'bezier'
         self._current_shape_data = {}
+        self._current_is_all_lines = True  # 当前子路径是否全是直线段
 
     def _add_point(self, x, y):
         """添加点到当前子路径"""
@@ -713,9 +714,18 @@ class TikZPathParser:
         """移动到新位置，开始新子路径"""
         # 保存上一个子路径的形状信息
         if self.current_sp is not None and len(self.current_sp) >= 4:
+            # 如果全是直线且是新路径，更新类型
+            final_type = self._current_shape_type
+            final_data = self._current_shape_data.copy()
+            if final_type == 'bezier' and self._current_is_all_lines:
+                # 检查是否闭合（首尾点相同）
+                if self.current_sp and self.current_sp[0] == self.current_sp[-1]:
+                    final_type = 'polygon'
+                else:
+                    final_type = 'polyline'
             self.shape_info.append({
-                'type': self._current_shape_type,
-                'data': self._current_shape_data.copy()
+                'type': final_type,
+                'data': final_data
             })
         x, y = self.transform.transform_point(x, y)
         self.current_pos = (x, y)
@@ -724,6 +734,7 @@ class TikZPathParser:
         self.subpaths.append(self.current_sp)
         self._current_shape_type = 'bezier'
         self._current_shape_data = {}
+        self._current_is_all_lines = True
 
     def _line_to(self, x, y):
         """直线到目标点"""
@@ -742,6 +753,7 @@ class TikZPathParser:
         end = self.transform.transform_point(x, y)
         self.current_sp.extend([c1, c2, end])
         self.current_pos = end
+        self._current_is_all_lines = False
 
     def _close_path(self):
         """闭合当前子路径"""
@@ -767,9 +779,16 @@ class TikZPathParser:
             # 确保 shape_info 数量与 subpaths 一致
             while len(self.shape_info) < len(self.subpaths) - 1:
                 self.shape_info.append({'type': 'bezier', 'data': {}})
+            final_type = self._current_shape_type
+            final_data = self._current_shape_data.copy()
+            if final_type == 'bezier' and self._current_is_all_lines:
+                if self.current_sp and self.current_sp[0] == self.current_sp[-1]:
+                    final_type = 'polygon'
+                else:
+                    final_type = 'polyline'
             self.shape_info.append({
-                'type': self._current_shape_type,
-                'data': self._current_shape_data.copy()
+                'type': final_type,
+                'data': final_data
             })
 
         # 确保 shape_info 和 subpaths 数量一致
@@ -1159,6 +1178,7 @@ class TikZPathParser:
                             self.current_sp = transformed
                             self.subpaths[-1] = transformed
                             self.current_pos = transformed[-1]
+                            self._current_is_all_lines = False
 
                 elif op == 'arc':
                     # 圆弧
@@ -1241,6 +1261,7 @@ class TikZPathParser:
                                 self.current_sp.extend(transformed)
                                 if transformed:
                                     self.current_pos = transformed[-1]
+                                self._current_is_all_lines = False
 
                                 # 正圆弧 → 标记为 arc 形状（可用于原生圆段）
                                 if abs(rx - ry) < 1e-6:
