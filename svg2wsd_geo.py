@@ -1747,10 +1747,15 @@ def convert_geo_to_wsd(input_path, wsd_path,
                        progress_cb=None):
     """
     几何转换：识别图片中的几何图形并转换为WSD
-    基于WSTUDIO7 Type-A格式（源码验证，字节级正确）
+    基于WSTUDIO7 Type-A格式（全部使用WSD原生段）
 
-    支持：直线、圆（贝塞尔近似）、圆弧（贝塞尔近似）、
-          矩形、三角形、多边形、折线
+    原生段对应：
+      直线     → LINE段 (0x4701)
+      折线     → LINE段 (0x4701)
+      矩形/三角形/多边形 → GON段 (0x4702)
+      圆       → CIRCLE原生段 (0x4284)
+      圆弧     → 原生圆弧路径 (ff000704)
+      其他     → 贝塞尔段 (0x4703)
 
     参数:
         color_mode: 颜色模式 ('rainbow', 'single', 'black')
