@@ -2528,9 +2528,9 @@ def convert_geo_to_wsd(input_path, wsd_path,
     if progress_cb:
         progress_cb("构建WSD记录...", 60)
 
-    # 步骤4：为每个形状创建seglist
+    # 步骤4：为每个形状创建seglist（同时保存颜色，避免索引错位）
     def _build_seglists():
-        seglists = []
+        seglist_color_pairs = []  # [(segs, color), ...]
         for i, shape in enumerate(shapes):
             # 先验证shape的必要字段
             is_valid, reason = _validate_shape(shape)
@@ -2543,7 +2543,9 @@ def convert_geo_to_wsd(input_path, wsd_path,
                     shape, sx, sy, ox, oy, flip_v
                 )
                 if segs:
-                    seglists.append(segs)
+                    # 获取对应形状的颜色
+                    color = colors[i] if i < len(colors) else hex_to_bgra('#000000')
+                    seglist_color_pairs.append((segs, color))
             except Exception as e:
                 print(f"形状{i}转换失败: {e}")
                 traceback.print_exc()
@@ -2551,12 +2553,16 @@ def convert_geo_to_wsd(input_path, wsd_path,
             if progress_cb and i % 5 == 0:
                 pct = 60 + int(35 * i / max(1, len(shapes)))
                 progress_cb(f"处理中... {i+1}/{len(shapes)}", pct)
-        return seglists
+        return seglist_color_pairs
 
-    seglists = _step("构建WSD记录", _build_seglists)
+    seglist_color_pairs = _step("构建WSD记录", _build_seglists)
 
-    if not seglists:
+    if not seglist_color_pairs:
         raise ValueError("没有可转换的形状")
+
+    # 解包seglists和colors（保持同步）
+    seglists = [pair[0] for pair in seglist_color_pairs]
+    colors = [pair[1] for pair in seglist_color_pairs]
 
     if progress_cb:
         progress_cb("组装文件...", 92)
