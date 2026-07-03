@@ -343,7 +343,7 @@ class Image2WSDApp:
 
         # 等高线参数行（默认显示）
         self.contour_step = tk.IntVar(value=5)
-        self.contour_min_area = tk.IntVar(value=100)
+        self.contour_min_area = tk.IntVar(value=50)
         self.contour_row1 = ttk.Frame(img_frame)
         self.cs_scale, self.cs_val_label = _make_img_slider_row(
             self.contour_row1, "等高线步长:", self.contour_step, 1, 15, 1, "{}", width=12)

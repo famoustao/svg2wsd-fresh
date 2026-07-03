@@ -802,6 +802,13 @@ def _parse_image_file_contour_color(img_path, min_area=50, step=3,
         img_small = img_rgb
 
     if progress_cb:
+        progress_cb("颜色平滑中...", 12)
+
+    # 均值偏移滤波：平滑颜色但保留边缘，减少细碎区域
+    # 让连通区域更大更完整，提高覆盖率
+    img_smooth = cv2.pyrMeanShiftFiltering(img_small, 10, 15)
+
+    if progress_cb:
         progress_cb("颜色量化中...", 15)
 
     # step 映射为颜色量化级别：step越小，颜色越多
@@ -809,7 +816,7 @@ def _parse_image_file_contour_color(img_path, min_area=50, step=3,
     n_quantize = max(8, min(128, int(144 - step * 8)))
 
     # 颜色量化（K-means）
-    pixels = img_small.reshape(-1, 3).astype(np.float32)
+    pixels = img_smooth.reshape(-1, 3).astype(np.float32)
     criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 10, 1.0)
     _, labels, palette = cv2.kmeans(
         pixels, n_quantize, None, criteria, 3, cv2.KMEANS_PP_CENTERS
