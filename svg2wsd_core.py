@@ -549,10 +549,11 @@ def _quantize_colors(img_array, n_colors=16):
 def _vectorize_mask(bw_mask, turdsize=2, alphamax=1.0):
     """
     对二值掩码进行potrace矢量化，返回贝塞尔子路径列表
+    注意: potrace矢量化的是值为0(False)的区域，所以需要取反
     """
     import potrace
 
-    bmp = potrace.Bitmap(bw_mask)
+    bmp = potrace.Bitmap(~bw_mask)
     path = bmp.trace(
         alphamax=alphamax,
         turdsize=turdsize,
@@ -865,8 +866,8 @@ def _parse_image_file_contour_color(img_path, min_area=50, step=3,
 
     total_regions = len(all_regions)
     for ri, (bw_mask, area, color_hex) in enumerate(all_regions):
-        # potrace矢量化
-        bmp = potrace.Bitmap(bw_mask)
+        # potrace矢量化（取反，因为potrace矢量化的是值为0的区域）
+        bmp = potrace.Bitmap(~bw_mask)
         path = bmp.trace(
             alphamax=alphamax,
             turdsize=max(1, min_area // 4),
@@ -959,8 +960,8 @@ def _parse_image_file(img_path, threshold=128, turdsize=2, alphamax=1.0):
     arr = np.array(img)
     bw = arr < threshold  # True = 黑色(前景)
 
-    # potrace 矢量化
-    bmp = potrace.Bitmap(bw)
+    # potrace 矢量化（取反，因为potrace矢量化的是值为0的区域）
+    bmp = potrace.Bitmap(~bw)
     path = bmp.trace(
         alphamax=alphamax,
         turdsize=turdsize,
