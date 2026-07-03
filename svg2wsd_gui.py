@@ -37,7 +37,7 @@ class Image2WSDApp:
         # 变量
         self.input_files = []
         self.current_file = None
-        self.current_data = None  # (subpaths, colors, bbox, file_type)
+        self.current_data = None  # (subpaths, colors, bbox, file_type, extra_info)
 
         self.convert_mode = tk.StringVar(value='normal')  # normal / geometric
         self.output_mode = tk.StringVar(value='separate')  # separate / merged
@@ -802,10 +802,10 @@ class Image2WSDApp:
                     all_x = [x for sp in subpaths for x, y in sp]
                     all_y = [y for sp in subpaths for x, y in sp]
                     bbox = (min(all_x), min(all_y), max(all_x), max(all_y))
-                    result = (subpaths, colors, bbox, 'geometric')
+                    result = (subpaths, colors, bbox, 'geometric', {})
                     shape_info = [(s['type'], s['area']) for s in shapes]
                 else:
-                    subpaths, colors, bbox, ftype = parse_input_file(
+                    subpaths, colors, bbox, ftype, extra_info = parse_input_file(
                         self.current_file,
                         img_threshold=self.img_threshold.get(),
                         img_turdsize=self.img_turdsize.get(),
@@ -819,7 +819,7 @@ class Image2WSDApp:
                         img_dilate_size=self.contour_dilate.get(),
                         progress_cb=_progress_cb,
                     )
-                    result = (subpaths, colors, bbox, ftype)
+                    result = (subpaths, colors, bbox, ftype, extra_info)
                     shape_info = None
 
                 # 检查是否被取消
@@ -919,8 +919,9 @@ class Image2WSDApp:
             # 没有数据，启动异步加载
             self._ensure_data_async()
             return
-        subpaths, colors, bbox, ftype = self.current_data
+        subpaths, colors, bbox, ftype, extra_info = self.current_data
         is_geo = self._is_geometric_mode()
+        is_stroke_list = extra_info.get('is_stroke', [False] * len(subpaths))
 
         min_x, min_y, max_x, max_y = bbox
         sw = max_x - min_x
@@ -953,7 +954,15 @@ class Image2WSDApp:
                 flat = [coord for pt in pts for coord in pt]
                 line_color = color if color else '#666666'
                 canvas.create_line(flat, fill=line_color, width=2, capstyle='round', joinstyle='round')
+            elif i < len(is_stroke_list) and is_stroke_list[i]:
+                # SVG描边路径：用线条绘制
+                poly = subpath_to_polygon(sp, samples_per_seg=6)
+                pts = [(x*scale+ox, y*scale+oy) for x, y in poly]
+                flat = [coord for pt in pts for coord in pt]
+                line_color = color if color else '#000000'
+                canvas.create_line(flat, fill=line_color, width=2, capstyle='round', joinstyle='round')
             else:
+                # 填充路径
                 poly = subpath_to_polygon(sp, samples_per_seg=6)
                 pts = [(x*scale+ox, y*scale+oy) for x, y in poly]
                 flat = [coord for pt in pts for coord in pt]
@@ -980,8 +989,9 @@ class Image2WSDApp:
             # 没有数据，启动异步加载
             self._ensure_data_async()
             return
-        subpaths, colors, bbox, ftype = self.current_data
+        subpaths, colors, bbox, ftype, extra_info = self.current_data
         is_geo = self._is_geometric_mode()
+        is_stroke_list = extra_info.get('is_stroke', [False] * len(subpaths))
 
         w = canvas.winfo_width()
         h = canvas.winfo_height()
@@ -1064,7 +1074,15 @@ class Image2WSDApp:
                 flat = [coord for pt in pts for coord in pt]
                 line_color = color if color else '#3366ff'
                 canvas.create_line(flat, fill=line_color, width=2, capstyle='round', joinstyle='round')
+            elif i < len(is_stroke_list) and is_stroke_list[i]:
+                # SVG描边路径：用线条绘制
+                poly = subpath_to_polygon(wsd_sp, samples_per_seg=6)
+                pts = [(x*dscale+dox, y*dscale+doy) for x, y in poly]
+                flat = [coord for pt in pts for coord in pt]
+                line_color = color if color else '#000000'
+                canvas.create_line(flat, fill=line_color, width=2, capstyle='round', joinstyle='round')
             else:
+                # 填充路径
                 poly = subpath_to_polygon(wsd_sp, samples_per_seg=6)
                 pts = [(x*dscale+dox, y*dscale+doy) for x, y in poly]
                 flat = [coord for pt in pts for coord in pt]

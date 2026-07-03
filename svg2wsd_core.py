@@ -447,44 +447,77 @@ def _concat_transform(t1, t2):
 # ========== SVG解析 ==========
 
 def _parse_svg_file(svg_path):
-    """解析SVG文件，返回 (子路径列表, 颜色列表, 边界框)"""
+    """解析SVG文件，返回 (子路径列表, 颜色列表, 边界框, 描边信息列表)"""
     tree = ET.parse(svg_path)
     root = tree.getroot()
 
-    def _get_fill(elem, parent_fill='#000000'):
-        fill = elem.get('fill')
-        if fill and fill != 'none':
-            return fill
+    def _get_style_value(elem, prop_name, default=None):
+        """从元素属性或style中获取样式值"""
+        # 先直接从属性获取
+        val = elem.get(prop_name)
+        if val is not None:
+            return val.strip()
+        # 再从style中查找
         style = elem.get('style', '')
         if style:
-            m = re.search(r'fill\s*:\s*([^;]+)', style)
+            m = re.search(rf'{prop_name}\s*:\s*([^;]+)', style)
             if m:
-                f = m.group(1).strip()
-                if f != 'none':
-                    return f
+                return m.group(1).strip()
+        return default
+
+    def _get_fill(elem, parent_fill='#000000'):
+        fill = _get_style_value(elem, 'fill')
+        if fill and fill != 'none':
+            return fill
+        if fill == 'none':
+            return 'none'
         return parent_fill
 
+    def _get_stroke(elem, parent_stroke='none'):
+        stroke = _get_style_value(elem, 'stroke')
+        if stroke and stroke != 'none':
+            return stroke
+        if stroke == 'none':
+            return 'none'
+        return parent_stroke
+
+    def _get_stroke_width(elem, parent_width=1.0):
+        sw = _get_style_value(elem, 'stroke-width')
+        if sw:
+            try:
+                return float(sw)
+            except (ValueError, TypeError):
+                pass
+        return parent_width
+
     paths = []
-    def _collect(parent, parent_fill='#000000', parent_transform=None):
+    def _collect(parent, parent_fill='#000000', parent_stroke='none',
+                 parent_stroke_width=1.0, parent_transform=None):
         g_fill = _get_fill(parent, parent_fill)
+        g_stroke = _get_stroke(parent, parent_stroke)
+        g_stroke_width = _get_stroke_width(parent, parent_stroke_width)
         g_transform = _parse_transform(parent.get('transform', ''))
         combined = _concat_transform(parent_transform, g_transform)
         for child in parent:
             tag = child.tag.split('}')[-1] if '}' in child.tag else child.tag
             if tag == 'g':
-                _collect(child, g_fill, combined)
+                _collect(child, g_fill, g_stroke, g_stroke_width, combined)
             elif tag == 'path':
                 d = child.get('d', '')
                 fill = _get_fill(child, g_fill)
+                stroke = _get_stroke(child, g_stroke)
+                stroke_width = _get_stroke_width(child, g_stroke_width)
                 t = _parse_transform(child.get('transform', ''))
                 full_t = _concat_transform(combined, t)
-                paths.append((d, fill, full_t))
+                paths.append((d, fill, stroke, stroke_width, full_t))
 
-    _collect(root, '#000000', None)
+    _collect(root, '#000000', 'none', 1.0, None)
 
     all_subpaths = []
     all_colors = []
-    for d, fill, transform in paths:
+    all_is_stroke = []    # True=描边路径, False=填充路径
+    all_stroke_widths = []
+    for d, fill, stroke, stroke_width, transform in paths:
         parser = SVGPathParser(d)
         subpaths = parser.parse()
         for sp in subpaths:
@@ -499,7 +532,20 @@ def _parse_svg_file(svg_path):
                     nx, ny = x, y
                 tsp.append((nx, ny))
             all_subpaths.append(tsp)
-            all_colors.append(fill)
+            # 优先使用fill颜色（填充路径），如果fill=none则用stroke颜色（描边路径）
+            if fill != 'none':
+                all_colors.append(fill)
+                all_is_stroke.append(False)
+                all_stroke_widths.append(stroke_width)
+            elif stroke != 'none':
+                all_colors.append(stroke)
+                all_is_stroke.append(True)
+                all_stroke_widths.append(stroke_width)
+            else:
+                # 既没有fill也没有stroke，默认黑色填充
+                all_colors.append('#000000')
+                all_is_stroke.append(False)
+                all_stroke_widths.append(stroke_width)
 
     if not all_subpaths:
         raise ValueError("SVG中没有找到路径")
@@ -508,7 +554,8 @@ def _parse_svg_file(svg_path):
     all_y = [y for sp in all_subpaths for x, y in sp]
     bbox = (min(all_x), min(all_y), max(all_x), max(all_y))
 
-    return all_subpaths, all_colors, bbox
+    # 保存描边信息到全局（供convert_to_wsd使用）
+    return all_subpaths, all_colors, bbox, all_is_stroke, all_stroke_widths
 
 
 # ========== 图片彩色矢量化 ==========
@@ -1235,18 +1282,24 @@ def parse_input_file(file_path, img_threshold=128, img_turdsize=2,
                      progress_cb=None):
     """
     统一解析输入文件（SVG/图片/TikZ）
-    返回: (subpaths, colors, bbox, file_type)
+    返回: (subpaths, colors, bbox, file_type, extra_info)
     file_type: 'svg' 或 'image' 或 'tikz'
+    extra_info: 额外信息字典，包含 is_stroke, stroke_widths 等
     """
+    extra_info = {}
     ext = os.path.splitext(file_path)[1].lower()
     if ext in SVG_EXTENSIONS:
-        subpaths, colors, bbox = _parse_svg_file(file_path)
-        return subpaths, colors, bbox, 'svg'
+        subpaths, colors, bbox, is_stroke, stroke_widths = _parse_svg_file(file_path)
+        extra_info['is_stroke'] = is_stroke
+        extra_info['stroke_widths'] = stroke_widths
+        return subpaths, colors, bbox, 'svg', extra_info
     elif ext in TIKZ_EXTENSIONS:
         if progress_cb:
             progress_cb("解析 TikZ 代码...", 10)
         subpaths, colors, bbox, _ = _parse_tikz_file(file_path)
-        return subpaths, colors, bbox, 'tikz'
+        extra_info['is_stroke'] = [False] * len(subpaths)
+        extra_info['stroke_widths'] = [1.0] * len(subpaths)
+        return subpaths, colors, bbox, 'tikz', extra_info
     elif ext in IMAGE_EXTENSIONS:
         if img_color:
             # 彩色矢量化模式
@@ -1265,7 +1318,9 @@ def parse_input_file(file_path, img_threshold=128, img_turdsize=2,
             subpaths, colors, bbox = _parse_image_file(
                 file_path, threshold=img_threshold, turdsize=img_turdsize
             )
-        return subpaths, colors, bbox, 'image'
+        extra_info['is_stroke'] = [False] * len(subpaths)
+        extra_info['stroke_widths'] = [1.0] * len(subpaths)
+        return subpaths, colors, bbox, 'image', extra_info
     else:
         # 尝试当作TikZ处理 (检查内容是否包含 tikzpicture)
         try:
@@ -1275,14 +1330,18 @@ def parse_input_file(file_path, img_threshold=128, img_turdsize=2,
                 if progress_cb:
                     progress_cb("解析 TikZ 代码...", 10)
                 subpaths, colors, bbox, _ = _parse_tikz_file(file_path)
-                return subpaths, colors, bbox, 'tikz'
+                extra_info['is_stroke'] = [False] * len(subpaths)
+                extra_info['stroke_widths'] = [1.0] * len(subpaths)
+                return subpaths, colors, bbox, 'tikz', extra_info
         except:
             pass
 
         # 尝试当作SVG处理
         try:
-            subpaths, colors, bbox = _parse_svg_file(file_path)
-            return subpaths, colors, bbox, 'svg'
+            subpaths, colors, bbox, is_stroke, stroke_widths = _parse_svg_file(file_path)
+            extra_info['is_stroke'] = is_stroke
+            extra_info['stroke_widths'] = stroke_widths
+            return subpaths, colors, bbox, 'svg', extra_info
         except:
             try:
                 if img_color:
@@ -1299,7 +1358,9 @@ def parse_input_file(file_path, img_threshold=128, img_turdsize=2,
                     subpaths, colors, bbox = _parse_image_file(
                         file_path, threshold=img_threshold, turdsize=img_turdsize
                     )
-                return subpaths, colors, bbox, 'image'
+                extra_info['is_stroke'] = [False] * len(subpaths)
+                extra_info['stroke_widths'] = [1.0] * len(subpaths)
+                return subpaths, colors, bbox, 'image', extra_info
             except:
                 raise ValueError(f"不支持的文件格式: {ext}")
 
@@ -1623,7 +1684,7 @@ def convert_to_wsd(input_path, wsd_path, color_mode='rainbow',
     if progress_cb: progress_cb("解析文件...", 0)
 
     # 统一解析
-    all_subpaths, all_colors, bbox, file_type = parse_input_file(
+    all_subpaths, all_colors, bbox, file_type, extra_info = parse_input_file(
         input_path, img_threshold=img_threshold, img_turdsize=img_turdsize,
         img_color=img_color, img_n_colors=img_n_colors,
         img_color_method=img_color_method,
@@ -1634,6 +1695,8 @@ def convert_to_wsd(input_path, wsd_path, color_mode='rainbow',
         img_dilate_size=img_dilate_size,
         progress_cb=progress_cb
     )
+    is_stroke_list = extra_info.get('is_stroke', [False] * len(all_subpaths))
+    stroke_widths = extra_info.get('stroke_widths', [1.0] * len(all_subpaths))
 
     # TikZ 额外获取形状信息（用于原生圆/圆弧）
     tikz_shapes = None
@@ -1705,26 +1768,38 @@ def convert_to_wsd(input_path, wsd_path, color_mode='rainbow',
             continue
         wsd_sp = [(int(x*sx+ox), int(y*sy+oy)) for x, y in sp]
 
-        # 检查 TikZ 形状类型
+        # 检查形状类型
         shape_type = 'bezier'
         shape_data = {}
-        is_stroke_only = False  # 是否是纯描边（TikZ中 \draw 而非 \fill）
+        is_stroke_only = False  # 是否是纯描边路径
         if tikz_shapes is not None and i < len(tikz_shapes):
             shape = tikz_shapes[i]
             shape_type = shape['type']
             shape_data = shape['data']
             # do_draw=False 表示这是纯描边的，被当作填充加入了列表
             is_stroke_only = not shape.get('do_draw', True)
+        elif i < len(is_stroke_list) and is_stroke_list[i]:
+            # SVG描边路径（fill=none但有stroke）
+            is_stroke_only = True
 
-        # 纯描边形状（\draw）：用描边方式构建，颜色用形状自身颜色
+        # 纯描边形状：用描边方式构建，颜色用形状自身颜色
         if is_stroke_only:
             stroke_color = fill_colors[i]  # 颜色存在 fill_colors 里
+            if stroke_color is None:
+                # 无色模式下，描边用黑色
+                stroke_color = bytes([0x00, 0x00, 0x00])
+            # 计算描边线宽：SVG描边使用stroke-width * 缩放，否则使用默认linewidth
+            sw = linewidth
+            if i < len(stroke_widths):
+                # SVG stroke-width 转换为 WSD 单位（假设SVG单位为px，1px ≈ 0.265mm ≈ 106 WSD单位）
+                # 这里用缩放因子做近似
+                sw = max(20, int(stroke_widths[i] * abs(sx) * 100))
             if shape_type == 'circle':
                 cx = int(shape_data['cx'] * sx + ox)
                 cy = int(shape_data['cy'] * sy + oy)
                 r = shape_data['r'] * abs(sx)
                 records_data += build_native_circle_stroke(
-                    cx, cy, r, stroke_color, linewidth
+                    cx, cy, r, stroke_color, sw
                 )
             elif shape_type == 'rect':
                 x1 = int(shape_data['x1'] * sx + ox)
@@ -1732,7 +1807,7 @@ def convert_to_wsd(input_path, wsd_path, color_mode='rainbow',
                 x2 = int(shape_data['x2'] * sx + ox)
                 y2 = int(shape_data['y2'] * sy + oy)
                 records_data += build_native_rect_stroke(
-                    x1, y1, x2, y2, stroke_color, linewidth
+                    x1, y1, x2, y2, stroke_color, sw
                 )
             elif shape_type == 'polygon':
                 from wsd_gt_build import make_line_seg, make_path
@@ -1741,13 +1816,13 @@ def convert_to_wsd(input_path, wsd_path, color_mode='rainbow',
                     verts = verts + [verts[0]]
                 seg = make_line_seg(verts)
                 line_color_bgra = stroke_color + bytes([0xff])
-                records_data += make_path([[seg]], line_color_bgra, linewidth, fill_color_bgra=None)
+                records_data += make_path([[seg]], line_color_bgra, sw, fill_color_bgra=None)
             elif shape_type == 'polyline':
                 from wsd_gt_build import make_line_seg, make_path
                 verts = [wsd_sp[j] for j in range(0, len(wsd_sp), 3)]
                 seg = make_line_seg(verts)
                 line_color_bgra = stroke_color + bytes([0xff])
-                records_data += make_path([[seg]], line_color_bgra, linewidth, fill_color_bgra=None)
+                records_data += make_path([[seg]], line_color_bgra, sw, fill_color_bgra=None)
             elif shape_type == 'arc':
                 # 正圆弧描边：使用WSD原生圆弧格式
                 from wsd_gt_build import make_arc_native_path
@@ -1759,11 +1834,11 @@ def convert_to_wsd(input_path, wsd_path, color_mode='rainbow',
                 line_color_bgra = stroke_color + bytes([0xff])
                 records_data += make_arc_native_path(
                     cx, cy, r, start_angle, end_angle,
-                    line_color_bgra, linewidth
+                    line_color_bgra, sw
                 )
             else:
                 records_data += build_native_bezier_stroke(
-                    wsd_sp, stroke_color, linewidth
+                    wsd_sp, stroke_color, sw
                 )
             num_objects += 1
             # outline 模式下纯描边不需要再画轮廓
@@ -2008,7 +2083,7 @@ def convert_to_wsd_multi(input_files, output_path, color_mode='rainbow',
             progress_cb(f"解析 {idx+1}/{total_files}: {os.path.basename(in_file)}",
                         int(10 + 50 * idx / total_files))
 
-        subpaths, svg_colors, bbox, ftype = parse_input_file(
+        subpaths, svg_colors, bbox, ftype, extra_info = parse_input_file(
             in_file, img_threshold=img_threshold, img_turdsize=img_turdsize,
             img_color=img_color, img_n_colors=img_n_colors,
             img_color_method=img_color_method,
