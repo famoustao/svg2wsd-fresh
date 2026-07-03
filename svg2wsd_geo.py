@@ -35,6 +35,11 @@ SHAPE_CIRCLE = 'circle'
 SHAPE_ARC = 'arc'
 SHAPE_STAR = 'star'
 
+# 对称类型
+SYMMETRY_AXIAL = 'axial'       # 轴对称
+SYMMETRY_ROTATIONAL = 'rotational'  # 旋转对称
+SYMMETRY_CENTRAL = 'central'   # 中心对称（旋转对称的特例，180度）
+
 
 def _skeletonize(binary):
     """
@@ -1034,7 +1039,9 @@ def detect_geometric_shapes(image_path, min_area=50, epsilon_ratio=0.02,
                             circle_param2=120,
                             use_hough=True,
                             mode='auto',
-                            max_colors=8):
+                            max_colors=8,
+                            detect_symmetry=True,
+                            symmetry_threshold=0.85):
     """
     从图片中检测几何形状（支持线条图和彩色填充图）
 
@@ -1071,10 +1078,13 @@ def detect_geometric_shapes(image_path, min_area=50, epsilon_ratio=0.02,
         use_hough: 是否启用霍夫检测（仅line模式）
         mode: 检测模式 'auto'|'line'|'filled'
         max_colors: 最大颜色数（仅filled模式）
+        detect_symmetry: 是否检测对称性
+        symmetry_threshold: 对称性检测阈值 (0~1)
 
     返回:
         list of dict，每个 dict 包含 type, points, area, bbox 等字段
         filled模式下额外包含 color (hex颜色) 和 color_bgr (BGR元组)
+        如果detect_symmetry=True，每个形状额外包含 symmetries 字段
     """
     import cv2
     from PIL import Image
@@ -1097,14 +1107,20 @@ def detect_geometric_shapes(image_path, min_area=50, epsilon_ratio=0.02,
             circularity_threshold=circularity_threshold,
             max_colors=max_colors,
         )
+        # 对称性检测
+        if detect_symmetry:
+            for s in shapes:
+                s['symmetries'] = detect_shape_symmetry(
+                    s, symmetry_threshold, symmetry_threshold, symmetry_threshold
+                )
         return shapes
 
-    # 线条图模式（原有逻辑）
+    # 线条图模式
     gray = cv2.cvtColor(img_color, cv2.COLOR_BGR2GRAY)
 
     shapes = []
-    hough_circles = []   # 单独保存用于重叠检测
-    hough_lines = []     # 单独保存用于重叠检测
+    hough_circles = []
+    hough_lines = []
 
     # ========== 步骤0：二值化 + 骨架化 ==========
     skeleton = None
@@ -1191,7 +1207,13 @@ def detect_geometric_shapes(image_path, min_area=50, epsilon_ratio=0.02,
 
     if hierarchy is None:
         # 无轮廓，直接返回已检测的形状
-        return _deduplicate_shapes(shapes)
+        shapes = _deduplicate_shapes(shapes)
+        if detect_symmetry:
+            for s in shapes:
+                s['symmetries'] = detect_shape_symmetry(
+                    s, symmetry_threshold, symmetry_threshold, symmetry_threshold
+                )
+        return shapes
 
     hierarchy = hierarchy[0]
     processed = set()
@@ -1433,6 +1455,13 @@ def detect_geometric_shapes(image_path, min_area=50, epsilon_ratio=0.02,
 
     # ========== 步骤4：最终去重 ==========
     shapes = _deduplicate_shapes(shapes)
+
+    # ========== 步骤5：对称性检测 ==========
+    if detect_symmetry:
+        for s in shapes:
+            s['symmetries'] = detect_shape_symmetry(
+                s, symmetry_threshold, symmetry_threshold, symmetry_threshold
+            )
 
     return shapes
 
@@ -1715,6 +1744,370 @@ def _shapes_overlap(s1, s2):
     return inter / union
 
 
+# ========== 对称性检测 ==========
+
+def _shape_center(shape):
+    """
+    计算形状的中心点（基于bbox中心，更稳定）
+    """
+    bbox = shape.get('bbox')
+    if bbox and len(bbox) == 4:
+        x, y, w, h = bbox
+        return (x + w / 2.0, y + h / 2.0)
+    # 回退到点的平均
+    pts = shape_to_polyline_points(shape)
+    if not pts:
+        return (0, 0)
+    cx = sum(p[0] for p in pts) / len(pts)
+    cy = sum(p[1] for p in pts) / len(pts)
+    return (cx, cy)
+
+
+def _reflect_point(x, y, line_point1, line_point2):
+    """
+    计算点 (x, y) 关于直线的镜像点
+    直线由 line_point1 和 line_point2 定义
+    """
+    x1, y1 = line_point1
+    x2, y2 = line_point2
+
+    # 直线方向向量
+    dx = x2 - x1
+    dy = y2 - y1
+    if dx == 0 and dy == 0:
+        return (x, y)
+
+    # 点到直线的垂足
+    t = ((x - x1) * dx + (y - y1) * dy) / (dx * dx + dy * dy)
+    px = x1 + t * dx
+    py = y1 + t * dy
+
+    # 镜像点
+    rx = 2 * px - x
+    ry = 2 * py - y
+    return (rx, ry)
+
+
+def _rotate_point(x, y, cx, cy, angle):
+    """
+    将点 (x, y) 绕 (cx, cy) 旋转 angle 弧度
+    """
+    cos_a = math.cos(angle)
+    sin_a = math.sin(angle)
+    dx = x - cx
+    dy = y - cy
+    rx = cx + dx * cos_a - dy * sin_a
+    ry = cy + dx * sin_a + dy * cos_a
+    return (rx, ry)
+
+
+def _points_similarity(pts1, pts2, tolerance=0.1):
+    """
+    计算两组点的相似度（0~1），用于判断对称性
+
+    方法：对每组点，找到每个点在另一组中最近的点，
+    计算平均距离，归一化为相似度
+    
+    tolerance: 容差比例，相对于bbox对角线。0.1表示10%的误差范围内视为匹配。
+    """
+    if len(pts1) == 0 or len(pts2) == 0:
+        return 0.0
+
+    # 计算bbox对角线作为参考长度
+    all_pts = pts1 + pts2
+    min_x = min(p[0] for p in all_pts)
+    max_x = max(p[0] for p in all_pts)
+    min_y = min(p[1] for p in all_pts)
+    max_y = max(p[1] for p in all_pts)
+    diag = math.sqrt((max_x - min_x) ** 2 + (max_y - min_y) ** 2)
+    if diag == 0:
+        return 1.0
+
+    def _avg_min_distance(src, dst):
+        total = 0.0
+        for p in src:
+            min_d = float('inf')
+            for q in dst:
+                d = math.sqrt((p[0] - q[0]) ** 2 + (p[1] - q[1]) ** 2)
+                if d < min_d:
+                    min_d = d
+            total += min_d
+        return total / len(src)
+
+    d1 = _avg_min_distance(pts1, pts2)
+    d2 = _avg_min_distance(pts2, pts1)
+    avg_d = (d1 + d2) / 2
+
+    # 归一化：距离为0则相似度1，距离为diag*tolerance则相似度0
+    normalized = avg_d / (diag * tolerance)
+    similarity = max(0.0, 1.0 - normalized)
+    return similarity
+
+
+def _densify_polyline(pts, min_density=50):
+    """
+    加密折线点，使点更密集，提高对称检测精度
+
+    参数:
+        pts: 折线点列表
+        min_density: 最少总点数
+    """
+    if len(pts) < 2:
+        return pts
+
+    # 计算总长度
+    total_len = 0
+    for i in range(len(pts) - 1):
+        dx = pts[i+1][0] - pts[i][0]
+        dy = pts[i+1][1] - pts[i][1]
+        total_len += math.sqrt(dx*dx + dy*dy)
+
+    if total_len == 0:
+        return pts
+
+    # 计算步长
+    total_points = max(len(pts), min_density)
+    step = total_len / total_points
+
+    dense = []
+    for i in range(len(pts) - 1):
+        x1, y1 = pts[i]
+        x2, y2 = pts[i+1]
+        seg_len = math.sqrt((x2-x1)**2 + (y2-y1)**2)
+        if seg_len == 0:
+            continue
+        num_steps = max(1, int(seg_len / step))
+        for j in range(num_steps):
+            t = j / num_steps
+            x = x1 + t * (x2 - x1)
+            y = y1 + t * (y2 - y1)
+            dense.append((x, y))
+    # 最后一个点
+    dense.append(pts[-1])
+    return dense
+
+
+def detect_axial_symmetry(shape, threshold=0.85, num_candidates=36):
+    """
+    检测形状的轴对称性
+
+    参数:
+        shape: 形状字典
+        threshold: 相似度阈值 (0~1)，高于此值认为对称
+        num_candidates: 检测的候选对称轴数量（均匀分布在0~180度）
+
+    返回:
+        dict or None: 如果检测到轴对称，返回
+            {
+                'type': 'axial',
+                'angle': 对称轴角度（度）,
+                'line_p1': 对称轴端点1,
+                'line_p2': 对称轴端点2,
+                'confidence': 置信度 (0~1)
+            }
+        未检测到返回 None
+    """
+    pts = shape_to_polyline_points(shape)
+    if len(pts) < 3:
+        return None
+
+    # 加密点以提高检测精度
+    pts = _densify_polyline(pts, min_density=100)
+
+    cx, cy = _shape_center(shape)
+
+    # 计算bbox尺寸
+    min_x = min(p[0] for p in pts)
+    max_x = max(p[0] for p in pts)
+    min_y = min(p[1] for p in pts)
+    max_y = max(p[1] for p in pts)
+    half_w = (max_x - min_x) * 0.6
+    half_h = (max_y - min_y) * 0.6
+
+    best_confidence = 0.0
+    best_angle = 0.0
+
+    # 遍历候选对称轴角度（0~180度）
+    for i in range(num_candidates):
+        angle_deg = i * (180.0 / num_candidates)
+        angle_rad = math.radians(angle_deg)
+
+        # 对称轴上的两个点（过中心）
+        dx = math.cos(angle_rad)
+        dy = math.sin(angle_rad)
+        p1 = (cx + dx * half_w, cy + dy * half_h)
+        p2 = (cx - dx * half_w, cy - dy * half_h)
+
+        # 计算所有点的镜像
+        reflected = [_reflect_point(p[0], p[1], p1, p2) for p in pts]
+
+        # 计算相似度
+        sim = _points_similarity(pts, reflected)
+
+        if sim > best_confidence:
+            best_confidence = sim
+            best_angle = angle_deg
+
+    if best_confidence >= threshold:
+        # 构造对称轴端点
+        angle_rad = math.radians(best_angle)
+        dx = math.cos(angle_rad)
+        dy = math.sin(angle_rad)
+        p1 = (cx + dx * half_w, cy + dy * half_h)
+        p2 = (cx - dx * half_w, cy - dy * half_h)
+        return {
+            'type': SYMMETRY_AXIAL,
+            'angle': best_angle,
+            'line_p1': p1,
+            'line_p2': p2,
+            'confidence': best_confidence,
+        }
+    return None
+
+
+def detect_rotational_symmetry(shape, threshold=0.85, max_order=12):
+    """
+    检测形状的旋转对称性
+
+    参数:
+        shape: 形状字典
+        threshold: 相似度阈值 (0~1)
+        max_order: 检测的最高对称阶数
+
+    返回:
+        dict or None: 如果检测到旋转对称，返回
+            {
+                'type': 'rotational',
+                'order': 对称阶数 (2,3,4,...),
+                'center': 旋转中心,
+                'angle': 旋转角度（度）,
+                'confidence': 置信度 (0~1)
+            }
+        未检测到返回 None
+    """
+    pts = shape_to_polyline_points(shape)
+    if len(pts) < 3:
+        return None
+
+    # 加密点以提高检测精度
+    pts = _densify_polyline(pts, min_density=100)
+
+    cx, cy = _shape_center(shape)
+
+    best_confidence = 0.0
+    best_order = 0
+
+    # 从高阶到低阶检测，优先匹配高阶对称
+    for order in range(max_order, 1, -1):
+        angle = 2 * math.pi / order
+
+        # 旋转所有点
+        rotated = [_rotate_point(p[0], p[1], cx, cy, angle) for p in pts]
+
+        # 计算相似度
+        sim = _points_similarity(pts, rotated)
+
+        if sim > best_confidence:
+            best_confidence = sim
+            best_order = order
+
+    if best_confidence >= threshold and best_order >= 2:
+        return {
+            'type': SYMMETRY_ROTATIONAL,
+            'order': best_order,
+            'center': (cx, cy),
+            'angle': 360.0 / best_order,
+            'confidence': best_confidence,
+        }
+    return None
+
+
+def detect_central_symmetry(shape, threshold=0.85):
+    """
+    检测形状的中心对称性（180度旋转对称的特例）
+
+    参数:
+        shape: 形状字典
+        threshold: 相似度阈值 (0~1)
+
+    返回:
+        dict or None: 如果检测到中心对称，返回
+            {
+                'type': 'central',
+                'center': 对称中心,
+                'confidence': 置信度 (0~1)
+            }
+        未检测到返回 None
+    """
+    pts = shape_to_polyline_points(shape)
+    if len(pts) < 3:
+        return None
+
+    # 加密点以提高检测精度
+    pts = _densify_polyline(pts, min_density=100)
+
+    cx, cy = _shape_center(shape)
+
+    # 中心对称 = 180度旋转
+    rotated = [_rotate_point(p[0], p[1], cx, cy, math.pi) for p in pts]
+
+    sim = _points_similarity(pts, rotated)
+
+    if sim >= threshold:
+        return {
+            'type': SYMMETRY_CENTRAL,
+            'center': (cx, cy),
+            'confidence': sim,
+        }
+    return None
+
+
+def detect_shape_symmetry(shape, axial_threshold=0.85,
+                          rotational_threshold=0.85,
+                          central_threshold=0.85):
+    """
+    综合检测形状的所有对称性
+
+    参数:
+        shape: 形状字典
+        axial_threshold: 轴对称阈值
+        rotational_threshold: 旋转对称阈值
+        central_threshold: 中心对称阈值
+
+    返回:
+        list of dict: 检测到的对称类型列表，按置信度排序
+    """
+    symmetries = []
+
+    # 检测轴对称
+    axial = detect_axial_symmetry(shape, threshold=axial_threshold)
+    if axial:
+        symmetries.append(axial)
+
+    # 检测旋转对称
+    rotational = detect_rotational_symmetry(shape, threshold=rotational_threshold)
+    if rotational:
+        symmetries.append(rotational)
+
+    # 检测中心对称（只有当旋转对称阶数为2时才算中心对称）
+    if rotational and rotational['order'] == 2:
+        central = {
+            'type': SYMMETRY_CENTRAL,
+            'center': rotational['center'],
+            'confidence': rotational['confidence'],
+        }
+        symmetries.append(central)
+    else:
+        # 也可以单独检测
+        central = detect_central_symmetry(shape, threshold=central_threshold)
+        if central:
+            symmetries.append(central)
+
+    # 按置信度排序
+    symmetries.sort(key=lambda s: s['confidence'], reverse=True)
+    return symmetries
+
+
 def circle_to_polyline(cx, cy, radius, segments=72):
     """
     将圆转换为折线点
@@ -1993,6 +2386,9 @@ def convert_geo_to_wsd(input_path, wsd_path,
                        circle_param2=120,
                        mode='auto',
                        max_colors=8,
+                       detect_symmetry=True,
+                       symmetry_threshold=0.7,
+                       show_symmetry_axes=False,
                        progress_cb=None):
     """
     几何转换：识别图片中的几何图形并转换为WSD
@@ -2022,6 +2418,9 @@ def convert_geo_to_wsd(input_path, wsd_path,
         circle_param2: 圆检测param2基准值（仅line模式）
         mode: 检测模式 'auto'|'line'|'filled'
         max_colors: 最大颜色数（仅filled模式）
+        detect_symmetry: 是否检测对称性
+        symmetry_threshold: 对称性检测阈值 (0~1)
+        show_symmetry_axes: 是否在WSD中绘制对称轴/对称中心（辅助线）
     """
     import traceback
 
@@ -2041,6 +2440,8 @@ def convert_geo_to_wsd(input_path, wsd_path,
         use_hough=use_hough, min_line_length=min_line_length,
         line_threshold=line_threshold, circle_param2=circle_param2,
         mode=mode, max_colors=max_colors,
+        detect_symmetry=detect_symmetry,
+        symmetry_threshold=symmetry_threshold,
     ))
 
     if not shapes:
@@ -2185,6 +2586,53 @@ def convert_geo_to_wsd(input_path, wsd_path,
                     # 轮廓模式：只有线条
                     path = make_path([segs], color, linewidth)
                 paths.append(path)
+
+        # 可选：绘制对称轴和对称中心（辅助线）
+        if show_symmetry_axes and detect_symmetry:
+            sym_color = hex_to_bgra('#888888')  # 灰色辅助线
+            sym_linewidth = max(10, linewidth // 2)  # 辅助线更细
+            for i, shape in enumerate(shapes):
+                syms = shape.get('symmetries', [])
+                if not syms:
+                    continue
+                for sym in syms:
+                    if sym['type'] == SYMMETRY_AXIAL:
+                        # 绘制对称轴
+                        p1 = sym.get('line_p1')
+                        p2 = sym.get('line_p2')
+                        if p1 and p2:
+                            x1, y1 = p1
+                            x2, y2 = p2
+                            tx1 = int(round(x1 * sx + ox))
+                            ty1 = int(round(y1 * sy + oy))
+                            tx2 = int(round(x2 * sx + ox))
+                            ty2 = int(round(y2 * sy + oy))
+                            sym_seg = make_line_seg([(tx1, ty1), (tx2, ty2)])
+                            sym_path = make_path([[sym_seg]], sym_color, sym_linewidth)
+                            paths.append(sym_path)
+                    elif sym['type'] in (SYMMETRY_ROTATIONAL, SYMMETRY_CENTRAL):
+                        # 绘制对称中心点（用小十字）
+                        center = sym.get('center')
+                        if center:
+                            cx, cy = center
+                            tcx = int(round(cx * sx + ox))
+                            tcy = int(round(cy * sy + oy))
+                            cross_size = 20
+                            # 水平线
+                            h_seg = make_line_seg([
+                                (tcx - cross_size, tcy),
+                                (tcx + cross_size, tcy)
+                            ])
+                            # 垂直线
+                            v_seg = make_line_seg([
+                                (tcx, tcy - cross_size),
+                                (tcx, tcy + cross_size)
+                            ])
+                            sym_path = make_path(
+                                [[h_seg], [v_seg]], sym_color, sym_linewidth
+                            )
+                            paths.append(sym_path)
+
         wsd_data = build_wsd(paths)
         with open(wsd_path, 'wb') as f:
             f.write(wsd_data)
@@ -2195,12 +2643,21 @@ def convert_geo_to_wsd(input_path, wsd_path,
     if progress_cb:
         progress_cb("完成！", 100)
 
+    # 统计对称信息
+    symmetry_stats = {}
+    if detect_symmetry:
+        for s in shapes:
+            for sym in s.get('symmetries', []):
+                st = sym['type']
+                symmetry_stats[st] = symmetry_stats.get(st, 0) + 1
+
     return {
         'shapes': len(shapes),
         'shape_types': list(set(s['type'] for s in shapes)),
         'objects': len(seglists),  # 每个形状一个对象
         'seglists': len(seglists),
         'size': len(wsd_data),
+        'symmetries': symmetry_stats,  # 对称类型统计
     }
 
 
@@ -2225,6 +2682,9 @@ def convert_geo_to_wsd_multi(input_files, output_path, **kwargs):
     circle_param2 = kwargs.get('circle_param2', 120)
     mode = kwargs.get('mode', 'auto')
     max_colors = kwargs.get('max_colors', 8)
+    detect_symmetry = kwargs.get('detect_symmetry', True)
+    symmetry_threshold = kwargs.get('symmetry_threshold', 0.7)
+    show_symmetry_axes = kwargs.get('show_symmetry_axes', False)
 
     all_shapes_data = []
     total_files = len(input_files)
@@ -2243,6 +2703,8 @@ def convert_geo_to_wsd_multi(input_files, output_path, **kwargs):
                 use_hough=use_hough, min_line_length=min_line_length,
                 line_threshold=line_threshold, circle_param2=circle_param2,
                 mode=mode, max_colors=max_colors,
+                detect_symmetry=detect_symmetry,
+                symmetry_threshold=symmetry_threshold,
             )
         except Exception as e:
             err_msg = f"形状检测失败: {e}"
