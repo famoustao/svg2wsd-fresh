@@ -41,6 +41,241 @@ SYMMETRY_ROTATIONAL = 'rotational'  # 旋转对称
 SYMMETRY_CENTRAL = 'central'   # 中心对称（旋转对称的特例，180度）
 
 
+# ============================================================
+# 高精度几何拟合算法（最小二乘）
+# ============================================================
+
+def _fit_circle_least_squares(points):
+    """
+    最小二乘圆拟合（Kasa 方法 / 代数拟合）
+    用全部轮廓点计算最优圆，比三点定圆精度高得多。
+
+    原理：求解 (x-a)² + (y-b)² = r²
+    展开: x² + y² - 2ax - 2by + a² + b² - r² = 0
+    令: A = -2a, B = -2b, C = a² + b² - r²
+    即: x² + y² + Ax + By + C = 0
+    用最小二乘求解 A, B, C
+
+    参数:
+        points: 点列表 [(x, y), ...]
+
+    返回:
+        (cx, cy, radius, avg_error) 或 None（拟合失败时）
+        avg_error: 平均半径误差比例
+    """
+    import numpy as np
+
+    if len(points) < 3:
+        return None
+
+    pts = np.array(points, dtype=np.float64)
+    x = pts[:, 0]
+    y = pts[:, 1]
+
+    # 构建线性方程组
+    A = np.column_stack([x, y, np.ones(len(x))])
+    b = -(x**2 + y**2)
+
+    # 最小二乘求解
+    try:
+        sol, residuals, rank, sv = np.linalg.lstsq(A, b, rcond=None)
+    except np.linalg.LinAlgError:
+        return None
+
+    A_coef, B_coef, C_coef = sol
+
+    # 圆心和半径
+    cx = -A_coef / 2.0
+    cy = -B_coef / 2.0
+    r_sq = cx**2 + cy**2 - C_coef
+    if r_sq <= 0:
+        return None
+    radius = math.sqrt(r_sq)
+
+    if radius < 1:
+        return None
+
+    # 计算平均误差比例
+    distances = np.sqrt((x - cx)**2 + (y - cy)**2)
+    avg_error = float(np.mean(np.abs(distances - radius) / radius))
+
+    return (float(cx), float(cy), float(radius), avg_error)
+
+
+def _fit_line_least_squares(points):
+    """
+    最小二乘直线拟合
+    返回直线的两个端点（延伸到点集两端）和拟合误差。
+
+    参数:
+        points: 点列表 [(x, y), ...]
+
+    返回:
+        (p1, p2, avg_error) 或 None
+        p1, p2: 直线两端点（在点集投影范围内）
+        avg_error: 平均垂直距离误差（像素）
+    """
+    import numpy as np
+
+    if len(points) < 2:
+        return None
+
+    pts = np.array(points, dtype=np.float64)
+    x = pts[:, 0]
+    y = pts[:, 1]
+
+    n = len(x)
+    sum_x = np.sum(x)
+    sum_y = np.sum(y)
+    sum_xy = np.sum(x * y)
+    sum_x2 = np.sum(x**2)
+
+    # 计算斜率和截距: y = kx + b
+    denom = n * sum_x2 - sum_x**2
+    if abs(denom) < 1e-10:
+        # 垂直线：用 x = c 表示
+        c = sum_x / n
+        # 端点为上下两端
+        min_y = np.min(y)
+        max_y = np.max(y)
+        # 计算平均水平距离作为误差
+        avg_error = float(np.mean(np.abs(x - c)))
+        return ((float(c), float(min_y)), (float(c), float(max_y)), avg_error)
+
+    k = (n * sum_xy - sum_x * sum_y) / denom
+    b = (sum_y - k * sum_x) / n
+
+    # 计算每个点到直线的垂直距离
+    # 直线: kx - y + b = 0, 距离 = |kx - y + b| / sqrt(k² + 1)
+    distances = np.abs(k * x - y + b) / math.sqrt(k**2 + 1)
+    avg_error = float(np.mean(distances))
+
+    # 计算直线上的两个端点（投影到x的范围）
+    x_min = np.min(x)
+    x_max = np.max(x)
+    p1 = (float(x_min), float(k * x_min + b))
+    p2 = (float(x_max), float(k * x_max + b))
+
+    return (p1, p2, avg_error)
+
+
+def _douglas_peucker(points, epsilon):
+    """
+    道格拉斯-普克（Douglas-Peucker）多边形简化算法
+    把连续边缘点精简成少量顶点，自动找出拐点。
+
+    参数:
+        points: 点列表 [(x, y), ...]
+        epsilon: 距离阈值（像素），值越大简化越多
+
+    返回:
+        简化后的点列表
+    """
+    import numpy as np
+
+    if len(points) < 3:
+        return list(points)
+
+    pts = np.array(points, dtype=np.float64)
+
+    def _perpendicular_distance(pt, line_start, line_end):
+        """计算点到线段的垂直距离"""
+        if np.all(line_start == line_end):
+            return float(np.linalg.norm(pt - line_start))
+        # 向量叉积 / 线段长度
+        d = np.linalg.norm(np.cross(line_end - line_start, line_start - pt)) / np.linalg.norm(line_end - line_start)
+        return float(d)
+
+    def _rdp_recursive(pts_array, eps):
+        """递归RDP简化"""
+        if len(pts_array) < 3:
+            return list(range(len(pts_array)))
+
+        # 找最远点
+        max_dist = 0
+        max_idx = 0
+        for i in range(1, len(pts_array) - 1):
+            dist = _perpendicular_distance(pts_array[i], pts_array[0], pts_array[-1])
+            if dist > max_dist:
+                max_dist = dist
+                max_idx = i
+
+        if max_dist > eps:
+            # 递归处理左右两段
+            left_indices = _rdp_recursive(pts_array[:max_idx + 1], eps)
+            right_indices = _rdp_recursive(pts_array[max_idx:], eps)
+            # 合并（去掉重复的中间点）
+            return left_indices + [i + max_idx for i in right_indices[1:]]
+        else:
+            # 只保留首尾
+            return [0, len(pts_array) - 1]
+
+    indices = _rdp_recursive(pts, epsilon)
+    return [tuple(p) for p in pts[indices].tolist()]
+
+
+def _preprocess_image(image_gray, enhance=True):
+    """
+    图像预处理增强：高斯模糊去噪 + 自适应二值化 + 形态学修复
+
+    参数:
+        image_gray: 灰度图像
+        enhance: 是否启用增强（关闭时退化为普通OTSU）
+
+    返回:
+        二值图像（线条为白色，背景为黑色）
+    """
+    import cv2
+
+    if not enhance:
+        _, binary = cv2.threshold(image_gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+        return binary
+
+    # 1. 高斯模糊去噪（不破坏细线条）
+    blurred = cv2.GaussianBlur(image_gray, (3, 3), 0)
+
+    # 2. 自适应二值化（抗光影干扰，比普通OTSU更强）
+    # 使用较大的块尺寸保证几何图形的完整性
+    binary = cv2.adaptiveThreshold(
+        blurred, 255,
+        cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+        cv2.THRESH_BINARY_INV,
+        blockSize=25,
+        C=5
+    )
+
+    # 3. 形态学闭运算：修复断线
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (2, 2))
+    binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel, iterations=1)
+
+    # 4. 形态学开运算：去除微小杂点
+    binary = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel, iterations=1)
+
+    return binary
+
+
+def _detect_circles_from_contour_least_squares(cnt_pts, error_tolerance=0.05):
+    """
+    从轮廓点中用最小二乘法检测完整圆
+
+    参数:
+        cnt_pts: 轮廓点列表
+        error_tolerance: 允许的平均半径误差比例（默认5%）
+
+    返回:
+        (cx, cy, radius, avg_error) 或 None
+    """
+    result = _fit_circle_least_squares(cnt_pts)
+    if result is None:
+        return None
+
+    cx, cy, radius, avg_error = result
+    if avg_error > error_tolerance:
+        return None
+
+    return (cx, cy, radius, avg_error)
+
+
 def _skeletonize(binary):
     """
     骨架化/细化：将有宽度的线条变成1像素宽的中心线
@@ -287,12 +522,12 @@ def _fit_circle_three_points(p1, p2, p3):
 def _detect_arc_from_contour(cnt_pts, area, bbox,
                               circularity_min=0.5, circularity_max=0.85,
                               angle_min_deg=30, angle_max_deg=330,
-                              error_tolerance=0.15):
+                              error_tolerance=0.08):
     """
-    从轮廓点中检测圆弧
+    从轮廓点中检测圆弧（使用最小二乘圆拟合，高精度版本）
 
     思路：
-    1. 从轮廓点中取起点、中点、终点，用三点定圆法拟合
+    1. 用最小二乘法对全部轮廓点做圆拟合（比三点定圆精度高得多）
     2. 验证轮廓上的点到圆心的距离是否接近半径（误差<error_tolerance）
     3. 计算圆弧的起始角度和结束角度
     4. 验证覆盖角度在 angle_min_deg ~ angle_max_deg 之间
@@ -305,7 +540,7 @@ def _detect_arc_from_contour(cnt_pts, area, bbox,
         circularity_max: 最大圆形度（默认0.85）
         angle_min_deg: 最小覆盖角度（度，默认30）
         angle_max_deg: 最大覆盖角度（度，默认330）
-        error_tolerance: 半径误差容差（比例，默认0.15即15%）
+        error_tolerance: 半径误差容差（比例，默认0.08即8%，最小二乘精度更高）
 
     返回:
         圆弧形状字典 或 None（不符合条件时）
@@ -314,45 +549,22 @@ def _detect_arc_from_contour(cnt_pts, area, bbox,
         return None
 
     n = len(cnt_pts)
-
-    # 取起点、中点、终点
     p_start = cnt_pts[0]
     p_mid = cnt_pts[n // 2]
     p_end = cnt_pts[-1]
 
-    # 三点定圆
-    circle = _fit_circle_three_points(p_start, p_mid, p_end)
-    if circle is None:
+    # 最小二乘圆拟合（用全部点，高精度）
+    result = _fit_circle_least_squares(cnt_pts)
+    if result is None:
         return None
 
-    cx, cy, r = circle
-    if r < 2:
+    cx, cy, radius, avg_error = result
+    if radius < 2:
         return None
 
-    # 验证所有轮廓点到圆心的距离是否接近半径
-    distances = []
-    for px, py in cnt_pts:
-        d = math.hypot(px - cx, py - cy)
-        distances.append(d)
-
-    if not distances:
-        return None
-
-    avg_dist = sum(distances) / len(distances)
-    if avg_dist < 1:
-        return None
-
-    # 计算平均误差比例
-    error_sum = 0.0
-    for d in distances:
-        error_sum += abs(d - r) / r
-    avg_error = error_sum / len(distances)
-
+    # 验证拟合误差
     if avg_error > error_tolerance:
         return None
-
-    # 用平均距离作为更准确的半径
-    radius = avg_dist
 
     # 计算起始角度和结束角度
     start_angle = math.atan2(p_start[1] - cy, p_start[0] - cx)
@@ -944,12 +1156,78 @@ def _detect_lines_hough(gray, min_length=50, skeleton=None, threshold=30):
         line_segments, angle_thresh=3, dist_thresh=20
     )
 
+    # 最小二乘精化直线端点（在骨架图上找到实际边缘点再拟合）
+    refined_lines = []
+    if skeleton is not None:
+        for x1, y1, x2, y2 in colinear_merged:
+            # 沿线段方向采样骨架点，用最小二乘重新拟合
+            pts = _sample_skeleton_along_line(skeleton, x1, y1, x2, y2)
+            if len(pts) >= 5:
+                ls_result = _fit_line_least_squares(pts)
+                if ls_result is not None:
+                    p1, p2, err = ls_result
+                    # 误差小于2像素才采用拟合结果
+                    if err < 2.0:
+                        refined_lines.append((p1[0], p1[1], p2[0], p2[1]))
+                        continue
+            refined_lines.append((x1, y1, x2, y2))
+    else:
+        refined_lines = colinear_merged
+
     # 转换为输出格式
     result = []
-    for x1, y1, x2, y2 in colinear_merged:
+    for x1, y1, x2, y2 in refined_lines:
         result.append(((float(x1), float(y1)), (float(x2), float(y2))))
 
     return result
+
+
+def _sample_skeleton_along_line(skeleton, x1, y1, x2, y2, step=1):
+    """沿直线方向采样骨架图上的白色像素点"""
+    import cv2
+    import numpy as np
+
+    h, w = skeleton.shape[:2]
+    length = math.hypot(x2 - x1, y2 - y1)
+    if length < 1:
+        return []
+
+    n_steps = max(int(length / step), 2)
+    pts = []
+
+    # 垂直方向搜索宽度
+    search_width = 3
+
+    dx = (x2 - x1) / n_steps
+    dy = (y2 - y1) / n_steps
+
+    # 法向量
+    len_v = math.sqrt(dx**2 + dy**2)
+    if len_v < 1e-6:
+        return []
+    nx = -dy / len_v
+    ny = dx / len_v
+
+    for i in range(n_steps + 1):
+        cx = x1 + i * dx
+        cy = y1 + i * dy
+
+        # 在法向方向搜索骨架像素
+        best_d = None
+        best_pt = None
+        for s in range(-search_width, search_width + 1):
+            sx = int(cx + nx * s + 0.5)
+            sy = int(cy + ny * s + 0.5)
+            if 0 <= sx < w and 0 <= sy < h:
+                if skeleton[sy, sx] > 0:
+                    d = abs(s)
+                    if best_d is None or d < best_d:
+                        best_d = d
+                        best_pt = (float(sx), float(sy))
+        if best_pt is not None:
+            pts.append(best_pt)
+
+    return pts
 
 
 def _contour_overlaps_hough_circle(cnt_bbox, hough_circles, overlap_thresh=0.6):
@@ -1122,13 +1400,13 @@ def detect_geometric_shapes(image_path, min_area=50, epsilon_ratio=0.01,
     hough_circles = []
     hough_lines = []
 
-    # ========== 步骤0：二值化 + 骨架化 ==========
+    # ========== 步骤0：增强预处理 + 二值化 + 骨架化 ==========
     skeleton = None
+    binary = None
     if use_hough:
-        # 二值化（自适应阈值，处理不均匀光照）
-        _, binary = cv2.threshold(
-            gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU
-        )
+        # 增强预处理：高斯模糊 + 自适应二值化 + 形态学开闭
+        # 比普通OTSU抗光影干扰更强，几何图形更完整
+        binary = _preprocess_image(gray, enhance=True)
         # 骨架化（使用形态学快速版本，兼顾速度和效果）
         skeleton = _skeletonize(binary)
 
@@ -1298,20 +1576,30 @@ def detect_geometric_shapes(image_path, min_area=50, epsilon_ratio=0.01,
                 # 检查圆度
                 circularity = area / (math.pi * radius_outer * radius_outer)
                 if circularity > circularity_threshold:
-                    # 圆形度高 → 完整圆
+                    # 圆形度高 → 完整圆（用最小二乘精化圆心和半径）
                     shape_type = SHAPE_CIRCLE
+                    # 先用minEnclosingCircle做粗估计
+                    (cx0, cy0), r0 = cv2.minEnclosingCircle(cnt)
+                    # 用最小二乘精化（用中心线点，更准确）
+                    ls_pts = mid_pts if mid_pts else outer_pts
+                    ls_result = _fit_circle_least_squares(ls_pts)
+                    if ls_result is not None and ls_result[3] < 0.1:
+                        cx, cy, radius, _ = ls_result
+                    else:
+                        cx, cy = float(cx0), float(cy0)
+                        radius = avg_radius
                     extra['center'] = (float(cx), float(cy))
-                    extra['radius'] = float(avg_radius)
+                    extra['radius'] = float(radius)
                     extra['points'] = mid_pts
                 elif circularity >= 0.5 and circularity <= circularity_threshold:
-                    # 圆形度中等 → 尝试圆弧检测（使用中心线点）
+                    # 圆形度中等 → 尝试圆弧检测（使用中心线点，最小二乘拟合）
                     arc_pts = mid_pts if mid_pts else outer_pts
                     arc = _detect_arc_from_contour(
                         arc_pts, area, bbox,
                         circularity_min=0.5,
                         circularity_max=circularity_threshold,
                         angle_min_deg=30, angle_max_deg=330,
-                        error_tolerance=0.15
+                        error_tolerance=0.10
                     )
                     if arc is not None:
                         shape_type = SHAPE_ARC

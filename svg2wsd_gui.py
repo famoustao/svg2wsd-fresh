@@ -112,6 +112,10 @@ class Image2WSDApp:
         self.geo_tab = ttk.Frame(self.mode_notebook)
         self.mode_notebook.add(self.geo_tab, text='几何转换')
 
+        # TikZ 转换选项卡
+        self.tikz_tab = ttk.Frame(self.mode_notebook)
+        self.mode_notebook.add(self.tikz_tab, text='TikZ转换')
+
         # 绑定选项卡切换事件
         self.mode_notebook.bind('<<NotebookTabChanged>>', self._on_mode_tab_change)
 
@@ -130,6 +134,9 @@ class Image2WSDApp:
         geo_inner_frame = ttk.LabelFrame(self.geo_tab, text="几何转换参数")
         geo_inner_frame.pack(fill='x', padx=5, pady=5)
         self.geo_frame = geo_inner_frame
+
+        # TikZ 选项卡内容
+        self._build_tikz_tab()
 
         # 辅助函数：创建带+-按钮的滑块
         def _make_slider_row(parent, label_text, var, from_, to, step, val_fmt, width=10, hint=None):
@@ -234,6 +241,12 @@ class Image2WSDApp:
         symmetry_combo.bind('<<ComboboxSelected>>', lambda e: self._on_geo_param_change())
         ttk.Label(corr_row3, text="自动/轴对称/旋转/中心", foreground='gray',
                   font=('Arial', 8)).pack(side='left', padx=2)
+
+        # TikZ 导出按钮
+        tikz_export_row = ttk.Frame(self.geo_frame)
+        tikz_export_row.pack(fill='x', padx=8, pady=(4, 2))
+        ttk.Button(tikz_export_row, text="复制TikZ代码", command=self._geo_copy_tikz).pack(side='left', expand=True, fill='x', padx=2)
+        ttk.Button(tikz_export_row, text="导出TeX文件", command=self._geo_export_tikz_tex).pack(side='left', expand=True, fill='x', padx=2)
 
         # 自动调节参数按钮
         auto_row = ttk.Frame(self.geo_frame)
@@ -583,17 +596,485 @@ class Image2WSDApp:
         current_tab = self.mode_notebook.index(self.mode_notebook.select())
         if current_tab == 0:
             self.convert_mode.set('normal')
-        else:
+        elif current_tab == 1:
             self.convert_mode.set('geometric')
+        elif current_tab == 2:
+            self.convert_mode.set('tikz')
         self._invalidate_data()
 
     def _on_mode_change(self):
         """切换转换模式（兼容旧接口，同步到选项卡）"""
-        if self.convert_mode.get() == 'geometric':
+        mode = self.convert_mode.get()
+        if mode == 'geometric':
             self.mode_notebook.select(1)
+        elif mode == 'tikz':
+            self.mode_notebook.select(2)
         else:
             self.mode_notebook.select(0)
         # 注意：选项卡切换会触发 _on_mode_tab_change，进而调用 _invalidate_data
+
+    def _build_tikz_tab(self):
+        """构建TikZ转换选项卡"""
+        from tkinter import scrolledtext
+
+        tab = self.tikz_tab
+
+        # 顶部操作按钮区
+        btn_frame = ttk.Frame(tab)
+        btn_frame.pack(fill='x', padx=5, pady=5)
+
+        ttk.Button(btn_frame, text="导入文件", command=self._tikz_import_file).pack(side='left', padx=2)
+        ttk.Button(btn_frame, text="粘贴代码", command=self._tikz_paste_code).pack(side='left', padx=2)
+        ttk.Button(btn_frame, text="清空", command=self._tikz_clear_code).pack(side='left', padx=2)
+        ttk.Separator(btn_frame, orient='vertical').pack(side='left', fill='y', padx=5)
+        ttk.Button(btn_frame, text="转WSD", command=self._tikz_to_wsd).pack(side='left', padx=2)
+        ttk.Button(btn_frame, text="WSD转TikZ", command=self._wsd_to_tikz).pack(side='left', padx=2)
+        ttk.Separator(btn_frame, orient='vertical').pack(side='left', fill='y', padx=5)
+        ttk.Button(btn_frame, text="复制TikZ", command=self._tikz_copy_code).pack(side='left', padx=2)
+        ttk.Button(btn_frame, text="导出TeX", command=self._tikz_export_tex).pack(side='left', padx=2)
+        ttk.Separator(btn_frame, orient='vertical').pack(side='left', fill='y', padx=5)
+        ttk.Button(btn_frame, text="刷新预览", command=self._tikz_refresh_preview).pack(side='left', padx=2)
+
+        # 中间主区域：左代码 + 右预览
+        main_pane = ttk.PanedWindow(tab, orient='horizontal')
+        main_pane.pack(fill='both', expand=True, padx=5, pady=(0, 5))
+
+        # 左侧：代码编辑区
+        code_frame = ttk.LabelFrame(main_pane, text="TikZ 代码")
+        main_pane.add(code_frame, weight=3)
+
+        self.tikz_code_text = scrolledtext.ScrolledText(
+            code_frame, height=12, wrap='none',
+            font=('Consolas', 10), undo=True
+        )
+        self.tikz_code_text.pack(fill='both', expand=True, padx=3, pady=3)
+        # 绑定键盘快捷键
+        self.tikz_code_text.bind('<F5>', lambda e: self._tikz_refresh_preview())
+        self.tikz_code_text.bind('<Control-Return>', lambda e: self._tikz_refresh_preview())
+
+        # 右侧：预览区
+        preview_frame = ttk.LabelFrame(main_pane, text="预览")
+        main_pane.add(preview_frame, weight=2)
+
+        # 预览工具栏
+        preview_toolbar = ttk.Frame(preview_frame)
+        preview_toolbar.pack(fill='x', padx=3, pady=3)
+
+        self.tikz_preview_mode = tk.StringVar(value='builtin')
+        ttk.Label(preview_toolbar, text="预览模式:").pack(side='left')
+        mode_combo = ttk.Combobox(preview_toolbar, textvariable=self.tikz_preview_mode,
+                                   values=['内置预览', 'PDF编译预览'],
+                                   state='readonly', width=12)
+        mode_combo.pack(side='left', padx=3)
+        mode_combo.bind('<<ComboboxSelected>>', lambda e: self._tikz_refresh_preview())
+
+        # 检测是否有 pdflatex
+        self._tikz_has_pdflatex = self._check_pdflatex()
+        if not self._tikz_has_pdflatex:
+            mode_combo.config(values=['内置预览'])
+            self.tikz_preview_mode.set('builtin')
+
+        # 预览画布
+        self.tikz_preview_canvas = tk.Canvas(preview_frame, bg='white', highlightthickness=0)
+        self.tikz_preview_canvas.pack(fill='both', expand=True, padx=3, pady=(0, 3))
+        self.tikz_preview_canvas.bind('<Configure>', lambda e: self._tikz_redraw_preview())
+
+        # 预览图片（PDF模式用）
+        self._tikz_preview_img = None
+        self._tikz_preview_imgref = None
+
+        # 状态栏
+        self.tikz_status = tk.StringVar(value="就绪 - 请输入TikZ代码，按F5刷新预览")
+        status_label = ttk.Label(tab, textvariable=self.tikz_status, foreground='gray')
+        status_label.pack(fill='x', padx=8, pady=(0, 5))
+
+        # 默认示例代码
+        self.tikz_code_text.insert('1.0', '''\\begin{tikzpicture}[x=1cm, y=1cm]
+  % 示例：圆 + 三角形 + 矩形
+  \\draw[red, thick] (0,0) circle (1.5cm);
+  \\fill[blue!30] (3,0) -- (4.5,2.6) -- (6,0) -- cycle;
+  \\draw[green, thick] (7.5,-1.5) rectangle (10.5,1.5);
+\\end{tikzpicture}
+''')
+
+        # 初始预览
+        self.root.after(200, self._tikz_refresh_preview)
+
+    def _tikz_import_file(self):
+        """导入TikZ/TeX文件"""
+        file_path = filedialog.askopenfilename(
+            title="选择 TikZ 或 TeX 文件",
+            filetypes=[
+                ("TikZ/TeX文件", "*.tikz *.tex"),
+                ("所有文件", "*.*"),
+            ]
+        )
+        if not file_path:
+            return
+
+        try:
+            with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+                content = f.read()
+
+            # 尝试提取 tikzpicture 环境
+            from tikz_utils import extract_tikz_from_tex
+            tikz_codes = extract_tikz_from_tex(content)
+
+            if tikz_codes:
+                # 有 tikzpicture，取第一个
+                self.tikz_code_text.delete('1.0', 'end')
+                self.tikz_code_text.insert('1.0', tikz_codes[0])
+                self.tikz_status.set(f"已导入: {os.path.basename(file_path)} (检测到 {len(tikz_codes)} 个 tikzpicture)")
+            else:
+                # 没有环境，当做纯tikz代码
+                self.tikz_code_text.delete('1.0', 'end')
+                self.tikz_code_text.insert('1.0', content)
+                self.tikz_status.set(f"已导入: {os.path.basename(file_path)}")
+
+            self._invalidate_data()
+        except Exception as e:
+            messagebox.showerror("导入失败", f"无法导入文件: {e}")
+
+    def _tikz_paste_code(self):
+        """从剪贴板粘贴TikZ代码"""
+        try:
+            code = self.root.clipboard_get()
+            if code:
+                self.tikz_code_text.delete('1.0', 'end')
+                self.tikz_code_text.insert('1.0', code)
+                self.tikz_status.set("已从剪贴板粘贴代码")
+                self._invalidate_data()
+        except Exception:
+            messagebox.showwarning("粘贴失败", "剪贴板中没有可粘贴的内容")
+
+    def _tikz_clear_code(self):
+        """清空代码编辑器"""
+        self.tikz_code_text.delete('1.0', 'end')
+        self.tikz_status.set("已清空")
+        self._invalidate_data()
+
+    def _tikz_to_wsd(self):
+        """TikZ代码转WSD，导出文件"""
+        code = self.tikz_code_text.get('1.0', 'end').strip()
+        if not code:
+            messagebox.showwarning("提示", "请先输入或导入TikZ代码")
+            return
+
+        # 询问保存路径
+        save_path = filedialog.asksaveasfilename(
+            title="保存 WSD 文件",
+            defaultextension=".wsd",
+            filetypes=[("WSD文件", "*.wsd"), ("所有文件", "*.*")],
+        )
+        if not save_path:
+            return
+
+        try:
+            from tikz_utils import tikz_to_wsd_file
+            success, msg = tikz_to_wsd_file(code, save_path, linewidth=int(self.linewidth.get()))
+
+            if success:
+                self.tikz_status.set(f"转换成功: {os.path.basename(save_path)}")
+                messagebox.showinfo("转换成功", f"{msg}\n保存到: {save_path}")
+            else:
+                self.tikz_status.set(f"转换失败: {msg}")
+                messagebox.showerror("转换失败", msg)
+
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            messagebox.showerror("转换失败", f"转换过程中出错: {e}")
+
+    def _wsd_to_tikz(self):
+        """WSD文件转TikZ代码（基于几何形状检测）"""
+        file_path = filedialog.askopenfilename(
+            title="选择 WSD 文件",
+            filetypes=[("WSD文件", "*.wsd"), ("所有文件", "*.*")],
+        )
+        if not file_path:
+            return
+
+        try:
+            # 从 WSD 中提取几何信息（通过图片预览转换的方式，或直接解析）
+            # 这里使用几何模式的形状检测逻辑作为中间步骤
+            # 更完善的实现需要完整解析WSD二进制
+
+            # 先检查是否有当前加载的图片（如果是图片转的WSD，用图片的形状数据）
+            # 简化处理：提示用户使用几何模式
+            messagebox.showinfo(
+                "提示",
+                "WSD转TikZ功能：\n\n"
+                "方式一：先用几何模式导入图片，检测形状后，点击此按钮导出TikZ\n"
+                "方式二：直接选择WSD文件（需要WSD解析器，暂支持基础形状）\n\n"
+                "当前版本：从图片几何检测导出TikZ效果最佳。\n"
+                "请在几何转换选项卡中加载图片并检测后，使用'复制TikZ'或'导出TeX'功能。"
+            )
+
+        except Exception as e:
+            messagebox.showerror("转换失败", f"转换过程中出错: {e}")
+
+    def _tikz_copy_code(self):
+        """复制当前TikZ代码到剪贴板"""
+        code = self.tikz_code_text.get('1.0', 'end').strip()
+        if not code:
+            messagebox.showwarning("提示", "没有可复制的代码")
+            return
+
+        try:
+            self.root.clipboard_clear()
+            self.root.clipboard_append(code)
+            self.tikz_status.set("TikZ代码已复制到剪贴板")
+        except Exception as e:
+            messagebox.showerror("复制失败", f"{e}")
+
+    def _tikz_export_tex(self):
+        """导出为完整的TeX文件"""
+        code = self.tikz_code_text.get('1.0', 'end').strip()
+        if not code:
+            messagebox.showwarning("提示", "请先输入或导入TikZ代码")
+            return
+
+        save_path = filedialog.asksaveasfilename(
+            title="导出 TeX 文件",
+            defaultextension=".tex",
+            initialfile="figure.tex",
+            filetypes=[("TeX文件", "*.tex"), ("所有文件", "*.*")],
+        )
+        if not save_path:
+            return
+
+        try:
+            from tikz_utils import wrap_tikz_in_tex
+            tex_code = wrap_tikz_in_tex(code, document_class='standalone', border=10)
+
+            with open(save_path, 'w', encoding='utf-8') as f:
+                f.write(tex_code)
+
+            self.tikz_status.set(f"已导出: {os.path.basename(save_path)}")
+            messagebox.showinfo("导出成功", f"TeX文件已保存到:\n{save_path}")
+        except Exception as e:
+            messagebox.showerror("导出失败", f"导出过程中出错: {e}")
+
+    # ===== TikZ 预览相关方法 =====
+
+    def _check_pdflatex(self):
+        """检查系统是否有 pdflatex"""
+        import shutil
+        return shutil.which('pdflatex') is not None
+
+    def _tikz_refresh_preview(self):
+        """刷新TikZ预览"""
+        code = self.tikz_code_text.get('1.0', 'end').strip()
+        if not code:
+            self.tikz_preview_canvas.delete('all')
+            self.tikz_status.set("无代码可预览")
+            return
+
+        mode = self.tikz_preview_mode.get()
+
+        if mode == 'PDF编译预览' and self._tikz_has_pdflatex:
+            self._tikz_pdf_preview(code)
+        else:
+            self._tikz_builtin_preview(code)
+
+    def _tikz_redraw_preview(self):
+        """画布大小变化时重绘（只重绘内置预览）"""
+        code = self.tikz_code_text.get('1.0', 'end').strip()
+        if not code:
+            return
+        mode = self.tikz_preview_mode.get()
+        if mode == '内置预览' or not self._tikz_has_pdflatex:
+            self._tikz_builtin_preview(code)
+
+    def _tikz_builtin_preview(self, code):
+        """内置Canvas预览：基于解析结果绘制"""
+        canvas = self.tikz_preview_canvas
+        canvas.delete('all')
+
+        try:
+            from tikz_utils import parse_tikz_code, tikz_paths_to_subpaths
+
+            # 解析TikZ代码
+            paths = parse_tikz_code(code)
+            if not paths:
+                canvas.create_text(10, 10, text="未解析出图形", anchor='nw', fill='gray')
+                self.tikz_status.set("预览：未解析出图形")
+                return
+
+            # 获取子路径
+            subpaths, colors, bbox, extra = tikz_paths_to_subpaths(paths)
+            if not subpaths:
+                canvas.create_text(10, 10, text="无有效图形", anchor='nw', fill='gray')
+                self.tikz_status.set("预览：无有效图形")
+                return
+
+            # 获取画布尺寸
+            cw = canvas.winfo_width()
+            ch = canvas.winfo_height()
+            if cw < 10 or ch < 10:
+                # 画布还没初始化，稍后重试
+                self.root.after(50, self._tikz_redraw_preview)
+                return
+
+            # 计算缩放和偏移
+            min_x, min_y, max_x, max_y = bbox
+            w = max_x - min_x
+            h = max_y - min_y
+            if w <= 0 or h <= 0:
+                w = h = 1
+
+            margin = 20
+            scale = min((cw - 2 * margin) / w, (ch - 2 * margin) / h) * 0.95
+
+            # 注意：TikZ Y轴向上，Canvas Y轴向下，需要翻转
+            ox = cw / 2 - (min_x + max_x) / 2 * scale
+            oy = ch / 2 + (min_y + max_y) / 2 * scale
+
+            def transform(x, y):
+                return (x * scale + ox, -y * scale + oy)
+
+            # 绘制网格（浅色）
+            grid_size = 1 * scale  # 1cm网格
+            if grid_size > 10:
+                # 绘制主网格
+                for gx in range(int(min_x) - 1, int(max_x) + 2):
+                    sx, _ = transform(gx, 0)
+                    canvas.create_line(sx, 0, sx, ch, fill='#f0f0f0', width=1)
+                for gy in range(int(min_y) - 1, int(max_y) + 2):
+                    _, sy = transform(0, gy)
+                    canvas.create_line(0, sy, cw, sy, fill='#f0f0f0', width=1)
+                # 绘制坐标轴
+                zx, _ = transform(0, 0)
+                _, zy = transform(0, 0)
+                if 0 <= zx <= cw:
+                    canvas.create_line(zx, 0, zx, ch, fill='#d0d0d0', width=1)
+                if 0 <= zy <= ch:
+                    canvas.create_line(0, zy, cw, zy, fill='#d0d0d0', width=1)
+
+            # 绘制图形
+            shape_count = 0
+            for i, pts in enumerate(subpaths):
+                if len(pts) < 2:
+                    continue
+
+                is_fill = extra['is_fill'][i] if i < len(extra['is_fill']) else False
+                is_stroke = extra['is_stroke'][i] if i < len(extra['is_stroke']) else True
+                color = colors[i]
+
+                # 转换坐标
+                canvas_pts = []
+                for x, y in pts:
+                    canvas_pts.extend(transform(x, y))
+
+                if is_fill and len(canvas_pts) >= 6:
+                    canvas.create_polygon(
+                        *canvas_pts,
+                        fill=color,
+                        outline=color if is_stroke else '',
+                        width=1 if is_stroke else 0,
+                        smooth=False
+                    )
+                elif is_stroke:
+                    canvas.create_line(
+                        *canvas_pts,
+                        fill=color,
+                        width=1.5,
+                        capstyle='round',
+                        joinstyle='round'
+                    )
+
+                shape_count += 1
+
+            self.tikz_status.set(f"预览：{shape_count} 个图形（内置预览）")
+
+        except Exception as e:
+            canvas.delete('all')
+            canvas.create_text(10, 10, text=f"预览出错: {e}", anchor='nw', fill='red')
+            self.tikz_status.set(f"预览出错: {e}")
+
+    def _tikz_pdf_preview(self, code):
+        """PDF编译预览：用pdflatex编译后转图片显示"""
+        import tempfile
+        import subprocess
+
+        canvas = self.tikz_preview_canvas
+        canvas.delete('all')
+        canvas.create_text(10, 10, text="正在编译...", anchor='nw', fill='gray')
+        self.tikz_status.set("正在编译 PDF...")
+        self.root.update_idletasks()
+
+        try:
+            from tikz_utils import wrap_tikz_in_tex
+
+            # 创建临时目录
+            with tempfile.TemporaryDirectory() as tmpdir:
+                tex_file = os.path.join(tmpdir, 'preview.tex')
+                pdf_file = os.path.join(tmpdir, 'preview.pdf')
+                png_file = os.path.join(tmpdir, 'preview.png')
+
+                # 生成TeX文件
+                tex_code = wrap_tikz_in_tex(code, 'standalone', 10)
+                with open(tex_file, 'w', encoding='utf-8') as f:
+                    f.write(tex_code)
+
+                # 编译PDF
+                result = subprocess.run(
+                    ['pdflatex', '-interaction=nonstopmode', '-output-directory', tmpdir, tex_file],
+                    capture_output=True, text=True, timeout=30
+                )
+
+                if result.returncode != 0 or not os.path.exists(pdf_file):
+                    # 提取错误信息
+                    error_msg = "编译失败"
+                    for line in result.stderr.split('\n') + result.stdout.split('\n'):
+                        if 'Error' in line or 'error' in line:
+                            error_msg = line.strip()[:80]
+                            break
+                    canvas.delete('all')
+                    canvas.create_text(10, 10, text=f"PDF编译失败\n{error_msg}", anchor='nw', fill='red')
+                    self.tikz_status.set(f"PDF编译失败: {error_msg}")
+                    return
+
+                # PDF转PNG
+                subprocess.run(
+                    ['pdftoppm', '-png', '-r', '150', '-singlefile', pdf_file, png_file.replace('.png', '')],
+                    capture_output=True, timeout=10
+                )
+
+                if not os.path.exists(png_file):
+                    canvas.delete('all')
+                    canvas.create_text(10, 10, text="PNG转换失败", anchor='nw', fill='red')
+                    return
+
+                # 加载并显示图片
+                from PIL import Image, ImageTk
+                cw = canvas.winfo_width()
+                ch = canvas.winfo_height()
+
+                img = Image.open(png_file)
+                # 缩放适应画布
+                if cw > 10 and ch > 10:
+                    img.thumbnail((cw - 10, ch - 10), Image.LANCZOS)
+
+                self._tikz_preview_img = ImageTk.PhotoImage(img)
+                self._tikz_preview_imgref = canvas.create_image(
+                    cw // 2, ch // 2,
+                    image=self._tikz_preview_img,
+                    anchor='center'
+                )
+
+                self.tikz_status.set("PDF编译预览")
+
+        except subprocess.TimeoutExpired:
+            canvas.delete('all')
+            canvas.create_text(10, 10, text="编译超时", anchor='nw', fill='red')
+            self.tikz_status.set("编译超时")
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            canvas.delete('all')
+            canvas.create_text(10, 10, text=f"PDF预览出错: {e}", anchor='nw', fill='red')
+            self.tikz_status.set(f"PDF预览出错: {e}")
 
     def _on_geo_param_change(self, *args):
         """几何参数变化时更新预览（带防抖）"""
@@ -664,6 +1145,90 @@ class Image2WSDApp:
             )
         except Exception as e:
             messagebox.showerror("错误", f"自动调节失败: {str(e)}")
+
+    def _get_geo_shapes(self):
+        """获取当前几何检测的形状列表"""
+        if not self.current_file:
+            return None
+        try:
+            from svg2wsd_geo import detect_geometric_shapes, correct_shapes
+
+            shapes = detect_geometric_shapes(
+                self.current_file,
+                min_area=int(self.geo_min_area.get()),
+                epsilon_ratio=float(self.geo_epsilon.get()),
+                use_hough=bool(self.geo_use_hough.get()),
+                min_line_length=int(self.geo_min_line_length.get()),
+                line_threshold=int(self.geo_line_threshold.get()),
+                circle_param2=int(self.geo_circle_sensitivity.get()),
+                mode='auto',
+                max_colors=16,
+                detect_symmetry=bool(self.geo_symmetry_correction.get()),
+            )
+
+            if shapes and self.geo_symmetry_correction.get():
+                shapes = correct_shapes(
+                    shapes,
+                    symmetry_correction=True,
+                    symmetry_type=self.geo_symmetry_type.get(),
+                    right_angle_correction=bool(self.geo_right_angle_correction.get()),
+                )
+
+            return shapes
+        except Exception:
+            return None
+
+    def _geo_copy_tikz(self):
+        """从几何检测结果复制TikZ代码到剪贴板"""
+        shapes = self._get_geo_shapes()
+        if not shapes:
+            messagebox.showwarning("提示", "请先加载图片并确保几何检测有效")
+            return
+
+        try:
+            from tikz_utils import shapes_to_tikz
+            tikz_code = shapes_to_tikz(shapes, canvas_size_cm=(12, 9))
+
+            self.root.clipboard_clear()
+            self.root.clipboard_append(tikz_code)
+
+            # 同时同步到TikZ选项卡
+            self.tikz_code_text.delete('1.0', 'end')
+            self.tikz_code_text.insert('1.0', tikz_code)
+            self.tikz_status.set(f"已从几何检测生成TikZ代码 ({len(shapes)} 个形状)")
+
+            self.status.config(text=f"已复制TikZ代码到剪贴板 ({len(shapes)} 个形状)")
+        except Exception as e:
+            messagebox.showerror("导出失败", f"生成TikZ代码失败: {e}")
+
+    def _geo_export_tikz_tex(self):
+        """从几何检测结果导出TeX文件"""
+        shapes = self._get_geo_shapes()
+        if not shapes:
+            messagebox.showwarning("提示", "请先加载图片并确保几何检测有效")
+            return
+
+        save_path = filedialog.asksaveasfilename(
+            title="导出 TeX 文件",
+            defaultextension=".tex",
+            initialfile="figure.tex",
+            filetypes=[("TeX文件", "*.tex"), ("所有文件", "*.*")],
+        )
+        if not save_path:
+            return
+
+        try:
+            from tikz_utils import shapes_to_tikz, wrap_tikz_in_tex
+            tikz_code = shapes_to_tikz(shapes, canvas_size_cm=(12, 9))
+            tex_code = wrap_tikz_in_tex(tikz_code, document_class='standalone', border=10)
+
+            with open(save_path, 'w', encoding='utf-8') as f:
+                f.write(tex_code)
+
+            self.status.config(text=f"已导出TeX文件: {os.path.basename(save_path)}")
+            messagebox.showinfo("导出成功", f"已生成 {len(shapes)} 个形状\n保存到: {save_path}")
+        except Exception as e:
+            messagebox.showerror("导出失败", f"导出TeX文件失败: {e}")
 
     def _on_color_mode(self):
         if self.color_mode.get() == 'single':
