@@ -788,6 +788,7 @@ class Image2WSDApp:
                 if self.convert_mode.get() == 'geometric':
                     # 几何模式：检测几何形状
                     from svg2wsd_geo import detect_geometric_shapes, shape_to_polyline_points
+                    from svg2wsd_core import rainbow_color_hex
                     circle_param2 = int(200 - self.geo_circle_sensitivity.get() * 1.5)
                     shapes = detect_geometric_shapes(
                         self.current_file,
@@ -801,14 +802,20 @@ class Image2WSDApp:
                     if not shapes:
                         raise ValueError("未检测到几何形状，请调整最小面积参数")
                     subpaths = [shape_to_polyline_points(s) for s in shapes]
-                    colors = []
-                    from svg2wsd_core import rainbow_color_hex
-                    for i in range(len(shapes)):
-                        colors.append(rainbow_color_hex(i, len(shapes)))
+                    # 判断是否为filled模式（形状带有color字段）
+                    is_filled = shapes and 'color' in shapes[0]
+                    if is_filled:
+                        # filled模式：使用形状自身的颜色
+                        colors = [s.get('color', '#ff0000') for s in shapes]
+                    else:
+                        # line模式：使用彩虹色
+                        colors = [rainbow_color_hex(i, len(shapes)) for i in range(len(shapes))]
                     all_x = [x for sp in subpaths for x, y in sp]
                     all_y = [y for sp in subpaths for x, y in sp]
                     bbox = (min(all_x), min(all_y), max(all_x), max(all_y))
-                    result = (subpaths, colors, bbox, 'geometric', {})
+                    # 保存is_filled标记到extra_info
+                    extra_info = {'is_geo_filled': is_filled}
+                    result = (subpaths, colors, bbox, 'geometric', extra_info)
                     shape_info = [(s['type'], s['area']) for s in shapes]
                 else:
                     subpaths, colors, bbox, ftype, extra_info = parse_input_file(
@@ -942,6 +949,7 @@ class Image2WSDApp:
 
         # 绘制填充/线条
         no_fill = self.color_mode.get() == 'none'
+        is_geo_filled = extra_info.get('is_geo_filled', False)
         for i, sp in enumerate(subpaths):
             if no_fill:
                 color = ''
@@ -954,12 +962,21 @@ class Image2WSDApp:
             if not color or color == 'none':
                 color = ''
 
-            if is_geo:
-                # 几何模式：用线条绘制
+            if is_geo and not is_geo_filled:
+                # 几何线条模式：用线条绘制
                 pts = [(x*scale+ox, y*scale+oy) for x, y in sp]
                 flat = [coord for pt in pts for coord in pt]
                 line_color = color if color else '#666666'
                 canvas.create_line(flat, fill=line_color, width=2, capstyle='round', joinstyle='round')
+            elif is_geo and is_geo_filled:
+                # 几何填充模式：用填充多边形绘制（按面积从大到小，先画大的）
+                poly = subpath_to_polygon(sp, samples_per_seg=8)
+                pts = [(x*scale+ox, y*scale+oy) for x, y in poly]
+                flat = [coord for pt in pts for coord in pt]
+                outline_color = ''
+                outline_width = 0
+                canvas.create_polygon(flat, fill=color, outline=outline_color,
+                                      width=outline_width, smooth=False)
             elif i < len(is_stroke_list) and is_stroke_list[i]:
                 # SVG描边路径：用线条绘制
                 poly = subpath_to_polygon(sp, samples_per_seg=6)
@@ -1070,16 +1087,25 @@ class Image2WSDApp:
             fill_colors_hex = colors
 
         # 绘制
+        is_geo_filled = extra_info.get('is_geo_filled', False)
         for i, sp in enumerate(subpaths):
             wsd_sp = [(int(x*sx+ox), int(y*sy+oy)) for x, y in sp]
             color = fill_colors_hex[i] if i < len(fill_colors_hex) else '#cccccc'
 
-            if is_geo:
-                # 几何模式：用线条绘制
+            if is_geo and not is_geo_filled:
+                # 几何线条模式：用线条绘制
                 pts = [(x*dscale+dox, y*dscale+doy) for x, y in wsd_sp]
                 flat = [coord for pt in pts for coord in pt]
                 line_color = color if color else '#3366ff'
                 canvas.create_line(flat, fill=line_color, width=2, capstyle='round', joinstyle='round')
+            elif is_geo and is_geo_filled:
+                # 几何填充模式：用填充多边形绘制
+                poly = subpath_to_polygon(wsd_sp, samples_per_seg=8)
+                pts = [(x*dscale+dox, y*dscale+doy) for x, y in poly]
+                flat = [coord for pt in pts for coord in pt]
+                fill_color_val = color if (color and not no_fill) else ''
+                canvas.create_polygon(flat, fill=fill_color_val, outline='',
+                                      width=0, smooth=False)
             elif i < len(is_stroke_list) and is_stroke_list[i]:
                 # SVG描边路径：用线条绘制
                 poly = subpath_to_polygon(wsd_sp, samples_per_seg=6)

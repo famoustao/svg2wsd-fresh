@@ -1525,10 +1525,11 @@ def detect_filled_colored_shapes(img_color, min_area=50, epsilon_ratio=0.02,
     不适用于：线条图、黑白图
 
     策略：
-      1. K-means 颜色量化，提取主要颜色
-      2. 对每个颜色层做二值化，检测填充区域轮廓
-      3. 分类形状类型（圆、矩形、三角形、多边形、五角星等）
-      4. 每个形状携带颜色信息
+      1. 在LAB颜色空间做K-means颜色量化，提取主要颜色（感知更均匀）
+      2. 对每个颜色层做二值化，检测填充区域轮廓（带层次关系）
+      3. 从每个轮廓内部直接采样颜色，确保颜色准确
+      4. 分类形状类型（圆、矩形、三角形、多边形、五角星等）
+      5. 按包含关系排序（外层先画，内层后画）
 
     参数:
         img_color: BGR格式图片 (numpy array)
@@ -1539,20 +1540,26 @@ def detect_filled_colored_shapes(img_color, min_area=50, epsilon_ratio=0.02,
 
     返回:
         list of dict，每个 dict 包含 type, points, area, bbox, color 等字段
+        按面积从大到小排序（确保先画大的，再画小的覆盖上去）
     """
     import cv2
 
     h, w = img_color.shape[:2]
     total_pixels = h * w
 
-    # ========== 步骤1：颜色量化（K-means） ==========
-    pixels = img_color.reshape(-1, 3).astype(np.float32)
-    criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 20, 1.0)
-    _, labels, centers = cv2.kmeans(
-        pixels, max_colors, None, criteria, 3, cv2.KMEANS_PP_CENTERS
+    # ========== 步骤1：颜色量化（LAB空间K-means，感知更均匀） ==========
+    # 转换到LAB颜色空间，聚类结果更符合人眼感知
+    img_lab = cv2.cvtColor(img_color, cv2.COLOR_BGR2LAB)
+    pixels_lab = img_lab.reshape(-1, 3).astype(np.float32)
+    criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 0.5)
+    _, labels, centers_lab = cv2.kmeans(
+        pixels_lab, max_colors, None, criteria, 5, cv2.KMEANS_PP_CENTERS
     )
 
-    centers = centers.astype(np.uint8)
+    # 将LAB聚类中心转换回BGR，用于初始颜色参考
+    centers_lab_uint8 = centers_lab.astype(np.uint8).reshape(-1, 1, 3)
+    centers_bgr = cv2.cvtColor(centers_lab_uint8, cv2.COLOR_LAB2BGR).reshape(-1, 3)
+
     unique_labels, counts = np.unique(labels, return_counts=True)
     color_order = np.argsort(-counts)
 
@@ -1563,8 +1570,9 @@ def detect_filled_colored_shapes(img_color, min_area=50, epsilon_ratio=0.02,
     #   3. 占比相对较大（> 10%）
     # 这样国旗的红色旗面不会被误判为背景
     bg_label = None
+    labels_2d = labels.reshape(h, w)
     for label_idx in color_order:
-        color_bgr = centers[label_idx]
+        color_bgr = centers_bgr[label_idx]
         color_area = counts[label_idx]
         ratio = color_area / total_pixels
 
@@ -1578,7 +1586,7 @@ def detect_filled_colored_shapes(img_color, min_area=50, epsilon_ratio=0.02,
             continue
 
         # 检查是否接触图像的4条边
-        mask = (labels.reshape(h, w) == label_idx)
+        mask = (labels_2d == label_idx)
         edge_total = 2 * (h + w)
         edge_pixels = (np.sum(mask[0, :]) + np.sum(mask[-1, :]) +
                        np.sum(mask[:, 0]) + np.sum(mask[:, -1]))
@@ -1592,29 +1600,32 @@ def detect_filled_colored_shapes(img_color, min_area=50, epsilon_ratio=0.02,
 
     # ========== 步骤2：对每个颜色层检测轮廓 ==========
     for rank, label_idx in enumerate(color_order):
-        color_bgr = centers[label_idx].tolist()
-        color_area = counts[label_idx]
-
         # 跳过明确的背景色
         if label_idx == bg_label:
             continue
         # 跳过太小的颜色区域
-        if color_area < min_area * 0.5:
+        if counts[label_idx] < min_area * 0.5:
             continue
 
         # 创建该颜色的二值图
-        mask = (labels.reshape(h, w) == label_idx).astype(np.uint8) * 255
+        mask = (labels_2d == label_idx).astype(np.uint8) * 255
 
-        # 形态学操作：去噪
+        # 形态学操作：先闭运算再开运算，去除噪点同时保持形状
         kernel = np.ones((2, 2), np.uint8)
         mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
 
-        # 检测轮廓（外轮廓）
-        contours, _ = cv2.findContours(
-            mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+        # 检测轮廓（带层次关系，用于判断内外）
+        contours, hierarchy = cv2.findContours(
+            mask, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE
         )
 
-        for cnt in contours:
+        if hierarchy is None:
+            continue
+
+        hierarchy = hierarchy[0]
+
+        for i, cnt in enumerate(contours):
             area = cv2.contourArea(cnt)
             if area < min_area:
                 continue
@@ -1634,6 +1645,28 @@ def detect_filled_colored_shapes(img_color, min_area=50, epsilon_ratio=0.02,
                                  bx + bw >= w - 2 and by + bh >= h - 2)
             if touches_all_edges and label_idx == bg_label:
                 continue
+
+            # ========== 关键改进：从轮廓内部直接采样颜色 ==========
+            # 创建单轮廓mask，腐蚀后取内部颜色平均值
+            # 这样避免K-means聚类中心的偏差，颜色更准确
+            mask_single = np.zeros((h, w), np.uint8)
+            cv2.drawContours(mask_single, [cnt], -1, 255, -1)
+
+            # 腐蚀mask，避免边缘混合色影响
+            erode_size = max(1, min(cw, ch) // 20)
+            if erode_size > 0:
+                kernel_erode = np.ones((erode_size, erode_size), np.uint8)
+                mask_eroded = cv2.erode(mask_single, kernel_erode, iterations=1)
+            else:
+                mask_eroded = mask_single
+
+            # 确保腐蚀后还有像素
+            if np.sum(mask_eroded > 0) < 10:
+                mask_eroded = mask_single
+
+            # 在原始彩色图上取mask内的平均颜色（BGR格式）
+            mean_bgr = cv2.mean(img_color, mask=mask_eroded)[:3]
+            color_bgr = tuple(int(round(c)) for c in mean_bgr)
 
             # 形状分类
             shape_type = SHAPE_POLYGON
@@ -1665,8 +1698,12 @@ def detect_filled_colored_shapes(img_color, min_area=50, epsilon_ratio=0.02,
                 shape_type = SHAPE_POLYGON
 
             # BGR转RGB hex color
-            bgr = tuple(int(c) for c in color_bgr)
-            hex_color = f'#{bgr[2]:02x}{bgr[1]:02x}{bgr[0]:02x}'
+            hex_color = f'#{color_bgr[2]:02x}{color_bgr[1]:02x}{color_bgr[0]:02x}'
+
+            # 层次信息：判断是外层还是内层
+            # hierarchy[i] = [Next, Previous, First_Child, Parent]
+            parent = hierarchy[i][3]
+            is_inner = (parent != -1)  # 有父轮廓说明是内层（孔）
 
             shape = {
                 'type': shape_type,
@@ -1674,12 +1711,20 @@ def detect_filled_colored_shapes(img_color, min_area=50, epsilon_ratio=0.02,
                 'area': float(area),
                 'bbox': bbox,
                 'color': hex_color,
-                'color_bgr': bgr,
+                'color_bgr': color_bgr,
+                'is_inner': is_inner,  # 是否是内层轮廓（孔）
             }
             shape.update(extra)
             shapes.append(shape)
 
-    # ========== 步骤3：按面积排序 ==========
+    # ========== 步骤3：处理内层轮廓（孔） ==========
+    # 内层轮廓（is_inner=True）通常是形状上的洞，不应该作为独立填充形状
+    # 但对于嵌套的不同颜色区域（如红色背景上的黄色五角星），
+    # 它们来自不同颜色层，is_inner都是False（因为每层独立检测）
+    # 这里主要过滤掉同色层的内孔
+    shapes = [s for s in shapes if not s.get('is_inner', False)]
+
+    # ========== 步骤4：按面积排序（从大到小，先画大的再画小的覆盖） ==========
     shapes.sort(key=lambda s: s['area'], reverse=True)
 
     return shapes
