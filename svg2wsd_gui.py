@@ -973,9 +973,16 @@ class Image2WSDApp:
                 poly = subpath_to_polygon(sp, samples_per_seg=8)
                 pts = [(x*scale+ox, y*scale+oy) for x, y in poly]
                 flat = [coord for pt in pts for coord in pt]
-                outline_color = ''
-                outline_width = 0
-                canvas.create_polygon(flat, fill=color, outline=outline_color,
+                if no_fill:
+                    # 无色模式：显示黑色轮廓
+                    fill_color = ''
+                    outline_color = '#000000'
+                    outline_width = 1
+                else:
+                    fill_color = color
+                    outline_color = ''
+                    outline_width = 0
+                canvas.create_polygon(flat, fill=fill_color, outline=outline_color,
                                       width=outline_width, smooth=False)
             elif i < len(is_stroke_list) and is_stroke_list[i]:
                 # SVG描边路径：用线条绘制
@@ -1103,9 +1110,17 @@ class Image2WSDApp:
                 poly = subpath_to_polygon(wsd_sp, samples_per_seg=8)
                 pts = [(x*dscale+dox, y*dscale+doy) for x, y in poly]
                 flat = [coord for pt in pts for coord in pt]
-                fill_color_val = color if (color and not no_fill) else ''
-                canvas.create_polygon(flat, fill=fill_color_val, outline='',
-                                      width=0, smooth=False)
+                if no_fill:
+                    # 无色模式：显示黑色轮廓
+                    fill_color_val = ''
+                    outline_color = '#000000'
+                    outline_w = 1
+                else:
+                    fill_color_val = color
+                    outline_color = ''
+                    outline_w = 0
+                canvas.create_polygon(flat, fill=fill_color_val, outline=outline_color,
+                                      width=outline_w, smooth=False)
             elif i < len(is_stroke_list) and is_stroke_list[i]:
                 # SVG描边路径：用线条绘制
                 poly = subpath_to_polygon(wsd_sp, samples_per_seg=6)

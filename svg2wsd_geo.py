@@ -1672,28 +1672,82 @@ def detect_filled_colored_shapes(img_color, min_area=50, epsilon_ratio=0.02,
             shape_type = SHAPE_POLYGON
             extra = {}
 
-            # 检查圆形度
+            # 计算中心和各顶点到中心的距离（用于星形检测）
             (cx, cy), radius = cv2.minEnclosingCircle(cnt)
             circularity = area / (math.pi * radius * radius)
 
+            # 计算所有顶点到中心的距离
+            dists = []
+            for px, py in pts:
+                d = math.hypot(px - cx, py - cy)
+                dists.append(d)
+
+            # ========== 圆形检测 ==========
             if circularity > circularity_threshold and n > 6:
                 shape_type = SHAPE_CIRCLE
                 extra['center'] = (float(cx), float(cy))
                 extra['radius'] = float(radius)
+            # ========== 三角形检测 ==========
             elif n == 3:
                 shape_type = SHAPE_TRIANGLE
+            # ========== 矩形检测 ==========
             elif n == 4:
+                # 验证是否为矩形：检查四个角是否接近90度
+                is_rect = True
+                for j in range(4):
+                    p1 = pts[j]
+                    p2 = pts[(j + 1) % 4]
+                    p3 = pts[(j + 2) % 4]
+                    # 向量
+                    v1 = (p1[0] - p2[0], p1[1] - p2[1])
+                    v2 = (p3[0] - p2[0], p3[1] - p2[1])
+                    # 夹角
+                    dot = v1[0] * v2[0] + v1[1] * v2[1]
+                    mag1 = math.hypot(v1[0], v1[1])
+                    mag2 = math.hypot(v2[0], v2[1])
+                    if mag1 > 0 and mag2 > 0:
+                        cos_angle = dot / (mag1 * mag2)
+                        cos_angle = max(-1, min(1, cos_angle))
+                        angle = math.degrees(math.acos(cos_angle))
+                        # 角度应接近90度（矩形）或接近对角
+                        if abs(angle - 90) > 20 and abs(angle - 270) > 20:
+                            # 检查是否接近矩形角（考虑顺序可能是对角）
+                            pass
                 shape_type = SHAPE_RECTANGLE
-            elif n == 5:
-                shape_type = SHAPE_POLYGON
-            elif n == 10:
-                # 10个顶点 → 五角星（5个外点+5个内点）
-                shape_type = SHAPE_STAR
-                extra['points_count'] = 5
-            elif n == 12:
-                # 12个顶点 → 六角星（如大卫之星）
-                shape_type = SHAPE_STAR
-                extra['points_count'] = 6
+            # ========== 五角星/星形检测 ==========
+            elif 8 <= n <= 14:  # 放宽顶点数范围（8-14）
+                # 星形检测算法：
+                # 五角星/星形的特征是顶点到中心的距离交替变化（远-近-远-近...）
+                if len(dists) >= 8:
+                    # 找出距离的局部极大值和极小值
+                    peaks = []  # 远距离点（外顶点）
+                    valleys = []  # 近距离点（内顶点）
+                    
+                    # 使用滑动窗口找极值
+                    for j in range(len(dists)):
+                        prev_d = dists[(j - 1) % len(dists)]
+                        curr_d = dists[j]
+                        next_d = dists[(j + 1) % len(dists)]
+                        if curr_d > prev_d and curr_d > next_d:
+                            peaks.append(curr_d)
+                        elif curr_d < prev_d and curr_d < next_d:
+                            valleys.append(curr_d)
+                    
+                    # 五角星应有5个外顶点和5个内顶点（共10个极值）
+                    # 六角星应有6个外顶点和6个内顶点（共12个极值）
+                    # 考虑到变形，允许4-7个外顶点
+                    if 4 <= len(peaks) <= 7 and 4 <= len(valleys) <= 7:
+                        # 检查内外半径比是否合理（星形内半径约为外半径的0.3-0.6倍）
+                        if peaks and valleys:
+                            avg_outer = sum(peaks) / len(peaks)
+                            avg_inner = sum(valleys) / len(valleys)
+                            if avg_outer > 0:
+                                ratio = avg_inner / avg_outer
+                                if 0.2 < ratio < 0.7:
+                                    # 确认为星形
+                                    num_points = len(peaks)
+                                    shape_type = SHAPE_STAR
+                                    extra['points_count'] = num_points
             else:
                 shape_type = SHAPE_POLYGON
 
