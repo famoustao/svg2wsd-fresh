@@ -100,18 +100,22 @@ class Image2WSDApp:
             left_canvas.yview_scroll(int(-1 * (event.delta / 120)), 'units')
         left_canvas.bind_all('<MouseWheel>', _on_mousewheel)
 
-        # 转换模式
-        mode_frame = ttk.LabelFrame(left, text="转换模式")
-        mode_frame.pack(fill='x', padx=5, pady=5)
+        # 转换模式选项卡
+        self.mode_notebook = ttk.Notebook(left)
+        self.mode_notebook.pack(fill='x', padx=5, pady=5)
 
-        mode_row = ttk.Frame(mode_frame)
-        mode_row.pack(fill='x', padx=8, pady=8)
-        ttk.Radiobutton(mode_row, text="普通转换", variable=self.convert_mode,
-                        value='normal', command=self._on_mode_change).pack(side='left', padx=10)
-        ttk.Radiobutton(mode_row, text="几何转换", variable=self.convert_mode,
-                        value='geometric', command=self._on_mode_change).pack(side='left', padx=10)
+        # 普通转换选项卡
+        self.normal_tab = ttk.Frame(self.mode_notebook)
+        self.mode_notebook.add(self.normal_tab, text='普通转换')
 
-        # 几何转换参数
+        # 几何转换选项卡
+        self.geo_tab = ttk.Frame(self.mode_notebook)
+        self.mode_notebook.add(self.geo_tab, text='几何转换')
+
+        # 绑定选项卡切换事件
+        self.mode_notebook.bind('<<NotebookTabChanged>>', self._on_mode_tab_change)
+
+        # 几何转换参数变量
         self.geo_min_area = tk.IntVar(value=50)
         self.geo_epsilon = tk.DoubleVar(value=0.02)
         self.geo_use_hough = tk.BooleanVar(value=True)
@@ -122,7 +126,10 @@ class Image2WSDApp:
         self.geo_symmetry_type = tk.StringVar(value='auto')
         self.geo_right_angle_correction = tk.BooleanVar(value=True)
 
-        self.geo_frame = ttk.LabelFrame(left, text="几何转换参数")
+        # 几何参数面板（放在几何选项卡内）
+        geo_inner_frame = ttk.LabelFrame(self.geo_tab, text="几何转换参数")
+        geo_inner_frame.pack(fill='x', padx=5, pady=5)
+        self.geo_frame = geo_inner_frame
 
         # 辅助函数：创建带+-按钮的滑块
         def _make_slider_row(parent, label_text, var, from_, to, step, val_fmt, width=10, hint=None):
@@ -322,9 +329,10 @@ class Image2WSDApp:
         self.h_entry.pack(side='left', padx=2)
         ttk.Label(sz_row, text="单位", foreground='gray').pack(side='left', padx=2)
 
-        # 图片矢量化选项
-        img_frame = ttk.LabelFrame(left, text="图片矢量化选项 (仅图片)")
-        img_frame.pack(fill='x', padx=5, pady=5)
+        # 图片矢量化选项（放在普通转换选项卡内）
+        img_inner_frame = ttk.LabelFrame(self.normal_tab, text="图片矢量化选项")
+        img_inner_frame.pack(fill='x', padx=5, pady=5)
+        img_frame = img_inner_frame
 
         # 辅助函数：创建带+-按钮的滑块（图片用）
         def _make_img_slider_row(parent, label_text, var, from_, to, step, val_fmt, width=12):
@@ -570,13 +578,22 @@ class Image2WSDApp:
 
     # ===== 选项事件 =====
 
-    def _on_mode_change(self):
-        """切换转换模式"""
-        if self.convert_mode.get() == 'geometric':
-            self.geo_frame.pack(fill='x', padx=5, pady=5, before=self.batch_frame)
+    def _on_mode_tab_change(self, event=None):
+        """选项卡切换时更新转换模式"""
+        current_tab = self.mode_notebook.index(self.mode_notebook.select())
+        if current_tab == 0:
+            self.convert_mode.set('normal')
         else:
-            self.geo_frame.pack_forget()
+            self.convert_mode.set('geometric')
         self._invalidate_data()
+
+    def _on_mode_change(self):
+        """切换转换模式（兼容旧接口，同步到选项卡）"""
+        if self.convert_mode.get() == 'geometric':
+            self.mode_notebook.select(1)
+        else:
+            self.mode_notebook.select(0)
+        # 注意：选项卡切换会触发 _on_mode_tab_change，进而调用 _invalidate_data
 
     def _on_geo_param_change(self, *args):
         """几何参数变化时更新预览（带防抖）"""
