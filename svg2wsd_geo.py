@@ -1778,10 +1778,90 @@ def detect_filled_colored_shapes(img_color, min_area=50, epsilon_ratio=0.02,
     # 这里主要过滤掉同色层的内孔
     shapes = [s for s in shapes if not s.get('is_inner', False)]
 
+    # ========== 步骤3.5：合并相似颜色的重叠形状，去除碎片 ==========
+    # 由于颜色量化可能把渐变的同色区域分成多个颜色层，
+    # 导致同一形状（如红色背景）被检测为多个碎片，需要合并
+    if len(shapes) > 1:
+        shapes = _merge_similar_color_shapes(shapes)
+
     # ========== 步骤4：按面积排序（从大到小，先画大的再画小的覆盖） ==========
     shapes.sort(key=lambda s: s['area'], reverse=True)
 
     return shapes
+
+
+def _merge_similar_color_shapes(shapes, color_threshold=35):
+    """
+    合并颜色相近的重叠/相邻形状
+
+    用于解决颜色量化导致的同色区域碎片化问题。
+    如果两个形状颜色相近且有重叠/相邻关系，则保留较大的那个。
+
+    参数:
+        shapes: 形状列表
+        color_threshold: 颜色相似度阈值（BGR空间欧氏距离）
+
+    返回:
+        合并后的形状列表
+    """
+    import math
+
+    if len(shapes) <= 1:
+        return shapes
+
+    # 按面积从大到小排序
+    sorted_shapes = sorted(shapes, key=lambda s: s['area'], reverse=True)
+    kept = []
+
+    for s in sorted_shapes:
+        s_bgr = s.get('color_bgr')
+        if s_bgr is None:
+            kept.append(s)
+            continue
+
+        # 查找是否可以合并到已保留的形状中
+        merged = False
+        for k in kept:
+            k_bgr = k.get('color_bgr')
+            if k_bgr is None:
+                continue
+
+            # 检查颜色是否相近
+            color_dist = math.sqrt(
+                (s_bgr[0] - k_bgr[0]) ** 2 +
+                (s_bgr[1] - k_bgr[1]) ** 2 +
+                (s_bgr[2] - k_bgr[2]) ** 2
+            )
+            if color_dist > color_threshold:
+                continue
+
+            # 检查重叠程度
+            overlap = _shapes_overlap(s, k)
+
+            # 如果有明显重叠，或者小形状在大形状内部
+            # （对于渐变导致的碎片，它们通常是相邻/重叠的）
+            if overlap > 0.1 or _shape_contains(k, s):
+                # 小形状被大形状吸收（跳过小形状）
+                merged = True
+                break
+
+        if not merged:
+            kept.append(s)
+
+    return kept
+
+
+def _shape_contains(big_shape, small_shape):
+    """
+    判断小形状是否大致在大形状内部（基于bbox）
+    """
+    bx, by, bw, bh = big_shape['bbox']
+    sx, sy, sw, sh = small_shape['bbox']
+
+    # 小形状的中心在大形状内
+    scx = sx + sw / 2
+    scy = sy + sh / 2
+    return (bx <= scx <= bx + bw) and (by <= scy <= by + bh)
 
 
 def _deduplicate_shapes(shapes, overlap_threshold=0.8):
@@ -2219,6 +2299,164 @@ def circle_to_polyline(cx, cy, radius, segments=72):
         points.append((x, y))
     points.append(points[0])  # 闭合
     return points
+
+
+def fit_geometric_shapes_from_paths(subpaths, colors=None, epsilon_ratio=0.02):
+    """
+    从矢量化路径（贝塞尔曲线）拟合几何形状
+
+    优势：基于Potrace高质量矢量化结果，形状轮廓更准确，
+    避免了OpenCV从零检测轮廓时的形态学变形问题。
+
+    参数:
+        subpaths: 子路径列表，每个子路径是贝塞尔曲线点列表
+        colors: 对应路径的颜色列表（hex格式），None则无颜色
+        epsilon_ratio: 轮廓近似精度比例（0-1），越小越精细
+
+    返回:
+        list of dict，形状字典列表，格式与detect_geometric_shapes一致
+        每个形状包含 type, points, area, bbox, color, color_bgr 等字段
+    """
+    from svg2wsd_core import subpath_to_polygon, path_area, hex_to_bgr
+
+    shapes = []
+
+    for i, sp in enumerate(subpaths):
+        # 将贝塞尔路径采样为多边形
+        poly = subpath_to_polygon(sp, samples_per_seg=12)
+        if len(poly) < 3:
+            continue
+
+        # 计算面积
+        area = abs(path_area(poly))
+        if area < 1:
+            continue
+
+        # 计算边界框
+        xs = [p[0] for p in poly]
+        ys = [p[1] for p in poly]
+        min_x, max_x = min(xs), max(xs)
+        min_y, max_y = min(ys), max(ys)
+        bbox = (int(min_x), int(min_y), int(max_x - min_x), int(max_y - min_y))
+
+        # 多边形近似
+        import cv2
+        import numpy as np
+        cnt = np.array(poly[:-1], dtype=np.float32).reshape(-1, 1, 2)  # 去掉闭合点
+        epsilon = epsilon_ratio * cv2.arcLength(cnt, True)
+        approx = cv2.approxPolyDP(cnt, epsilon, True)
+        pts = [(float(p[0][0]), float(p[0][1])) for p in approx]
+        n = len(pts)
+
+        if n < 3:
+            continue
+
+        # 形状分类
+        shape_type = SHAPE_POLYGON
+        extra = {}
+
+        # 计算中心
+        cx = (min_x + max_x) / 2
+        cy = (min_y + max_y) / 2
+        bbox_w = max_x - min_x
+        bbox_h = max_y - min_y
+
+        # 计算圆形度
+        _, radius = cv2.minEnclosingCircle(cnt)
+        circularity = area / (math.pi * radius * radius)
+
+        # 计算所有顶点到中心的距离（用于星形检测）
+        dists = [math.hypot(px - cx, py - cy) for px, py in pts]
+
+        # ========== 圆形检测 ==========
+        if circularity > 0.85 and n > 6:
+            shape_type = SHAPE_CIRCLE
+            extra['center'] = (float(cx), float(cy))
+            extra['radius'] = float(radius)
+        # ========== 三角形检测 ==========
+        elif n == 3:
+            shape_type = SHAPE_TRIANGLE
+        # ========== 矩形检测 ==========
+        elif n == 4:
+            # 验证是否为矩形：检查4个角是否接近90度，且对边长度接近
+            is_rect = True
+            angles = []
+            for j in range(4):
+                p1 = pts[j]
+                p2 = pts[(j + 1) % 4]
+                p3 = pts[(j + 2) % 4]
+                v1 = (p1[0] - p2[0], p1[1] - p2[1])
+                v2 = (p3[0] - p2[0], p3[1] - p2[1])
+                dot = v1[0] * v2[0] + v1[1] * v2[1]
+                mag1 = math.hypot(v1[0], v1[1])
+                mag2 = math.hypot(v2[0], v2[1])
+                if mag1 > 0 and mag2 > 0:
+                    cos_angle = dot / (mag1 * mag2)
+                    cos_angle = max(-1, min(1, cos_angle))
+                    angle = math.degrees(math.acos(cos_angle))
+                    angles.append(angle)
+            if angles:
+                # 矩形的4个角应该接近90度（或者对角色接近90/270）
+                # 检查最小角和最大角与90度的偏差
+                angle_diffs = [min(abs(a - 90), abs(a - 270)) for a in angles]
+                if max(angle_diffs) < 20:
+                    shape_type = SHAPE_RECTANGLE
+        # ========== 星形检测 ==========
+        elif 8 <= n <= 16:  # 放宽范围，适应变形
+            # 星形特征：顶点到中心的距离交替变化（远-近-远-近）
+            peaks = []
+            valleys = []
+            for j in range(len(dists)):
+                prev_d = dists[(j - 1) % len(dists)]
+                curr_d = dists[j]
+                next_d = dists[(j + 1) % len(dists)]
+                if curr_d > prev_d and curr_d > next_d:
+                    peaks.append(curr_d)
+                elif curr_d < prev_d and curr_d < next_d:
+                    valleys.append(curr_d)
+
+            # 五角星/六角星等：有4-7个外顶点和4-7个内顶点
+            if 4 <= len(peaks) <= 7 and 4 <= len(valleys) <= 7:
+                if peaks and valleys:
+                    avg_outer = sum(peaks) / len(peaks)
+                    avg_inner = sum(valleys) / len(valleys)
+                    if avg_outer > 0:
+                        ratio = avg_inner / avg_outer
+                        # 星形内半径约为外半径的0.2-0.7倍
+                        if 0.2 < ratio < 0.7:
+                            shape_type = SHAPE_STAR
+                            extra['points_count'] = len(peaks)
+        else:
+            shape_type = SHAPE_POLYGON
+
+        # 颜色
+        hex_color = None
+        color_bgr = None
+        if colors and i < len(colors):
+            hex_color = colors[i]
+            if hex_color and hex_color.startswith('#'):
+                try:
+                    color_bgr = hex_to_bgr(hex_color)
+                except:
+                    color_bgr = (0, 0, 0)
+
+        shape = {
+            'type': shape_type,
+            'points': pts,
+            'area': float(area),
+            'bbox': bbox,
+        }
+        if hex_color:
+            shape['color'] = hex_color
+        if color_bgr:
+            shape['color_bgr'] = color_bgr
+        shape.update(extra)
+        shapes.append(shape)
+
+    # 按面积从大到小排序
+    shapes.sort(key=lambda s: s['area'], reverse=True)
+
+    return shapes
 
 
 def shape_to_polyline_points(shape):

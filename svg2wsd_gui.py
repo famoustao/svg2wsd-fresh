@@ -24,13 +24,14 @@ from svg2wsd_core import (
     SVG_EXTENSIONS,
     CANVAS_MIN, CANVAS_MAX, MARGIN,
     DEFAULT_LINEWIDTH,
+    __version__,
 )
 
 
 class Image2WSDApp:
     def __init__(self, root):
         self.root = root
-        root.title("图像 → WSD 转换器 v3")
+        root.title(f"图像 → WSD 转换器 v{__version__}")
         root.geometry("960x680")
         root.minsize(850, 600)
 
@@ -121,9 +122,13 @@ class Image2WSDApp:
         self.geo_frame = ttk.LabelFrame(left, text="几何转换参数")
 
         # 辅助函数：创建带+-按钮的滑块
-        def _make_slider_row(parent, label_text, var, from_, to, step, val_fmt, width=10):
-            row = ttk.Frame(parent)
-            row.pack(fill='x', padx=8, pady=2)
+        def _make_slider_row(parent, label_text, var, from_, to, step, val_fmt, width=10, hint=None):
+            """创建一个带-+按钮和滑块的行，可选添加参数说明"""
+            container = ttk.Frame(parent)
+            container.pack(fill='x', padx=8, pady=1)
+            
+            row = ttk.Frame(container)
+            row.pack(fill='x')
             ttk.Label(row, text=label_text, width=width).pack(side='left')
 
             # - 按钮
@@ -154,15 +159,24 @@ class Image2WSDApp:
             # 数值标签
             val_label = ttk.Label(row, text=val_fmt.format(var.get()), width=8)
             val_label.pack(side='left')
+            
+            # 参数说明
+            if hint:
+                hint_label = ttk.Label(container, text=hint, foreground='gray',
+                                       font=('Arial', 8))
+                hint_label.pack(fill='x', padx=(width*7, 0))
+            
             return scale, val_label
 
         # 最小面积
         self.min_area_scale, self.min_area_val_label = _make_slider_row(
-            self.geo_frame, "最小面积:", self.geo_min_area, 5, 500, 5, "{}px")
+            self.geo_frame, "最小面积:", self.geo_min_area, 5, 500, 5, "{}px",
+            hint="越小识别越多细小形状，越大只保留大形状")
 
         # 近似精度
         self.eps_scale, self.eps_val_label = _make_slider_row(
-            self.geo_frame, "近似精度:", self.geo_epsilon, 0.005, 0.05, 0.002, "{:.3f}")
+            self.geo_frame, "近似精度:", self.geo_epsilon, 0.005, 0.05, 0.002, "{:.3f}",
+            hint="越小轮廓越精细，越大越简化（更接近几何形状）")
 
         # 启用霍夫变换
         hough_row = ttk.Frame(self.geo_frame)
@@ -172,15 +186,18 @@ class Image2WSDApp:
 
         # 最小直线长度
         self.mll_scale, self.mll_val_label = _make_slider_row(
-            self.geo_frame, "最小直线长度:", self.geo_min_line_length, 10, 200, 10, "{}px", width=12)
+            self.geo_frame, "最小直线长度:", self.geo_min_line_length, 10, 200, 10, "{}px", width=12,
+            hint="越小越灵敏，越大只保留长直线")
 
         # 直线灵敏度
         self.lt_scale, self.lt_val_label = _make_slider_row(
-            self.geo_frame, "直线灵敏度:", self.geo_line_threshold, 10, 100, 5, "{}", width=12)
+            self.geo_frame, "直线灵敏度:", self.geo_line_threshold, 10, 100, 5, "{}", width=12,
+            hint="越小越灵敏（可能识别出更多线段），越大越保守")
 
         # 圆检测灵敏度
         self.cs_scale, self.cs_val_label = _make_slider_row(
-            self.geo_frame, "圆检测灵敏度:", self.geo_circle_sensitivity, 20, 100, 5, "{}", width=12)
+            self.geo_frame, "圆检测灵敏度:", self.geo_circle_sensitivity, 20, 100, 5, "{}", width=12,
+            hint="越大越灵敏（可能识别出更多圆），越小越保守")
 
         # 自动调节参数按钮
         auto_row = ttk.Frame(self.geo_frame)
