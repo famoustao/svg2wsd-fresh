@@ -1600,6 +1600,9 @@ def detect_filled_colored_shapes(img_color, min_area=50, epsilon_ratio=0.02,
 
     # ========== 步骤2：对每个颜色层检测轮廓 ==========
     for rank, label_idx in enumerate(color_order):
+        # 使用K-means聚类中心颜色（避免小形状边缘混合色导致的颜色偏差）
+        color_bgr = tuple(int(c) for c in centers_bgr[label_idx])
+
         # 跳过明确的背景色
         if label_idx == bg_label:
             continue
@@ -1645,28 +1648,6 @@ def detect_filled_colored_shapes(img_color, min_area=50, epsilon_ratio=0.02,
                                  bx + bw >= w - 2 and by + bh >= h - 2)
             if touches_all_edges and label_idx == bg_label:
                 continue
-
-            # ========== 关键改进：从轮廓内部直接采样颜色 ==========
-            # 创建单轮廓mask，腐蚀后取内部颜色平均值
-            # 这样避免K-means聚类中心的偏差，颜色更准确
-            mask_single = np.zeros((h, w), np.uint8)
-            cv2.drawContours(mask_single, [cnt], -1, 255, -1)
-
-            # 腐蚀mask，避免边缘混合色影响
-            erode_size = max(1, min(cw, ch) // 20)
-            if erode_size > 0:
-                kernel_erode = np.ones((erode_size, erode_size), np.uint8)
-                mask_eroded = cv2.erode(mask_single, kernel_erode, iterations=1)
-            else:
-                mask_eroded = mask_single
-
-            # 确保腐蚀后还有像素
-            if np.sum(mask_eroded > 0) < 10:
-                mask_eroded = mask_single
-
-            # 在原始彩色图上取mask内的平均颜色（BGR格式）
-            mean_bgr = cv2.mean(img_color, mask=mask_eroded)[:3]
-            color_bgr = tuple(int(round(c)) for c in mean_bgr)
 
             # 形状分类
             shape_type = SHAPE_POLYGON
@@ -1864,17 +1845,25 @@ def _shape_contains(big_shape, small_shape):
     return (bx <= scx <= bx + bw) and (by <= scy <= by + bh)
 
 
-def correct_shapes(shapes, symmetry_correction=True, right_angle_correction=True,
-                   symmetry_tolerance=0.15, angle_tolerance=15):
+def correct_shapes(shapes, symmetry_correction=True, symmetry_type='auto',
+                   right_angle_correction=True,
+                   symmetry_tolerance=0.15, angle_tolerance=15,
+                   rotational_max_order=12):
     """
     对形状列表进行矫正（对称性、直角等）
 
     参数:
         shapes: 形状列表
         symmetry_correction: 是否启用对称性矫正
+        symmetry_type: 对称类型
+            'auto' - 自动检测（优先旋转对称，其次轴对称，最后中心对称）
+            'axial' - 轴对称
+            'rotational' - 旋转对称
+            'central' - 中心对称（点对称）
         right_angle_correction: 是否启用直角矫正
         symmetry_tolerance: 对称性容差（0-1），越小越严格
         angle_tolerance: 直角矫正的角度容差（度）
+        rotational_max_order: 旋转对称最高检测阶数
 
     返回:
         矫正后的形状列表
@@ -1897,11 +1886,256 @@ def correct_shapes(shapes, symmetry_correction=True, right_angle_correction=True
 
         # 对称性矫正
         if symmetry_correction:
-            shape = _correct_shape_symmetry(shape, symmetry_tolerance)
+            shape = _apply_symmetry_correction(
+                shape, symmetry_type, symmetry_tolerance, rotational_max_order
+            )
 
         corrected.append(shape)
 
     return corrected
+
+
+def _apply_symmetry_correction(shape, symmetry_type, tolerance=0.15, max_order=12):
+    """
+    根据对称类型应用对应的对称性矫正
+
+    参数:
+        shape: 形状字典
+        symmetry_type: 对称类型 ('auto', 'axial', 'rotational', 'central')
+        tolerance: 容差
+        max_order: 旋转对称最高阶数
+
+    返回:
+        矫正后的形状字典
+    """
+    shape_type = shape.get('type', '')
+
+    # 星形（star）特殊处理：星形本身就应该是旋转对称的
+    # 直接应用星形旋转对称矫正，不需要检测
+    if shape_type == SHAPE_STAR and symmetry_type in ('auto', 'rotational'):
+        return _correct_star_symmetry(shape, max_order)
+
+    if symmetry_type == 'axial':
+        return _correct_shape_symmetry(shape, tolerance)
+    elif symmetry_type == 'rotational':
+        return _correct_rotational_symmetry(shape, tolerance, max_order)
+    elif symmetry_type == 'central':
+        return _correct_central_symmetry(shape, tolerance)
+    elif symmetry_type == 'auto':
+        # 自动检测：尝试各种对称类型，取置信度最高的
+        # 先检测旋转对称（覆盖面最广，也包含中心对称）
+        # 再检测轴对称
+        # 但为了避免多次修改形状，我们分别评估再选择
+        pts = shape.get('points', [])
+        n = len(pts)
+        if n < 3:
+            return shape
+
+        cx = sum(p[0] for p in pts) / n
+        cy = sum(p[1] for p in pts) / n
+        xs = [p[0] for p in pts]
+        ys = [p[1] for p in pts]
+        shape_size = max(max(xs) - min(xs), max(ys) - min(ys))
+        if shape_size < 1:
+            return shape
+
+        best_type = None
+        best_score = 0
+
+        # 评估旋转对称
+        for order in range(max_order, 2, -1):
+            angle = 2 * math.pi / order
+            rotated = [_rotate_point(p[0], p[1], cx, cy, angle) for p in pts]
+            sim = _point_set_similarity(pts, rotated, shape_size)
+            if sim > best_score:
+                best_score = sim
+                best_type = 'rotational'
+
+        # 评估中心对称（2阶旋转）
+        if n >= 4 and n % 2 == 0:
+            rotated_180 = [_rotate_point(p[0], p[1], cx, cy, math.pi) for p in pts]
+            sim_central = _point_set_similarity(pts, rotated_180, shape_size)
+            if sim_central > best_score:
+                best_score = sim_central
+                best_type = 'central'
+
+        # 评估轴对称（找最佳轴）
+        best_axial_score = 0
+        for angle_deg in range(0, 180, 1):
+            angle = math.radians(angle_deg)
+            axis_dir = (math.cos(angle), math.sin(angle))
+            score, _ = _evaluate_symmetry_with_pairs(pts, cx, cy, axis_dir, shape_size)
+            if score > best_axial_score:
+                best_axial_score = score
+        if best_axial_score > best_score:
+            best_score = best_axial_score
+            best_type = 'axial'
+
+        # 应用最佳对称类型的矫正
+        if best_score >= (1 - tolerance) and best_type:
+            if best_type == 'rotational':
+                return _correct_rotational_symmetry(shape, tolerance, max_order)
+            elif best_type == 'central':
+                return _correct_central_symmetry(shape, tolerance)
+            elif best_type == 'axial':
+                return _correct_shape_symmetry(shape, tolerance)
+
+        return shape
+    else:
+        return shape
+
+
+def _correct_star_symmetry(shape, max_order=12):
+    """
+    矫正星形（五角星等）的旋转对称性
+
+    星形有内外顶点交替排列的特点，直接使用普通旋转对称检测
+    容易因为最近邻匹配错误而失败。此函数专门针对星形：
+    1. 分离外顶点和内顶点
+    2. 分别计算外顶点和内顶点的旋转对称
+    3. 重新生成完美对称的星形
+
+    参数:
+        shape: 形状字典
+        max_order: 最高检测阶数
+
+    返回:
+        矫正后的形状字典
+    """
+    pts = shape.get('points', [])
+    n = len(pts)
+    if n < 8 or n % 2 != 0:
+        return shape
+
+    # 计算质心
+    cx = sum(p[0] for p in pts) / n
+    cy = sum(p[1] for p in pts) / n
+
+    # 计算各顶点到中心的距离
+    dists = [math.hypot(p[0] - cx, p[1] - cy) for p in pts]
+
+    # 分离外顶点和内顶点（按距离大小交替）
+    # 找出距离的局部极大值（外顶点）和极小值（内顶点）
+    outer_indices = []
+    inner_indices = []
+
+    for i in range(n):
+        prev_d = dists[(i - 1) % n]
+        curr_d = dists[i]
+        next_d = dists[(i + 1) % n]
+        if curr_d > prev_d and curr_d > next_d:
+            outer_indices.append(i)
+        elif curr_d < prev_d and curr_d < next_d:
+            inner_indices.append(i)
+
+    # 如果外顶点和内顶点数量不相等或太少，返回原形状
+    if len(outer_indices) != len(inner_indices) or len(outer_indices) < 3:
+        return shape
+
+    num_points = len(outer_indices)
+    if num_points > max_order:
+        return shape
+
+    # 验证外顶点是否大致均匀分布（角度差接近2π/num_points）
+    outer_angles = []
+    for idx in outer_indices:
+        angle = math.atan2(pts[idx][1] - cy, pts[idx][0] - cx)
+        outer_angles.append(angle)
+
+    # 按角度排序
+    sorted_pairs = sorted(zip(outer_angles, outer_indices), key=lambda x: x[0])
+    sorted_outer_angles = [p[0] for p in sorted_pairs]
+    sorted_outer_indices = [p[1] for p in sorted_pairs]
+
+    # 检查角度间隔是否均匀
+    angle_steps = []
+    for i in range(num_points):
+        next_angle = sorted_outer_angles[(i + 1) % num_points]
+        if next_angle < sorted_outer_angles[i]:
+            next_angle += 2 * math.pi
+        angle_steps.append(next_angle - sorted_outer_angles[i])
+
+    avg_step = sum(angle_steps) / num_points
+    expected_step = 2 * math.pi / num_points
+    if abs(avg_step - expected_step) / expected_step > 0.3:
+        return shape  # 角度间隔偏差太大
+
+    # 计算平均外半径和平均内半径
+    avg_outer_r = sum(dists[i] for i in outer_indices) / len(outer_indices)
+    avg_inner_r = sum(dists[i] for i in inner_indices) / len(inner_indices)
+
+    # 计算起始角度（第一个外顶点的角度）
+    # 使用所有外顶点的角度的平均值（考虑到旋转对称）
+    start_angle = sorted_outer_angles[0]
+
+    # 生成完美对称的星形顶点
+    new_pts = []
+    angle_step = 2 * math.pi / num_points
+
+    # 找到原始点集中每个外顶点对应的内顶点
+    # 内顶点应该在外顶点之间的角度位置
+    # 我们需要确定内顶点是在外顶点之前还是之后
+    # 方法：检查第一个外顶点和下一个点的距离
+
+    # 更简单的方法：直接按角度生成，然后找到最接近的原始点顺序
+    # 生成对称的外顶点和内顶点
+    perfect_outer = []
+    perfect_inner = []
+    for i in range(num_points):
+        angle = start_angle + i * angle_step
+        perfect_outer.append((
+            cx + avg_outer_r * math.cos(angle),
+            cy + avg_outer_r * math.sin(angle),
+        ))
+        # 内顶点角度 = 外顶点角度 + 半个步长
+        inner_angle = angle + angle_step / 2
+        perfect_inner.append((
+            cx + avg_inner_r * math.cos(inner_angle),
+            cy + avg_inner_r * math.sin(inner_angle),
+        ))
+
+    # 合并外顶点和内顶点（交替）
+    perfect_pts = []
+    for i in range(num_points):
+        perfect_pts.append(perfect_outer[i])
+        perfect_pts.append(perfect_inner[i])
+
+    # 找到完美点集与原始点集的最佳对齐（循环偏移）
+    best_offset = 0
+    best_total_dist = float('inf')
+
+    for offset in range(n):
+        total_dist = 0
+        for i in range(n):
+            orig_idx = (i + offset) % n
+            d = math.hypot(
+                perfect_pts[i][0] - pts[orig_idx][0],
+                perfect_pts[i][1] - pts[orig_idx][1],
+            )
+            total_dist += d
+        if total_dist < best_total_dist:
+            best_total_dist = total_dist
+            best_offset = offset
+
+    # 按最佳偏移重新排列完美点集，保持原始顺序
+    final_pts = [None] * n
+    for i in range(n):
+        orig_idx = (i + best_offset) % n
+        final_pts[orig_idx] = perfect_pts[i]
+
+    # 确保没有None
+    for i in range(n):
+        if final_pts[i] is None:
+            final_pts[i] = pts[i]
+
+    shape['points'] = final_pts
+    xs2 = [p[0] for p in final_pts]
+    ys2 = [p[1] for p in final_pts]
+    shape['bbox'] = (
+        int(min(xs2)), int(min(ys2)),
+        int(max(xs2) - min(xs2)), int(max(ys2) - min(ys2))
+    )
+    return shape
 
 
 def _correct_rectangle_right_angles(shape, angle_tolerance=15):
@@ -2093,6 +2327,232 @@ def _mirror_point(p, cx, cy, axis_dir):
     mirror_x = 2 * proj_x - p[0]
     mirror_y = 2 * proj_y - p[1]
     return (mirror_x, mirror_y)
+
+
+def _correct_rotational_symmetry(shape, tolerance=0.15, max_order=12):
+    """
+    矫正形状的旋转对称性
+
+    检测旋转对称的阶数，将每组旋转对称的顶点取平均，
+    然后旋转生成所有对称位置的点。
+
+    参数:
+        shape: 形状字典
+        tolerance: 容差（0-1），越小越严格
+        max_order: 最高检测阶数
+
+    返回:
+        矫正后的形状字典
+    """
+    pts = shape.get('points', [])
+    n = len(pts)
+    if n < 3:
+        return shape
+
+    # 计算质心
+    cx = sum(p[0] for p in pts) / n
+    cy = sum(p[1] for p in pts) / n
+
+    # 形状尺寸
+    xs = [p[0] for p in pts]
+    ys = [p[1] for p in pts]
+    shape_size = max(max(xs) - min(xs), max(ys) - min(ys))
+    if shape_size < 1:
+        return shape
+
+    # 找最佳旋转对称阶数
+    best_order = 0
+    best_confidence = 0
+
+    for order in range(max_order, 2, -1):  # 从高到低，优先高阶
+        angle = 2 * math.pi / order
+        rotated = [_rotate_point(p[0], p[1], cx, cy, angle) for p in pts]
+        sim = _point_set_similarity(pts, rotated, shape_size)
+        if sim > best_confidence:
+            best_confidence = sim
+            best_order = order
+
+    if best_confidence < (1 - tolerance) or best_order < 3:
+        return shape
+
+    # 找到旋转对称的点组
+    angle_step = 2 * math.pi / best_order
+    dist_threshold = shape_size * 0.1
+
+    used = set()
+    groups = []
+
+    for i in range(n):
+        if i in used:
+            continue
+        group = [i]
+        used.add(i)
+        for k in range(1, best_order):
+            rot_angle = k * angle_step
+            rot_p = _rotate_point(pts[i][0], pts[i][1], cx, cy, rot_angle)
+            best_j = -1
+            best_dist = float('inf')
+            for j in range(n):
+                if j in used:
+                    continue
+                d = math.hypot(rot_p[0] - pts[j][0], rot_p[1] - pts[j][1])
+                if d < best_dist:
+                    best_dist = d
+                    best_j = j
+            if best_j >= 0 and best_dist < dist_threshold:
+                group.append(best_j)
+                used.add(best_j)
+            else:
+                break
+        if len(group) == best_order:
+            groups.append(group)
+        else:
+            return shape  # 分组不完整，不矫正
+
+    if not groups:
+        return shape
+
+    # 计算矫正后的点
+    new_pts = [None] * n
+    for group in groups:
+        base_idx = group[0]
+        base_p = pts[base_idx]
+        for k, idx in enumerate(group):
+            rot_angle = k * angle_step
+            rot_p = _rotate_point(base_p[0], base_p[1], cx, cy, rot_angle)
+            orig_p = pts[idx]
+            new_p = (
+                (orig_p[0] + rot_p[0]) / 2,
+                (orig_p[1] + rot_p[1]) / 2,
+            )
+            new_pts[idx] = new_p
+
+    for i in range(n):
+        if new_pts[i] is None:
+            new_pts[i] = pts[i]
+
+    shape['points'] = new_pts
+    xs2 = [p[0] for p in new_pts]
+    ys2 = [p[1] for p in new_pts]
+    shape['bbox'] = (
+        int(min(xs2)), int(min(ys2)),
+        int(max(xs2) - min(xs2)), int(max(ys2) - min(ys2))
+    )
+    return shape
+
+
+def _correct_central_symmetry(shape, tolerance=0.15):
+    """
+    矫正形状的中心对称性（点对称）
+
+    检测形状是否关于质心中心对称（旋转180度后重合），
+    将每对中心对称的顶点取平均，得到完全中心对称的形状。
+
+    参数:
+        shape: 形状字典
+        tolerance: 容差（0-1），越小越严格
+
+    返回:
+        矫正后的形状字典
+    """
+    pts = shape.get('points', [])
+    n = len(pts)
+    if n < 4 or n % 2 != 0:  # 中心对称的多边形顶点数必为偶数
+        return shape
+
+    # 计算质心
+    cx = sum(p[0] for p in pts) / n
+    cy = sum(p[1] for p in pts) / n
+
+    # 形状尺寸
+    xs = [p[0] for p in pts]
+    ys = [p[1] for p in pts]
+    shape_size = max(max(xs) - min(xs), max(ys) - min(ys))
+    if shape_size < 1:
+        return shape
+
+    # 检测中心对称性：旋转180度后点集是否匹配
+    angle = math.pi  # 180度
+    rotated = [_rotate_point(p[0], p[1], cx, cy, angle) for p in pts]
+    sim = _point_set_similarity(pts, rotated, shape_size)
+
+    if sim < (1 - tolerance):
+        return shape
+
+    # 找到中心对称的点对
+    dist_threshold = shape_size * 0.1
+    used = set()
+    pairs = []
+
+    for i in range(n):
+        if i in used:
+            continue
+        # 计算p[i]关于质心的对称点
+        sym_p = (2 * cx - pts[i][0], 2 * cy - pts[i][1])
+        best_j = -1
+        best_dist = float('inf')
+        for j in range(i + 1, n):
+            if j in used:
+                continue
+            d = math.hypot(sym_p[0] - pts[j][0], sym_p[1] - pts[j][1])
+            if d < best_dist:
+                best_dist = d
+                best_j = j
+        if best_j >= 0 and best_dist < dist_threshold:
+            pairs.append((i, best_j))
+            used.add(i)
+            used.add(best_j)
+        else:
+            return shape  # 有点找不到对称点，不矫正
+
+    if len(pairs) != n // 2:
+        return shape
+
+    # 计算矫正后的点（保持原始顺序）
+    new_pts = [None] * n
+    for i, j in pairs:
+        # 新的p_i = (p_i + 对称(p_j)) / 2，其实就是两点连线的中点向对称位置投影
+        # 更简单的方法：新点 = (p_i + 对称(p_j)) / 2，对称点 = 2*中心 - 新点
+        p1 = pts[i]
+        p2 = pts[j]
+        # p2的中心对称点
+        p2_sym = (2 * cx - p2[0], 2 * cy - p2[1])
+        # 新p1 = p1和p2_sym的平均
+        new_p1 = ((p1[0] + p2_sym[0]) / 2, (p1[1] + p2_sym[1]) / 2)
+        # 新p2 = new_p1的中心对称点
+        new_p2 = (2 * cx - new_p1[0], 2 * cy - new_p1[1])
+        new_pts[i] = new_p1
+        new_pts[j] = new_p2
+
+    for i in range(n):
+        if new_pts[i] is None:
+            new_pts[i] = pts[i]
+
+    shape['points'] = new_pts
+    xs2 = [p[0] for p in new_pts]
+    ys2 = [p[1] for p in new_pts]
+    shape['bbox'] = (
+        int(min(xs2)), int(min(ys2)),
+        int(max(xs2) - min(xs2)), int(max(ys2) - min(ys2))
+    )
+    return shape
+
+
+def _point_set_similarity(pts1, pts2, shape_size):
+    """计算两个点集的相似度（0-1）"""
+    if not pts1 or not pts2:
+        return 0
+    total_dist = 0
+    dist_threshold = shape_size * 0.1
+    for p1 in pts1:
+        min_dist = float('inf')
+        for p2 in pts2:
+            d = math.hypot(p1[0] - p2[0], p1[1] - p2[1])
+            if d < min_dist:
+                min_dist = d
+        total_dist += min_dist
+    avg_dist = total_dist / len(pts1)
+    return max(0, 1 - avg_dist / dist_threshold)
 
 
 def _evaluate_symmetry_with_pairs(pts, cx, cy, axis_dir, shape_size):
@@ -3060,6 +3520,7 @@ def convert_geo_to_wsd(input_path, wsd_path,
                        symmetry_threshold=0.7,
                        show_symmetry_axes=False,
                        symmetry_correction=True,
+                       symmetry_type='auto',
                        right_angle_correction=True,
                        progress_cb=None):
     """
@@ -3129,6 +3590,7 @@ def convert_geo_to_wsd(input_path, wsd_path,
         shapes = _step("形状矫正", lambda: correct_shapes(
             shapes,
             symmetry_correction=symmetry_correction,
+            symmetry_type=symmetry_type,
             right_angle_correction=right_angle_correction,
         ))
         if progress_cb:
@@ -3379,6 +3841,7 @@ def convert_geo_to_wsd_multi(input_files, output_path, **kwargs):
     symmetry_threshold = kwargs.get('symmetry_threshold', 0.7)
     show_symmetry_axes = kwargs.get('show_symmetry_axes', False)
     symmetry_correction = kwargs.get('symmetry_correction', True)
+    symmetry_type = kwargs.get('symmetry_type', 'auto')
     right_angle_correction = kwargs.get('right_angle_correction', True)
 
     all_shapes_data = []
@@ -3415,6 +3878,7 @@ def convert_geo_to_wsd_multi(input_files, output_path, **kwargs):
             shapes = correct_shapes(
                 shapes,
                 symmetry_correction=symmetry_correction,
+                symmetry_type=symmetry_type,
                 right_angle_correction=right_angle_correction,
             )
 

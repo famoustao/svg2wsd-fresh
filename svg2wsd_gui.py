@@ -119,6 +119,7 @@ class Image2WSDApp:
         self.geo_line_threshold = tk.IntVar(value=30)
         self.geo_circle_sensitivity = tk.IntVar(value=50)
         self.geo_symmetry_correction = tk.BooleanVar(value=True)
+        self.geo_symmetry_type = tk.StringVar(value='auto')
         self.geo_right_angle_correction = tk.BooleanVar(value=True)
 
         self.geo_frame = ttk.LabelFrame(left, text="几何转换参数")
@@ -210,11 +211,22 @@ class Image2WSDApp:
                   font=('Arial', 8)).pack(side='left', padx=5)
 
         corr_row2 = ttk.Frame(self.geo_frame)
-        corr_row2.pack(fill='x', padx=8, pady=(1, 2))
+        corr_row2.pack(fill='x', padx=8, pady=(1, 1))
         ttk.Checkbutton(corr_row2, text="对称性矫正", variable=self.geo_symmetry_correction,
                         command=self._on_geo_param_change).pack(side='left')
         ttk.Label(corr_row2, text="自动修正为对称图形", foreground='gray',
                   font=('Arial', 8)).pack(side='left', padx=5)
+
+        corr_row3 = ttk.Frame(self.geo_frame)
+        corr_row3.pack(fill='x', padx=8, pady=(0, 2))
+        ttk.Label(corr_row3, text="  对称类型:", font=('Arial', 9)).pack(side='left')
+        symmetry_combo = ttk.Combobox(corr_row3, textvariable=self.geo_symmetry_type,
+                                       values=['auto', 'axial', 'rotational', 'central'],
+                                       state='readonly', width=10)
+        symmetry_combo.pack(side='left', padx=4)
+        symmetry_combo.bind('<<ComboboxSelected>>', lambda e: self._on_geo_param_change())
+        ttk.Label(corr_row3, text="自动/轴对称/旋转/中心", foreground='gray',
+                  font=('Arial', 8)).pack(side='left', padx=2)
 
         # 自动调节参数按钮
         auto_row = ttk.Frame(self.geo_frame)
@@ -843,6 +855,7 @@ class Image2WSDApp:
                     shapes = correct_shapes(
                         shapes,
                         symmetry_correction=self.geo_symmetry_correction.get(),
+                        symmetry_type=self.geo_symmetry_type.get(),
                         right_angle_correction=self.geo_right_angle_correction.get(),
                     )
 
@@ -1260,6 +1273,7 @@ class Image2WSDApp:
                         line_threshold=self.geo_line_threshold.get(),
                         circle_param2=circle_param2,
                         symmetry_correction=self.geo_symmetry_correction.get(),
+                        symmetry_type=self.geo_symmetry_type.get(),
                         right_angle_correction=self.geo_right_angle_correction.get(),
                         progress_cb=self._update_progress,
                     )
@@ -1330,6 +1344,7 @@ class Image2WSDApp:
                         line_threshold=self.geo_line_threshold.get(),
                         circle_param2=circle_param2,
                         symmetry_correction=self.geo_symmetry_correction.get(),
+                        symmetry_type=self.geo_symmetry_type.get(),
                         right_angle_correction=self.geo_right_angle_correction.get(),
                         progress_cb=None,
                     )
