@@ -1976,7 +1976,8 @@ def _correct_shape_symmetry(shape, tolerance=0.15):
     """
     矫正形状的对称性
 
-    检测形状的主要对称轴，然后将形状镜像到对称的位置。
+    找到最佳对称轴，将形状关于该轴对称的顶点配对，
+    使每对顶点关于对称轴对称，得到完全对称的形状。
 
     参数:
         shape: 形状字典
@@ -1986,70 +1987,174 @@ def _correct_shape_symmetry(shape, tolerance=0.15):
         矫正后的形状字典
     """
     pts = shape.get('points', [])
-    if len(pts) < 3:
+    n = len(pts)
+    if n < 3:
         return shape
 
     # 计算质心
-    cx = sum(p[0] for p in pts) / len(pts)
-    cy = sum(p[1] for p in pts) / len(pts)
+    cx = sum(p[0] for p in pts) / n
+    cy = sum(p[1] for p in pts) / n
 
-    # 计算形状的主轴方向（用于确定对称轴）
-    # 方法：使用PCA找主轴
-    import numpy as np
-    pts_arr = np.array(pts, dtype=np.float64)
-    centered = pts_arr - np.array([cx, cy])
+    # 计算形状尺寸
+    xs = [p[0] for p in pts]
+    ys = [p[1] for p in pts]
+    shape_size = max(max(xs) - min(xs), max(ys) - min(ys))
+    if shape_size < 1:
+        return shape
 
-    # 协方差矩阵
-    cov = np.cov(centered.T)
-    eigenvalues, eigenvectors = np.linalg.eigh(cov)
-
-    # 主轴方向（最大特征值对应的特征向量）
-    major_axis = eigenvectors[:, np.argmax(eigenvalues)]
-    minor_axis = eigenvectors[:, np.argmin(eigenvalues)]
-
-    # 尝试多个对称轴方向，找最佳的
+    # 找最佳对称轴（尝试0-180度，步长1度）
     best_axis = None
     best_score = 0
+    best_pairs = None
 
-    # 候选轴：主轴、副轴、以及偏移几个角度
-    for angle_offset in range(-10, 11, 5):
-        angle = math.atan2(major_axis[1], major_axis[0]) + math.radians(angle_offset)
+    for angle_deg in range(0, 180, 1):
+        angle = math.radians(angle_deg)
         axis_dir = (math.cos(angle), math.sin(angle))
-        score = _evaluate_symmetry(pts, cx, cy, axis_dir)
+        score, pairs = _evaluate_symmetry_with_pairs(
+            pts, cx, cy, axis_dir, shape_size
+        )
         if score > best_score:
             best_score = score
             best_axis = axis_dir
+            best_pairs = pairs
 
-    # 如果对称性足够好，则矫正
-    if best_score < (1 - tolerance):
+    # 对称性不够好则不矫正
+    if best_score < (1 - tolerance) or best_pairs is None:
         return shape
 
-    # 沿对称轴镜像矫正
-    new_pts = []
-    for px, py in pts:
-        # 点到轴的投影
-        dx = px - cx
-        dy = py - cy
-        axis_dot = dx * best_axis[0] + dy * best_axis[1]
-        # 轴上的投影点
-        proj_x = cx + axis_dot * best_axis[0]
-        proj_y = cy + axis_dot * best_axis[1]
-        # 镜像点
-        mirror_x = 2 * proj_x - px
-        mirror_y = 2 * proj_y - py
+    # 构建配对映射
+    pair_map = {}  # i -> j
+    for a, b in best_pairs:
+        if a != b:
+            pair_map[a] = b
+            pair_map[b] = a
 
-        # 找镜像点在原列表中最近的点，取平均
-        # 简化：直接用原点点和镜像点的平均
-        new_pts.append(((px + mirror_x) / 2, (py + mirror_y) / 2))
+    # 计算矫正后的点（保持原始顺序）
+    new_pts = [None] * n
+    used = set()
+
+    for i in range(n):
+        if i in used:
+            continue
+
+        j = pair_map.get(i)
+
+        if j is None or j == i:
+            # 在对称轴上的点，直接使用
+            new_pts[i] = pts[i]
+            used.add(i)
+        else:
+            # 配对的两个点：矫正为关于对称轴对称
+            p1 = pts[i]
+            p2 = pts[j]
+
+            # 计算p2关于轴的镜像
+            mirror_p2 = _mirror_point(p2, cx, cy, best_axis)
+
+            # 新的p1 = p1和mirror(p2)的平均
+            new_p1 = (
+                (p1[0] + mirror_p2[0]) / 2,
+                (p1[1] + mirror_p2[1]) / 2,
+            )
+
+            # 新的p2 = mirror(新的p1)
+            new_p2 = _mirror_point(new_p1, cx, cy, best_axis)
+
+            new_pts[i] = new_p1
+            new_pts[j] = new_p2
+            used.add(i)
+            used.add(j)
+
+    # 处理未配对的点（不应该发生）
+    for i in range(n):
+        if new_pts[i] is None:
+            new_pts[i] = pts[i]
 
     shape['points'] = new_pts
 
     # 更新bbox
-    xs = [p[0] for p in new_pts]
-    ys = [p[1] for p in new_pts]
-    shape['bbox'] = (int(min(xs)), int(min(ys)), int(max(xs) - min(xs)), int(max(ys) - min(ys)))
+    xs2 = [p[0] for p in new_pts]
+    ys2 = [p[1] for p in new_pts]
+    shape['bbox'] = (
+        int(min(xs2)), int(min(ys2)),
+        int(max(xs2) - min(xs2)), int(max(ys2) - min(ys2))
+    )
 
     return shape
+
+
+def _mirror_point(p, cx, cy, axis_dir):
+    """点关于过质心的轴的镜像"""
+    dx = p[0] - cx
+    dy = p[1] - cy
+    axis_dot = dx * axis_dir[0] + dy * axis_dir[1]
+    proj_x = cx + axis_dot * axis_dir[0]
+    proj_y = cy + axis_dot * axis_dir[1]
+    mirror_x = 2 * proj_x - p[0]
+    mirror_y = 2 * proj_y - p[1]
+    return (mirror_x, mirror_y)
+
+
+def _evaluate_symmetry_with_pairs(pts, cx, cy, axis_dir, shape_size):
+    """
+    评估形状沿某轴的对称性程度，并返回配对的点索引
+
+    返回: (score, pairs)
+        score: 0-1，1表示完全对称
+        pairs: list of (i, j) 配对的点索引
+    """
+    n = len(pts)
+    if n < 3:
+        return 0, []
+
+    pairs = []
+    matched = 0
+    dist_threshold = shape_size * 0.1  # 10%的尺寸内认为匹配
+
+    # 记录已配对的点
+    paired = set()
+
+    for i in range(n):
+        if i in paired:
+            continue
+
+        px, py = pts[i]
+
+        # 计算镜像点
+        dx = px - cx
+        dy = py - cy
+        axis_dot = dx * axis_dir[0] + dy * axis_dir[1]
+        proj_x = cx + axis_dot * axis_dir[0]
+        proj_y = cy + axis_dot * axis_dir[1]
+        mirror_x = 2 * proj_x - px
+        mirror_y = 2 * proj_y - py
+
+        # 找最近的点
+        best_j = -1
+        best_dist = float('inf')
+        for j in range(n):
+            if j == i or j in paired:
+                continue
+            d = math.hypot(mirror_x - pts[j][0], mirror_y - pts[j][1])
+            if d < best_dist:
+                best_dist = d
+                best_j = j
+
+        if best_dist < dist_threshold:
+            pairs.append((i, best_j))
+            paired.add(i)
+            paired.add(best_j)
+            matched += 2
+        else:
+            # 检查是否在对称轴上（自己和自己配对）
+            self_dist = math.hypot(mirror_x - px, mirror_y - py)
+            if self_dist < dist_threshold * 0.5:
+                pairs.append((i, i))
+                paired.add(i)
+                matched += 1
+
+    score = matched / n if n > 0 else 0
+    return score, pairs
 
 
 def _evaluate_symmetry(pts, cx, cy, axis_dir):
