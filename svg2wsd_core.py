@@ -4,7 +4,7 @@
 支持格式: SVG, PNG, JPG, JPEG, BMP, GIF, WebP, TIFF, ICO, TikZ/LaTeX
 """
 
-__version__ = "3.1.0"
+__version__ = "3.2.0"
 
 import struct
 import re

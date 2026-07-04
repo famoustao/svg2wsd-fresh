@@ -118,6 +118,8 @@ class Image2WSDApp:
         self.geo_min_line_length = tk.IntVar(value=80)
         self.geo_line_threshold = tk.IntVar(value=30)
         self.geo_circle_sensitivity = tk.IntVar(value=50)
+        self.geo_symmetry_correction = tk.BooleanVar(value=True)
+        self.geo_right_angle_correction = tk.BooleanVar(value=True)
 
         self.geo_frame = ttk.LabelFrame(left, text="几何转换参数")
 
@@ -136,7 +138,7 @@ class Image2WSDApp:
                 cur = var.get()
                 new = max(from_, cur - step)
                 var.set(new)
-                self._schedule_geo_update()
+                self._on_geo_param_change()
 
             btn_minus = ttk.Button(row, text="-", width=2, command=_dec)
             btn_minus.pack(side='left')
@@ -151,7 +153,7 @@ class Image2WSDApp:
                 cur = var.get()
                 new = min(to, cur + step)
                 var.set(new)
-                self._schedule_geo_update()
+                self._on_geo_param_change()
 
             btn_plus = ttk.Button(row, text="+", width=2, command=_inc)
             btn_plus.pack(side='left')
@@ -198,6 +200,21 @@ class Image2WSDApp:
         self.cs_scale, self.cs_val_label = _make_slider_row(
             self.geo_frame, "圆检测灵敏度:", self.geo_circle_sensitivity, 20, 100, 5, "{}", width=12,
             hint="越大越灵敏（可能识别出更多圆），越小越保守")
+
+        # 矫正选项
+        corr_row1 = ttk.Frame(self.geo_frame)
+        corr_row1.pack(fill='x', padx=8, pady=(4, 1))
+        ttk.Checkbutton(corr_row1, text="直角矫正", variable=self.geo_right_angle_correction,
+                        command=self._on_geo_param_change).pack(side='left')
+        ttk.Label(corr_row1, text="自动修正为标准矩形", foreground='gray',
+                  font=('Arial', 8)).pack(side='left', padx=5)
+
+        corr_row2 = ttk.Frame(self.geo_frame)
+        corr_row2.pack(fill='x', padx=8, pady=(1, 2))
+        ttk.Checkbutton(corr_row2, text="对称性矫正", variable=self.geo_symmetry_correction,
+                        command=self._on_geo_param_change).pack(side='left')
+        ttk.Label(corr_row2, text="自动修正为对称图形", foreground='gray',
+                  font=('Arial', 8)).pack(side='left', padx=5)
 
         # 自动调节参数按钮
         auto_row = ttk.Frame(self.geo_frame)
@@ -804,7 +821,10 @@ class Image2WSDApp:
             try:
                 if self.convert_mode.get() == 'geometric':
                     # 几何模式：检测几何形状
-                    from svg2wsd_geo import detect_geometric_shapes, shape_to_polyline_points
+                    from svg2wsd_geo import (
+                        detect_geometric_shapes, shape_to_polyline_points,
+                        correct_shapes
+                    )
                     from svg2wsd_core import rainbow_color_hex
                     circle_param2 = int(200 - self.geo_circle_sensitivity.get() * 1.5)
                     shapes = detect_geometric_shapes(
@@ -818,6 +838,14 @@ class Image2WSDApp:
                     )
                     if not shapes:
                         raise ValueError("未检测到几何形状，请调整最小面积参数")
+
+                    # 应用形状矫正（直角、对称性）
+                    shapes = correct_shapes(
+                        shapes,
+                        symmetry_correction=self.geo_symmetry_correction.get(),
+                        right_angle_correction=self.geo_right_angle_correction.get(),
+                    )
+
                     subpaths = [shape_to_polyline_points(s) for s in shapes]
                     # 判断是否为filled模式（形状带有color字段）
                     is_filled = shapes and 'color' in shapes[0]
@@ -1231,6 +1259,8 @@ class Image2WSDApp:
                         min_line_length=self.geo_min_line_length.get(),
                         line_threshold=self.geo_line_threshold.get(),
                         circle_param2=circle_param2,
+                        symmetry_correction=self.geo_symmetry_correction.get(),
+                        right_angle_correction=self.geo_right_angle_correction.get(),
                         progress_cb=self._update_progress,
                     )
                 else:
@@ -1299,6 +1329,8 @@ class Image2WSDApp:
                         min_line_length=self.geo_min_line_length.get(),
                         line_threshold=self.geo_line_threshold.get(),
                         circle_param2=circle_param2,
+                        symmetry_correction=self.geo_symmetry_correction.get(),
+                        right_angle_correction=self.geo_right_angle_correction.get(),
                         progress_cb=None,
                     )
                 else:

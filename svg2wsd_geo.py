@@ -1864,6 +1864,234 @@ def _shape_contains(big_shape, small_shape):
     return (bx <= scx <= bx + bw) and (by <= scy <= by + bh)
 
 
+def correct_shapes(shapes, symmetry_correction=True, right_angle_correction=True,
+                   symmetry_tolerance=0.15, angle_tolerance=15):
+    """
+    对形状列表进行矫正（对称性、直角等）
+
+    参数:
+        shapes: 形状列表
+        symmetry_correction: 是否启用对称性矫正
+        right_angle_correction: 是否启用直角矫正
+        symmetry_tolerance: 对称性容差（0-1），越小越严格
+        angle_tolerance: 直角矫正的角度容差（度）
+
+    返回:
+        矫正后的形状列表
+    """
+    if not shapes:
+        return shapes
+
+    corrected = []
+    for s in shapes:
+        shape = dict(s)  # 复制，不修改原数据
+        pts = shape.get('points', [])
+
+        if not pts or len(pts) < 3:
+            corrected.append(shape)
+            continue
+
+        # 直角矫正（优先于对称性，因为直角更基础）
+        if right_angle_correction and len(pts) == 4:
+            shape = _correct_rectangle_right_angles(shape, angle_tolerance)
+
+        # 对称性矫正
+        if symmetry_correction:
+            shape = _correct_shape_symmetry(shape, symmetry_tolerance)
+
+        corrected.append(shape)
+
+    return corrected
+
+
+def _correct_rectangle_right_angles(shape, angle_tolerance=15):
+    """
+    矫正四边形的角为直角
+
+    如果四边形的四个角接近90度（在容差范围内），则修正为标准矩形。
+
+    参数:
+        shape: 形状字典
+        angle_tolerance: 角度容差（度）
+
+    返回:
+        矫正后的形状字典
+    """
+    pts = shape.get('points', [])
+    if len(pts) != 4:
+        return shape
+
+    # 计算四个角的角度
+    angles = []
+    for j in range(4):
+        p1 = pts[j]
+        p2 = pts[(j + 1) % 4]
+        p3 = pts[(j + 2) % 4]
+        v1 = (p1[0] - p2[0], p1[1] - p2[1])
+        v2 = (p3[0] - p2[0], p3[1] - p2[1])
+        dot = v1[0] * v2[0] + v1[1] * v2[1]
+        mag1 = math.hypot(v1[0], v1[1])
+        mag2 = math.hypot(v2[0], v2[1])
+        if mag1 > 0 and mag2 > 0:
+            cos_angle = dot / (mag1 * mag2)
+            cos_angle = max(-1, min(1, cos_angle))
+            angle = math.degrees(math.acos(cos_angle))
+            angles.append(angle)
+
+    if len(angles) != 4:
+        return shape
+
+    # 检查是否所有角都接近90度
+    angle_diffs = [min(abs(a - 90), abs(a - 270)) for a in angles]
+    if max(angle_diffs) > angle_tolerance:
+        return shape  # 偏差太大，不矫正
+
+    # 修正为标准矩形
+    # 方法：找到最小外接矩形，然后用它的四个顶点
+    import numpy as np
+    import cv2
+    cnt = np.array(pts, dtype=np.float32).reshape(-1, 1, 2)
+    rect = cv2.minAreaRect(cnt)
+    box = cv2.boxPoints(rect)
+    new_pts = [(float(p[0]), float(p[1])) for p in box]
+
+    # 确保顶点顺序与原顺序一致（顺时针或逆时针）
+    # 简单处理：按极角排序
+    cx = sum(p[0] for p in new_pts) / 4
+    cy = sum(p[1] for p in new_pts) / 4
+    new_pts.sort(key=lambda p: math.atan2(p[1] - cy, p[0] - cx))
+
+    shape['points'] = new_pts
+    shape['type'] = SHAPE_RECTANGLE
+
+    # 更新bbox
+    xs = [p[0] for p in new_pts]
+    ys = [p[1] for p in new_pts]
+    shape['bbox'] = (int(min(xs)), int(min(ys)), int(max(xs) - min(xs)), int(max(ys) - min(ys)))
+
+    return shape
+
+
+def _correct_shape_symmetry(shape, tolerance=0.15):
+    """
+    矫正形状的对称性
+
+    检测形状的主要对称轴，然后将形状镜像到对称的位置。
+
+    参数:
+        shape: 形状字典
+        tolerance: 对称性容差（0-1），越小越严格
+
+    返回:
+        矫正后的形状字典
+    """
+    pts = shape.get('points', [])
+    if len(pts) < 3:
+        return shape
+
+    # 计算质心
+    cx = sum(p[0] for p in pts) / len(pts)
+    cy = sum(p[1] for p in pts) / len(pts)
+
+    # 计算形状的主轴方向（用于确定对称轴）
+    # 方法：使用PCA找主轴
+    import numpy as np
+    pts_arr = np.array(pts, dtype=np.float64)
+    centered = pts_arr - np.array([cx, cy])
+
+    # 协方差矩阵
+    cov = np.cov(centered.T)
+    eigenvalues, eigenvectors = np.linalg.eigh(cov)
+
+    # 主轴方向（最大特征值对应的特征向量）
+    major_axis = eigenvectors[:, np.argmax(eigenvalues)]
+    minor_axis = eigenvectors[:, np.argmin(eigenvalues)]
+
+    # 尝试多个对称轴方向，找最佳的
+    best_axis = None
+    best_score = 0
+
+    # 候选轴：主轴、副轴、以及偏移几个角度
+    for angle_offset in range(-10, 11, 5):
+        angle = math.atan2(major_axis[1], major_axis[0]) + math.radians(angle_offset)
+        axis_dir = (math.cos(angle), math.sin(angle))
+        score = _evaluate_symmetry(pts, cx, cy, axis_dir)
+        if score > best_score:
+            best_score = score
+            best_axis = axis_dir
+
+    # 如果对称性足够好，则矫正
+    if best_score < (1 - tolerance):
+        return shape
+
+    # 沿对称轴镜像矫正
+    new_pts = []
+    for px, py in pts:
+        # 点到轴的投影
+        dx = px - cx
+        dy = py - cy
+        axis_dot = dx * best_axis[0] + dy * best_axis[1]
+        # 轴上的投影点
+        proj_x = cx + axis_dot * best_axis[0]
+        proj_y = cy + axis_dot * best_axis[1]
+        # 镜像点
+        mirror_x = 2 * proj_x - px
+        mirror_y = 2 * proj_y - py
+
+        # 找镜像点在原列表中最近的点，取平均
+        # 简化：直接用原点点和镜像点的平均
+        new_pts.append(((px + mirror_x) / 2, (py + mirror_y) / 2))
+
+    shape['points'] = new_pts
+
+    # 更新bbox
+    xs = [p[0] for p in new_pts]
+    ys = [p[1] for p in new_pts]
+    shape['bbox'] = (int(min(xs)), int(min(ys)), int(max(xs) - min(xs)), int(max(ys) - min(ys)))
+
+    return shape
+
+
+def _evaluate_symmetry(pts, cx, cy, axis_dir):
+    """
+    评估形状沿某轴的对称性程度
+
+    返回: 0-1，1表示完全对称
+    """
+    if len(pts) < 3:
+        return 0
+
+    total_dist = 0
+    matched = 0
+
+    for px, py in pts:
+        dx = px - cx
+        dy = py - cy
+        axis_dot = dx * axis_dir[0] + dy * axis_dir[1]
+        proj_x = cx + axis_dot * axis_dir[0]
+        proj_y = cy + axis_dot * axis_dir[1]
+        mirror_x = 2 * proj_x - px
+        mirror_y = 2 * proj_y - py
+
+        # 找最近的点
+        min_dist = float('inf')
+        for qx, qy in pts:
+            d = math.hypot(mirror_x - qx, mirror_y - qy)
+            if d < min_dist:
+                min_dist = d
+
+        total_dist += min_dist
+        # 如果镜像点附近有点，则认为匹配
+        shape_size = max(1, math.hypot(
+            max(p[0] for p in pts) - min(p[0] for p in pts),
+            max(p[1] for p in pts) - min(p[1] for p in pts)
+        ))
+        if min_dist < shape_size * 0.05:
+            matched += 1
+
+    return matched / len(pts)
+
+
 def _deduplicate_shapes(shapes, overlap_threshold=0.8):
     """
     去除高度重叠的形状
@@ -2726,6 +2954,8 @@ def convert_geo_to_wsd(input_path, wsd_path,
                        detect_symmetry=True,
                        symmetry_threshold=0.7,
                        show_symmetry_axes=False,
+                       symmetry_correction=True,
+                       right_angle_correction=True,
                        progress_cb=None):
     """
     几何转换：识别图片中的几何图形并转换为WSD
@@ -2758,6 +2988,8 @@ def convert_geo_to_wsd(input_path, wsd_path,
         detect_symmetry: 是否检测对称性
         symmetry_threshold: 对称性检测阈值 (0~1)
         show_symmetry_axes: 是否在WSD中绘制对称轴/对称中心（辅助线）
+        symmetry_correction: 是否启用对称性矫正（默认开启）
+        right_angle_correction: 是否启用直角矫正（默认开启）
     """
     import traceback
 
@@ -2786,6 +3018,16 @@ def convert_geo_to_wsd(input_path, wsd_path,
 
     if progress_cb:
         progress_cb(f"检测到 {len(shapes)} 个形状", 20)
+
+    # 步骤1.5：形状矫正（直角、对称性）
+    if symmetry_correction or right_angle_correction:
+        shapes = _step("形状矫正", lambda: correct_shapes(
+            shapes,
+            symmetry_correction=symmetry_correction,
+            right_angle_correction=right_angle_correction,
+        ))
+        if progress_cb:
+            progress_cb(f"形状矫正完成", 25)
 
     # 判断是否为filled模式（检测到的形状带有color字段）
     is_filled = shapes and 'color' in shapes[0]
@@ -3031,6 +3273,8 @@ def convert_geo_to_wsd_multi(input_files, output_path, **kwargs):
     detect_symmetry = kwargs.get('detect_symmetry', True)
     symmetry_threshold = kwargs.get('symmetry_threshold', 0.7)
     show_symmetry_axes = kwargs.get('show_symmetry_axes', False)
+    symmetry_correction = kwargs.get('symmetry_correction', True)
+    right_angle_correction = kwargs.get('right_angle_correction', True)
 
     all_shapes_data = []
     total_files = len(input_files)
@@ -3060,6 +3304,14 @@ def convert_geo_to_wsd_multi(input_files, output_path, **kwargs):
 
         if not shapes:
             continue
+
+        # 形状矫正
+        if symmetry_correction or right_angle_correction:
+            shapes = correct_shapes(
+                shapes,
+                symmetry_correction=symmetry_correction,
+                right_angle_correction=right_angle_correction,
+            )
 
         # 判断是否为filled模式
         is_filled = shapes and 'color' in shapes[0]
