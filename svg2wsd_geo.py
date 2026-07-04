@@ -2110,6 +2110,26 @@ def _correct_star_symmetry(shape, max_order=12):
         perfect_pts.append(perfect_outer[i])
         perfect_pts.append(perfect_inner[i])
 
+    # 确定原始缠绕方向（顺时针/逆时针）
+    orig_signed = 0
+    for i in range(n):
+        x1, y1 = pts[i]
+        x2, y2 = pts[(i + 1) % n]
+        orig_signed += (x2 - x1) * (y2 + y1)
+    orig_clockwise = orig_signed > 0
+
+    # 计算完美点集的缠绕方向
+    perfect_signed = 0
+    for i in range(n):
+        x1, y1 = perfect_pts[i]
+        x2, y2 = perfect_pts[(i + 1) % n]
+        perfect_signed += (x2 - x1) * (y2 + y1)
+    perfect_clockwise = perfect_signed > 0
+
+    # 如果方向不一致，反转完美点集顺序
+    if orig_clockwise != perfect_clockwise:
+        perfect_pts = list(reversed(perfect_pts))
+
     # 找到完美点集与原始点集的最佳对齐（循环偏移）
     best_offset = 0
     best_total_dist = float('inf')
@@ -2199,13 +2219,46 @@ def _correct_rectangle_right_angles(shape, angle_tolerance=15):
     box = cv2.boxPoints(rect)
     new_pts = [(float(p[0]), float(p[1])) for p in box]
 
-    # 确保顶点顺序与原顺序一致（顺时针或逆时针）
-    # 简单处理：按极角排序
+    # 确定原始缠绕方向（顺时针/逆时针）
+    orig_signed = 0
+    for j in range(len(pts)):
+        x1, y1 = pts[j]
+        x2, y2 = pts[(j + 1) % len(pts)]
+        orig_signed += (x2 - x1) * (y2 + y1)
+    orig_clockwise = orig_signed > 0
+
+    # 按极角排序（默认逆时针）
     cx = sum(p[0] for p in new_pts) / 4
     cy = sum(p[1] for p in new_pts) / 4
     new_pts.sort(key=lambda p: math.atan2(p[1] - cy, p[0] - cx))
 
-    shape['points'] = new_pts
+    # 如果原始是顺时针，反转顺序
+    if orig_clockwise:
+        new_pts = list(reversed(new_pts))
+
+    # 找到与原始点最佳对齐的起始点（循环偏移）
+    best_offset = 0
+    best_total_dist = float('inf')
+    for offset in range(4):
+        total_dist = 0
+        for j in range(4):
+            orig_idx = (j + offset) % 4
+            d = math.hypot(
+                new_pts[j][0] - pts[orig_idx][0],
+                new_pts[j][1] - pts[orig_idx][1],
+            )
+            total_dist += d
+        if total_dist < best_total_dist:
+            best_total_dist = total_dist
+            best_offset = offset
+
+    # 按最佳偏移重新排列
+    final_pts = [None] * 4
+    for j in range(4):
+        orig_idx = (j + best_offset) % 4
+        final_pts[orig_idx] = new_pts[j]
+
+    shape['points'] = final_pts
     shape['type'] = SHAPE_RECTANGLE
 
     # 更新bbox

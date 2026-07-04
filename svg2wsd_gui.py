@@ -1034,8 +1034,8 @@ class Image2WSDApp:
                 canvas.create_line(flat, fill=line_color, width=2, capstyle='round', joinstyle='round')
             elif is_geo and is_geo_filled:
                 # 几何填充模式：用填充多边形绘制（按面积从大到小，先画大的）
-                poly = subpath_to_polygon(sp, samples_per_seg=8)
-                pts = [(x*scale+ox, y*scale+oy) for x, y in poly]
+                # 几何形状是直线点，不是贝塞尔曲线，直接使用
+                pts = [(x*scale+ox, y*scale+oy) for x, y in sp]
                 flat = [coord for pt in pts for coord in pt]
                 if no_fill:
                     # 无色模式：显示黑色轮廓
@@ -1171,8 +1171,8 @@ class Image2WSDApp:
                 canvas.create_line(flat, fill=line_color, width=2, capstyle='round', joinstyle='round')
             elif is_geo and is_geo_filled:
                 # 几何填充模式：用填充多边形绘制
-                poly = subpath_to_polygon(wsd_sp, samples_per_seg=8)
-                pts = [(x*dscale+dox, y*dscale+doy) for x, y in poly]
+                # 几何形状是直线点，不是贝塞尔曲线，直接使用
+                pts = [(x*dscale+dox, y*dscale+doy) for x, y in wsd_sp]
                 flat = [coord for pt in pts for coord in pt]
                 if no_fill:
                     # 无色模式：显示黑色轮廓
