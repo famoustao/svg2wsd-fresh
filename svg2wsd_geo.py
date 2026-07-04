@@ -1032,14 +1032,14 @@ def _contour_overlaps_hough_line(cnt_bbox, hough_lines, overlap_thresh=0.6):
     return False
 
 
-def detect_geometric_shapes(image_path, min_area=50, epsilon_ratio=0.02,
+def detect_geometric_shapes(image_path, min_area=50, epsilon_ratio=0.01,
                             circularity_threshold=0.85,
                             min_line_length=50,
                             line_threshold=30,
                             circle_param2=120,
                             use_hough=True,
                             mode='auto',
-                            max_colors=8,
+                            max_colors=16,
                             detect_symmetry=True,
                             symmetry_threshold=0.85):
     """
@@ -1515,9 +1515,9 @@ def _detect_image_mode(img_color):
     return 'line'
 
 
-def detect_filled_colored_shapes(img_color, min_area=50, epsilon_ratio=0.02,
+def detect_filled_colored_shapes(img_color, min_area=50, epsilon_ratio=0.01,
                                    circularity_threshold=0.85,
-                                   max_colors=8):
+                                   max_colors=16):
     """
     从彩色填充图片中检测几何形状（按颜色分割区域）
 
@@ -1553,7 +1553,7 @@ def detect_filled_colored_shapes(img_color, min_area=50, epsilon_ratio=0.02,
     pixels_lab = img_lab.reshape(-1, 3).astype(np.float32)
     criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 0.5)
     _, labels, centers_lab = cv2.kmeans(
-        pixels_lab, max_colors, None, criteria, 5, cv2.KMEANS_PP_CENTERS
+        pixels_lab, max_colors, None, criteria, 10, cv2.KMEANS_PP_CENTERS
     )
 
     # 将LAB聚类中心转换回BGR，用于初始颜色参考
@@ -1642,8 +1642,32 @@ def detect_filled_colored_shapes(img_color, min_area=50, epsilon_ratio=0.02,
             pts = [(float(p[0][0]), float(p[0][1])) for p in approx]
             n = len(pts)
 
-            # 少于3个点的轮廓不是有效填充形状（可能是边缘细线）
+            # 少于3个点的轮廓：可能是细长线条
             if n < 3:
+                # 如果是2个点的轮廓，说明近似后是一条直线，作为线条形状保留
+                if n == 2 and cw > 0 and ch > 0 and area >= min_area:
+                    # 计算填充率验证是否为线条（填充率低说明是细长的）
+                    fill_ratio = area / max(1, cw * ch)
+                    if fill_ratio < 0.3:
+                        # 作为线条形状
+                        length = math.hypot(pts[1][0] - pts[0][0], pts[1][1] - pts[0][1])
+                        hex_color = f'#{color_bgr[2]:02x}{color_bgr[1]:02x}{color_bgr[0]:02x}'
+                        # 估算线宽：面积/长度*2（对于有宽度的线条）
+                        line_width = area / max(1, length) * 2 if length > 0 else 5
+                        shape = {
+                            'type': SHAPE_LINE,
+                            'points': pts,
+                            'area': float(length),  # 存储长度
+                            'line_area': float(area),  # 存储原始面积
+                            'bbox': bbox,
+                            'color': hex_color,
+                            'color_bgr': color_bgr,
+                            'is_inner': False,
+                            'is_thin_line': True,
+                            'fill_ratio': fill_ratio,
+                            'border_width': line_width,  # 线宽
+                        }
+                        shapes.append(shape)
                 continue
 
             # 跳过长宽比极端的细长线条（边缘抗锯齿产生的）
@@ -1742,13 +1766,72 @@ def detect_filled_colored_shapes(img_color, min_area=50, epsilon_ratio=0.02,
             else:
                 shape_type = SHAPE_POLYGON
 
+            # 层次信息：判断是外层还是内层
+            # hierarchy[i] = [Next, Previous, First_Child, Parent]
+            child_idx = hierarchy[i][2]
+            parent = hierarchy[i][3]
+            is_inner = (parent != -1)  # 有父轮廓说明是内层（孔）
+
             # BGR转RGB hex color
             hex_color = f'#{color_bgr[2]:02x}{color_bgr[1]:02x}{color_bgr[0]:02x}'
 
-            # 层次信息：判断是外层还是内层
-            # hierarchy[i] = [Next, Previous, First_Child, Parent]
-            parent = hierarchy[i][3]
-            is_inner = (parent != -1)  # 有父轮廓说明是内层（孔）
+            # 检测空心边框：如果外轮廓有一个形状相似的内轮廓，且面积接近
+            # 说明这是一个有宽度的边框，而不是实心填充
+            is_border = False
+            border_width = 0
+            if child_idx >= 0 and not is_inner:
+                child_cnt = contours[child_idx]
+                child_area = cv2.contourArea(child_cnt)
+                # 内轮廓面积占外轮廓的比例很高（>70%），说明是细边框
+                if child_area > 0 and area > 0:
+                    area_ratio = child_area / area
+                    if area_ratio > 0.7:
+                        # 进一步验证：内轮廓和外轮廓形状相似
+                        # 计算近似后的顶点数
+                        epsilon_inner = epsilon_ratio * cv2.arcLength(child_cnt, True)
+                        approx_inner = cv2.approxPolyDP(child_cnt, epsilon_inner, True)
+                        n_inner = len(approx_inner)
+                        # 顶点数接近说明形状相似
+                        if abs(n - n_inner) <= 1:
+                            is_border = True
+                            # 估算边框宽度
+                            outer_perim = cv2.arcLength(cnt, True)
+                            if outer_perim > 0:
+                                border_width = (area - child_area) / outer_perim * 2
+
+            # 如果是空心边框，作为线条/边框处理（用外轮廓的点）
+            if is_border and n >= 3:
+                hex_color = f'#{color_bgr[2]:02x}{color_bgr[1]:02x}{color_bgr[0]:02x}'
+                shape = {
+                    'type': shape_type,
+                    'points': pts,
+                    'area': float(area),
+                    'bbox': bbox,
+                    'color': hex_color,
+                    'color_bgr': color_bgr,
+                    'is_inner': is_inner,
+                    'is_border': True,
+                    'border_width': border_width,
+                }
+                shape.update(extra)
+                shapes.append(shape)
+                # 标记子轮廓已处理，跳过
+                # 注意：子轮廓会在后续循环中被is_inner过滤掉
+                continue
+
+            # 计算填充率：面积 / bbox面积
+            # 填充率低说明是细长的边框/线条，而不是实心填充
+            bbox_area = cw * ch
+            fill_ratio = area / max(1, bbox_area)
+
+            # 如果填充率很低（< 0.15），也认为是边框性质的形状
+            # （即使没有子轮廓，也可能是因为内部是其他颜色）
+            if not is_border and fill_ratio < 0.15 and n >= 3 and not is_inner:
+                is_border = True
+                # 估算边框宽度（用面积除以周长）
+                perimeter = cv2.arcLength(cnt, True)
+                if perimeter > 0:
+                    border_width = area / perimeter * 2
 
             shape = {
                 'type': shape_type,
@@ -1758,6 +1841,9 @@ def detect_filled_colored_shapes(img_color, min_area=50, epsilon_ratio=0.02,
                 'color': hex_color,
                 'color_bgr': color_bgr,
                 'is_inner': is_inner,  # 是否是内层轮廓（孔）
+                'is_border': is_border,
+                'border_width': border_width,
+                'fill_ratio': fill_ratio,
             }
             shape.update(extra)
             shapes.append(shape)
@@ -1775,6 +1861,28 @@ def detect_filled_colored_shapes(img_color, min_area=50, epsilon_ratio=0.02,
     if len(shapes) > 1:
         shapes = _merge_similar_color_shapes(shapes)
 
+    # ========== 步骤3.6：过滤文字/数字形状 ==========
+    # 图片中的标注文字（字母、数字等）不应作为几何形状
+    shapes = _filter_text_shapes(shapes, img_size=(w, h))
+
+    # ========== 步骤3.7：合并边框形状 ==========
+    # 同一颜色的边框形状如果彼此靠近，可能是同一个边框被分割
+    if len(shapes) > 1:
+        # 先检测并拆分交叉形状（如沙漏形的交叉对角线）
+        shapes = _detect_and_split_cross_shapes(shapes)
+        # 然后合并边框形状
+        shapes = _merge_border_shapes(shapes)
+
+    # ========== 步骤3.75：连接断裂的直线段 ==========
+    # 同色同方向的线段如果端点靠近，连接成一条完整的线
+    if len(shapes) > 1:
+        shapes = _connect_broken_lines(shapes)
+
+    # ========== 步骤3.8：检测细长填充区域为线条 ==========
+    # 有宽度的线条（如带箭头的直线）在filled模式下会被检测为填充多边形，
+    # 将其转换为线条形状
+    shapes = _detect_thin_lines_as_shapes(shapes)
+
     # ========== 步骤4：按面积排序（从大到小，先画大的再画小的覆盖） ==========
     shapes.sort(key=lambda s: s['area'], reverse=True)
 
@@ -1783,10 +1891,15 @@ def detect_filled_colored_shapes(img_color, min_area=50, epsilon_ratio=0.02,
 
 def _merge_similar_color_shapes(shapes, color_threshold=35):
     """
-    合并颜色相近的重叠/相邻形状
+    合并颜色相近的重叠/相邻形状（增强版，迭代合并）
 
     用于解决颜色量化导致的同色区域碎片化问题。
-    如果两个形状颜色相近且有重叠/相邻关系，则保留较大的那个。
+    如果两个形状颜色相近且有重叠/相邻关系，则合并为一个形状。
+    支持：
+      1. 重叠形状合并
+      2. 相邻/被线条分割的同色区域合并
+      3. 凸包合并（保留整体轮廓）
+      4. 迭代合并直到稳定
 
     参数:
         shapes: 形状列表
@@ -1796,50 +1909,945 @@ def _merge_similar_color_shapes(shapes, color_threshold=35):
         合并后的形状列表
     """
     import math
+    import cv2
+    import numpy as np
 
     if len(shapes) <= 1:
         return shapes
 
-    # 按面积从大到小排序
-    sorted_shapes = sorted(shapes, key=lambda s: s['area'], reverse=True)
-    kept = []
+    # 迭代合并直到没有新的合并发生
+    changed = True
+    result = list(shapes)
 
-    for s in sorted_shapes:
-        s_bgr = s.get('color_bgr')
-        if s_bgr is None:
-            kept.append(s)
+    while changed:
+        changed = False
+        # 按面积从大到小排序
+        result.sort(key=lambda s: s['area'], reverse=True)
+        kept = []
+
+        for s in result:
+            s_bgr = s.get('color_bgr')
+            if s_bgr is None:
+                kept.append(s)
+                continue
+
+            # 边框形状、线条形状不参与合并
+            if s.get('is_border', False) or s.get('is_thin_line', False):
+                kept.append(s)
+                continue
+
+            # 查找是否可以合并到已保留的形状中
+            merged = False
+            for k in kept:
+                k_bgr = k.get('color_bgr')
+                if k_bgr is None:
+                    continue
+
+                # 边框形状、线条形状不参与合并
+                if k.get('is_border', False) or k.get('is_thin_line', False):
+                    continue
+
+                # 检查颜色是否相近
+                color_dist = math.sqrt(
+                    (s_bgr[0] - k_bgr[0]) ** 2 +
+                    (s_bgr[1] - k_bgr[1]) ** 2 +
+                    (s_bgr[2] - k_bgr[2]) ** 2
+                )
+                if color_dist > color_threshold:
+                    continue
+
+                # 检查重叠程度
+                overlap = _shapes_overlap(s, k)
+
+                # 检查是否相邻（bbox接近，在同一列/行排列）
+                is_adjacent = _shapes_are_adjacent(s, k)
+
+                # 如果有明显重叠、相邻、或小形状在大形状内部
+                if overlap > 0.05 or _shape_contains(k, s) or is_adjacent:
+                    # 合并两个形状（取凸包）
+                    _merge_two_shapes(k, s)
+                    merged = True
+                    changed = True
+                    break
+
+            if not merged:
+                kept.append(s)
+
+        result = kept
+
+    return result
+
+
+def _shapes_are_adjacent(s1, s2, gap_ratio=0.1):
+    """
+    判断两个形状是否相邻（被线条分割的同色区域通常是相邻的）
+
+    判定条件：
+      1. bbox在水平或垂直方向上有较大重叠
+      2. 两个bbox之间的间隙很小（相对于较小的尺寸）
+    """
+    x1, y1, w1, h1 = s1['bbox']
+    x2, y2, w2, h2 = s2['bbox']
+
+    min_dim = min(w1, h1, w2, h2)
+    max_gap = min_dim * gap_ratio
+
+    # 水平方向检查：y方向有重叠，x方向接近
+    y_overlap = min(y1 + h1, y2 + h2) - max(y1, y2)
+    if y_overlap > 0:
+        y_overlap_ratio = y_overlap / min(h1, h2)
+        x_gap = max(0, max(x1, x2) - min(x1 + w1, x2 + w2))
+        if y_overlap_ratio > 0.5 and x_gap <= max_gap:
+            return True
+
+    # 垂直方向检查：x方向有重叠，y方向接近
+    x_overlap = min(x1 + w1, x2 + w2) - max(x1, x2)
+    if x_overlap > 0:
+        x_overlap_ratio = x_overlap / min(w1, w2)
+        y_gap = max(0, max(y1, y2) - min(y1 + h1, y2 + h2))
+        if x_overlap_ratio > 0.5 and y_gap <= max_gap:
+            return True
+
+    return False
+
+
+def _merge_two_shapes(target_shape, source_shape):
+    """
+    将source_shape合并到target_shape中（取所有点的凸包）
+    """
+    import cv2
+    import numpy as np
+
+    pts1 = target_shape.get('points', [])
+    pts2 = source_shape.get('points', [])
+
+    if not pts1:
+        target_shape['points'] = pts2
+        target_shape['area'] = source_shape.get('area', 0)
+        target_shape['bbox'] = source_shape.get('bbox', (0, 0, 0, 0))
+        return
+
+    if not pts2:
+        return
+
+    # 合并所有点
+    all_pts = pts1 + pts2
+    all_pts_np = np.array(all_pts, dtype=np.float32).reshape(-1, 1, 2)
+
+    # 计算凸包
+    hull = cv2.convexHull(all_pts_np)
+    hull_pts = [(float(p[0][0]), float(p[0][1])) for p in hull]
+
+    # 更新目标形状
+    target_shape['points'] = hull_pts
+    target_shape['area'] = target_shape.get('area', 0) + source_shape.get('area', 0)
+
+    # 更新bbox
+    x1, y1, w1, h1 = target_shape['bbox']
+    x2, y2, w2, h2 = source_shape['bbox']
+    nx = min(x1, x2)
+    ny = min(y1, y2)
+    nw = max(x1 + w1, x2 + w2) - nx
+    nh = max(y1 + h1, y2 + h2) - ny
+    target_shape['bbox'] = (int(nx), int(ny), int(nw), int(nh))
+
+    # 重新分类形状类型
+    n = len(hull_pts)
+    if n == 3:
+        target_shape['type'] = SHAPE_TRIANGLE
+    elif n == 4:
+        target_shape['type'] = SHAPE_RECTANGLE
+    else:
+        target_shape['type'] = SHAPE_POLYGON
+
+
+def _get_shape_direction_at(pts, idx):
+    """
+    计算形状在指定点索引处的方向角（度数）
+
+    对于线段（2个点），方向就是线段的方向。
+    对于多边形，方向是该点前后边的平均方向。
+
+    参数:
+        pts: 点列表
+        idx: 点索引
+
+    返回:
+        方向角（0-360度）
+    """
+    import math
+
+    n = len(pts)
+    if n < 2:
+        return 0
+
+    if n == 2:
+        # 线段方向
+        dx = pts[1][0] - pts[0][0]
+        dy = pts[1][1] - pts[0][1]
+        angle = math.degrees(math.atan2(dy, dx))
+        if angle < 0:
+            angle += 360
+        return angle
+
+    # 多边形：取该点前后的边方向的平均
+    prev_idx = (idx - 1) % n
+    next_idx = (idx + 1) % n
+
+    # 前一条边的方向（指向该点）
+    dx1 = pts[idx][0] - pts[prev_idx][0]
+    dy1 = pts[idx][1] - pts[prev_idx][1]
+    angle1 = math.degrees(math.atan2(dy1, dx1))
+    if angle1 < 0:
+        angle1 += 360
+
+    # 后一条边的方向（离开该点）
+    dx2 = pts[next_idx][0] - pts[idx][0]
+    dy2 = pts[next_idx][1] - pts[idx][1]
+    angle2 = math.degrees(math.atan2(dy2, dx2))
+    if angle2 < 0:
+        angle2 += 360
+
+    # 取平均方向（处理角度环绕问题）
+    if abs(angle1 - angle2) > 180:
+        if angle1 < angle2:
+            angle1 += 360
+        else:
+            angle2 += 360
+
+    avg_angle = (angle1 + angle2) / 2
+    if avg_angle >= 360:
+        avg_angle -= 360
+
+    return avg_angle
+
+
+def _merge_border_shapes(shapes, color_threshold=35):
+    """
+    合并相邻/连接的边框形状（智能版）
+
+    边框形状（is_border=True或is_thin_line=True）如果颜色相同且彼此连接，
+    可能是同一个边框被线条分割成了多段，需要合并。
+
+    合并策略：
+    1. 端点相连：两个线段的端点距离很近（< 边框宽度*3）
+    2. 方向一致：两条线段的方向角相差不大（< 30度）
+    3. 不在端点处相连但方向相同的平行线不合并
+    4. 迭代合并直到稳定
+
+    参数:
+        shapes: 形状列表
+        color_threshold: 颜色相似度阈值
+
+    返回:
+        合并后的形状列表
+    """
+    import math
+    import cv2
+    import numpy as np
+
+    # 分离边框/线条形状和其他形状
+    border_shapes = [s for s in shapes if s.get('is_border', False) or s.get('is_thin_line', False)]
+    other_shapes = [s for s in shapes if not s.get('is_border', False) and not s.get('is_thin_line', False)]
+
+    if len(border_shapes) <= 1:
+        return shapes
+
+    # 迭代合并边框形状
+    changed = True
+    result = list(border_shapes)
+
+    while changed:
+        changed = False
+        result.sort(key=lambda s: s['area'], reverse=True)
+        kept = []
+
+        for s in result:
+            s_bgr = s.get('color_bgr')
+            if s_bgr is None:
+                kept.append(s)
+                continue
+
+            s_pts = s.get('points', [])
+            s_bw = s.get('border_width', 0)
+            # 如果没有边框宽度，尝试估算
+            if s_bw == 0 and len(s_pts) == 2:
+                s_len = math.hypot(s_pts[1][0] - s_pts[0][0], s_pts[1][1] - s_pts[0][1])
+                if s_len > 0:
+                    s_bw = s['area'] / s_len * 2
+
+            merged = False
+            for k in kept:
+                k_bgr = k.get('color_bgr')
+                if k_bgr is None:
+                    continue
+
+                # 检查颜色是否相近
+                color_dist = math.sqrt(
+                    (s_bgr[0] - k_bgr[0]) ** 2 +
+                    (s_bgr[1] - k_bgr[1]) ** 2 +
+                    (s_bgr[2] - k_bgr[2]) ** 2
+                )
+                if color_dist > color_threshold:
+                    continue
+
+                k_pts = k.get('points', [])
+                k_bw = k.get('border_width', 0)
+                # 如果没有边框宽度，尝试估算
+                if k_bw == 0 and len(k_pts) == 2:
+                    k_len = math.hypot(k_pts[1][0] - k_pts[0][0], k_pts[1][1] - k_pts[0][1])
+                    if k_len > 0:
+                        k_bw = k['area'] / k_len * 2
+
+                avg_bw = max((s_bw + k_bw) / 2, 5)  # 至少5像素
+
+                # ===== 判断是否应该合并 =====
+                should_merge = False
+
+                # 计算所有点对之间的最小距离和最近点对
+                min_pt_dist = float('inf')
+                closest_pair = None
+                for si, sp in enumerate(s_pts):
+                    for ki, kp in enumerate(k_pts):
+                        d = math.hypot(sp[0] - kp[0], sp[1] - kp[1])
+                        if d < min_pt_dist:
+                            min_pt_dist = d
+                            closest_pair = (si, ki)
+
+                # 最小点距离小于边框宽度的3倍，认为是相连的
+                if min_pt_dist <= avg_bw * 3:
+                    # 检查最近点是否在端点附近（距离端点的距离 < 线宽*3）
+                    s_pt = s_pts[closest_pair[0]]
+                    k_pt = k_pts[closest_pair[1]]
+
+                    # 计算该点到s形状两个端点的距离
+                    s_end_dist1 = math.hypot(s_pt[0] - s_pts[0][0], s_pt[1] - s_pts[0][1])
+                    s_end_dist2 = math.hypot(s_pt[0] - s_pts[-1][0], s_pt[1] - s_pts[-1][1])
+                    s_near_end = min(s_end_dist1, s_end_dist2) <= avg_bw * 3
+
+                    # 计算该点到k形状两个端点的距离
+                    k_end_dist1 = math.hypot(k_pt[0] - k_pts[0][0], k_pt[1] - k_pts[0][1])
+                    k_end_dist2 = math.hypot(k_pt[0] - k_pts[-1][0], k_pt[1] - k_pts[-1][1])
+                    k_near_end = min(k_end_dist1, k_end_dist2) <= avg_bw * 3
+
+                    # 如果两个点都在端点附近，说明是在端点处相连，应该合并
+                    # （无论是同方向延伸还是拐角连接）
+                    if s_near_end and k_near_end:
+                        should_merge = True
+                    else:
+                        # 不是在端点处相连，可能是交叉线
+                        # 只有方向一致或相反时才合并（同一条直线的延续）
+                        s_dir = _get_shape_direction_at(s_pts, closest_pair[0])
+                        k_dir = _get_shape_direction_at(k_pts, closest_pair[1])
+
+                        # 方向差（角度）
+                        angle_diff = abs(s_dir - k_dir)
+                        if angle_diff > 180:
+                            angle_diff = 360 - angle_diff
+
+                        if angle_diff < 30 or angle_diff > 150:
+                            should_merge = True
+
+                if should_merge:
+                    # 合并边框形状
+                    # 如果两个都是线段（2个点）
+                    if len(s_pts) == 2 and len(k_pts) == 2:
+                        # 检查方向
+                        s_dir = _get_shape_direction_at(s_pts, 0)
+                        k_dir = _get_shape_direction_at(k_pts, 0)
+                        angle_diff = abs(s_dir - k_dir)
+                        if angle_diff > 180:
+                            angle_diff = 360 - angle_diff
+
+                        if angle_diff < 30 or angle_diff > 150:
+                            # 共线或方向相反：取最远的两个点作为新端点
+                            all_pts = s_pts + k_pts
+                            max_dist = 0
+                            p1, p2 = all_pts[0], all_pts[-1]
+                            for i in range(len(all_pts)):
+                                for j in range(i + 1, len(all_pts)):
+                                    d = math.hypot(all_pts[i][0] - all_pts[j][0],
+                                                  all_pts[i][1] - all_pts[j][1])
+                                    if d > max_dist:
+                                        max_dist = d
+                                        p1, p2 = all_pts[i], all_pts[j]
+                            k['points'] = [p1, p2]
+                            k['area'] = float(max_dist)
+                            k['type'] = SHAPE_LINE
+                            k['is_thin_line'] = True
+                            # 更新bbox
+                            min_x = min(p[0] for p in [p1, p2])
+                            max_x = max(p[0] for p in [p1, p2])
+                            min_y = min(p[1] for p in [p1, p2])
+                            max_y = max(p[1] for p in [p1, p2])
+                            k['bbox'] = (int(min_x), int(min_y), int(max_x - min_x), int(max_y - min_y))
+                        else:
+                            # 方向不同（拐角）：拼接成3个点的折线
+                            # 找到最近的端点对作为连接点
+                            min_dist = float('inf')
+                            best_pair = None
+                            for si in [0, 1]:
+                                for ki in [0, 1]:
+                                    d = math.hypot(s_pts[si][0] - k_pts[ki][0],
+                                                  s_pts[si][1] - k_pts[ki][1])
+                                    if d < min_dist:
+                                        min_dist = d
+                                        best_pair = (si, ki)
+
+                            if best_pair:
+                                s_idx, k_idx = best_pair
+                                # 构造折线：k的非连接端点 -> k的连接端点 -> s的非连接端点
+                                k_other = k_pts[1 - k_idx]
+                                s_other = s_pts[1 - s_idx]
+                                merged_pts = [k_other, k_pts[k_idx], s_other]
+                                k['points'] = merged_pts
+                                k['area'] = float(k['area'] + s['area'])
+                                k['type'] = SHAPE_POLYGON  # 3个点是折线，用polygon表示
+                                k['is_thin_line'] = False
+                                # 更新bbox
+                                all_x = [p[0] for p in merged_pts]
+                                all_y = [p[1] for p in merged_pts]
+                                min_x, max_x = min(all_x), max(all_x)
+                                min_y, max_y = min(all_y), max(all_y)
+                                k['bbox'] = (int(min_x), int(min_y),
+                                            int(max_x - min_x), int(max_y - min_y))
+                            else:
+                                # 后备：用凸包
+                                _merge_two_shapes(k, s)
+                    else:
+                        # 一个或多个是多边形，用端点拼接合并
+                        # 找到两个形状中最近的端点对
+                        s_end_indices = [0, len(s_pts) - 1]
+                        k_end_indices = [0, len(k_pts) - 1]
+                        
+                        min_end_dist = float('inf')
+                        best_pair = None  # (s_end_idx, k_end_idx)
+                        
+                        for si in s_end_indices:
+                            for ki in k_end_indices:
+                                d = math.hypot(s_pts[si][0] - k_pts[ki][0],
+                                              s_pts[si][1] - k_pts[ki][1])
+                                if d < min_end_dist:
+                                    min_end_dist = d
+                                    best_pair = (si, ki)
+                        
+                        if best_pair and min_end_dist <= avg_bw * 5:
+                            # 用端点拼接方式合并
+                            s_idx, k_idx = best_pair
+                            
+                            # 构造新的点序列
+                            # k的点在前，s的点在后，但要处理连接端
+                            if k_idx == 0:
+                                # k的起点是连接端，反转k的点
+                                k_pts_reversed = list(reversed(k_pts))
+                            else:
+                                k_pts_reversed = list(k_pts)
+                            
+                            if s_idx == len(s_pts) - 1:
+                                # s的终点是连接端，直接拼接
+                                s_pts_ordered = list(s_pts)
+                            else:
+                                # s的起点是连接端，反转s的点
+                                s_pts_ordered = list(reversed(s_pts))
+                            
+                            # 拼接：k的点 + s的点（去掉重复的连接点）
+                            merged_pts = k_pts_reversed[:-1] + s_pts_ordered
+                            
+                            # 更新k的属性
+                            k['points'] = merged_pts
+                            k['area'] = float(k['area'] + s['area'])
+                            
+                            # 判断是否闭合（首尾点是否接近）
+                            first_pt = merged_pts[0]
+                            last_pt = merged_pts[-1]
+                            close_dist = math.hypot(first_pt[0] - last_pt[0],
+                                                   first_pt[1] - last_pt[1])
+                            if close_dist <= avg_bw * 3:
+                                # 闭合形状，去掉最后一个点（和第一个点重复）
+                                k['points'] = merged_pts[:-1]
+                                k['type'] = SHAPE_POLYGON
+                                k['is_thin_line'] = False
+                            else:
+                                # 开放形状
+                                if len(merged_pts) == 2:
+                                    k['type'] = SHAPE_LINE
+                                    k['is_thin_line'] = True
+                                else:
+                                    k['type'] = SHAPE_POLYGON
+                                    k['is_thin_line'] = False
+                            
+                            # 更新bbox
+                            all_x = [p[0] for p in merged_pts]
+                            all_y = [p[1] for p in merged_pts]
+                            min_x, max_x = min(all_x), max(all_x)
+                            min_y, max_y = min(all_y), max(all_y)
+                            k['bbox'] = (int(min_x), int(min_y),
+                                        int(max_x - min_x), int(max_y - min_y))
+                        else:
+                            # 端点不接近，用凸包合并作为后备
+                            _merge_two_shapes(k, s)
+                    # 保持边框属性
+                    k['is_border'] = True
+                    k['is_thin_line'] = k.get('is_thin_line', False) or s.get('is_thin_line', False)
+                    k['border_width'] = max(s_bw, k_bw)
+                    k['fill_ratio'] = min(s.get('fill_ratio', 1), k.get('fill_ratio', 1))
+                    merged = True
+                    changed = True
+                    break
+
+            if not merged:
+                kept.append(s)
+
+        result = kept
+
+    return other_shapes + result
+
+
+def _connect_broken_lines(shapes, color_threshold=35):
+    """
+    连接断裂的直线段
+
+    对于同色的线条/边框形状，如果它们方向相同且端点靠近，
+    将它们连接成一条更长的线。
+
+    适用于：
+    - 被交叉点分割的对角线
+    - 被其他线条截断的直线
+
+    参数:
+        shapes: 形状列表
+        color_threshold: 颜色相似度阈值
+
+    返回:
+        连接后的形状列表
+    """
+    import math
+
+    # 分离线条/边框形状和其他形状
+    line_shapes = [s for s in shapes if s.get('is_border', False) or s.get('is_thin_line', False) or s.get('type') == 'line']
+    other_shapes = [s for s in shapes if not s.get('is_border', False) and not s.get('is_thin_line', False) and s.get('type') != 'line']
+
+    if len(line_shapes) <= 1:
+        return shapes
+
+    # 按颜色分组
+    color_groups = {}
+    for s in line_shapes:
+        color_bgr = s.get('color_bgr')
+        if color_bgr is None:
+            continue
+        # 找相似颜色的组
+        found = False
+        for key in color_groups:
+            dist = math.sqrt(
+                (color_bgr[0] - key[0]) ** 2 +
+                (color_bgr[1] - key[1]) ** 2 +
+                (color_bgr[2] - key[2]) ** 2
+            )
+            if dist <= color_threshold:
+                color_groups[key].append(s)
+                found = True
+                break
+        if not found:
+            color_groups[color_bgr] = [s]
+
+    # 对每个颜色组，尝试连接断裂的线段
+    result_lines = []
+    for color_key, group in color_groups.items():
+        if len(group) <= 1:
+            result_lines.extend(group)
             continue
 
-        # 查找是否可以合并到已保留的形状中
-        merged = False
-        for k in kept:
-            k_bgr = k.get('color_bgr')
-            if k_bgr is None:
-                continue
+        # 迭代连接线段
+        changed = True
+        lines = list(group)
 
-            # 检查颜色是否相近
-            color_dist = math.sqrt(
-                (s_bgr[0] - k_bgr[0]) ** 2 +
-                (s_bgr[1] - k_bgr[1]) ** 2 +
-                (s_bgr[2] - k_bgr[2]) ** 2
-            )
-            if color_dist > color_threshold:
-                continue
+        while changed:
+            changed = False
+            kept = []
 
-            # 检查重叠程度
-            overlap = _shapes_overlap(s, k)
+            for s in lines:
+                s_pts = s.get('points', [])
+                if len(s_pts) < 2:
+                    kept.append(s)
+                    continue
 
-            # 如果有明显重叠，或者小形状在大形状内部
-            # （对于渐变导致的碎片，它们通常是相邻/重叠的）
-            if overlap > 0.1 or _shape_contains(k, s):
-                # 小形状被大形状吸收（跳过小形状）
-                merged = True
-                break
+                s_dir = _get_shape_direction_at(s_pts, 0)
+                s_bw = s.get('border_width', 10)
 
-        if not merged:
-            kept.append(s)
+                merged = False
+                for k in kept:
+                    k_pts = k.get('points', [])
+                    if len(k_pts) < 2:
+                        continue
 
-    return kept
+                    k_dir = _get_shape_direction_at(k_pts, 0)
+
+                    # 检查方向是否一致（相差<30度或>150度，即同一直线方向）
+                    angle_diff = abs(s_dir - k_dir)
+                    if angle_diff > 180:
+                        angle_diff = 360 - angle_diff
+
+                    if angle_diff > 30 and angle_diff < 150:
+                        continue  # 方向差太多，不是同一直线
+
+                    # 检查端点距离
+                    s_endpoints = [s_pts[0], s_pts[-1]]
+                    k_endpoints = [k_pts[0], k_pts[-1]]
+
+                    min_endpoint_dist = float('inf')
+                    best_pair = None
+                    for si, sp in enumerate(s_endpoints):
+                        for ki, kp in enumerate(k_endpoints):
+                            d = math.hypot(sp[0] - kp[0], sp[1] - kp[1])
+                            if d < min_endpoint_dist:
+                                min_endpoint_dist = d
+                                best_pair = (si, ki)
+
+                    # 端点距离小于线宽的5倍，认为是同一条线的断裂
+                    avg_bw = max((s_bw + k.get('border_width', 10)) / 2, 5)
+                    if min_endpoint_dist <= avg_bw * 5:
+                        # 连接两条线段
+                        # 找到两个最远的点作为新线段的端点
+                        all_pts = s_pts + k_pts
+                        max_dist = 0
+                        p1, p2 = all_pts[0], all_pts[-1]
+                        for i in range(len(all_pts)):
+                            for j in range(i + 1, len(all_pts)):
+                                d = math.hypot(all_pts[i][0] - all_pts[j][0],
+                                              all_pts[i][1] - all_pts[j][1])
+                                if d > max_dist:
+                                    max_dist = d
+                                    p1, p2 = all_pts[i], all_pts[j]
+
+                        k['points'] = [p1, p2]
+                        k['area'] = float(max_dist)
+                        k['type'] = 'line'
+                        k['is_thin_line'] = True
+                        k['border_width'] = max(s_bw, k.get('border_width', 10))
+                        # 更新bbox
+                        min_x = min(p[0] for p in [p1, p2])
+                        max_x = max(p[0] for p in [p1, p2])
+                        min_y = min(p[1] for p in [p1, p2])
+                        max_y = max(p[1] for p in [p1, p2])
+                        k['bbox'] = (int(min_x), int(min_y), int(max_x - min_x), int(max_y - min_y))
+                        merged = True
+                        changed = True
+                        break
+
+                if not merged:
+                    kept.append(s)
+
+            lines = kept
+
+        result_lines.extend(lines)
+
+    return other_shapes + result_lines
+
+
+def _detect_and_split_cross_shapes(shapes, color_threshold=35):
+    """
+    检测并拆分交叉形状（如两条交叉的对角线形成的沙漏形）
+
+    当两条有宽度的直线交叉时，交叉区域会形成一个闭合的多边形（沙漏形/八角形）。
+    这个函数检测这种形状并将其拆分为两条交叉线。
+
+    判定条件：
+    - 形状有8个点（近似后）
+    - 填充率很低（< 0.15）
+    - 形状是边框性质的
+    - 可以找到两对相对的顶点，形成两条交叉线
+
+    参数:
+        shapes: 形状列表
+        color_threshold: 颜色相似度阈值
+
+    返回:
+        处理后的形状列表
+    """
+    import math
+    import cv2
+    import numpy as np
+
+    result = []
+
+    for s in shapes:
+        pts = s.get('points', [])
+        n = len(pts)
+
+        # 只处理8点的边框形状（可能是交叉线）
+        if n != 8 or not s.get('is_border', False):
+            result.append(s)
+            continue
+
+        # 检查填充率
+        fill_ratio = s.get('fill_ratio', 1)
+        if fill_ratio > 0.15:
+            result.append(s)
+            continue
+
+        # 尝试找到两条交叉线
+        # 方法：计算质心，找到距离质心最远的4个点（应该是沙漏的4个顶点）
+        cx = sum(p[0] for p in pts) / n
+        cy = sum(p[1] for p in pts) / n
+
+        # 按距离质心的距离排序
+        pts_with_dist = [(i, p, math.hypot(p[0] - cx, p[1] - cy)) for i, p in enumerate(pts)]
+        pts_with_dist.sort(key=lambda x: -x[2])
+
+        # 取最远的4个点作为交叉线的端点
+        if len(pts_with_dist) < 4:
+            result.append(s)
+            continue
+
+        # 最远的4个点的索引
+        far_indices = [p[0] for p in pts_with_dist[:4]]
+        far_points = [pts[i] for i in far_indices]
+
+        # 尝试配对：找到两对距离最远的点（即两条对角线）
+        max_dist = 0
+        pair1 = (0, 1)
+        for i in range(4):
+            for j in range(i + 1, 4):
+                d = math.hypot(far_points[i][0] - far_points[j][0],
+                              far_points[i][1] - far_points[j][1])
+                if d > max_dist:
+                    max_dist = d
+                    pair1 = (i, j)
+
+        # 剩下的两个点组成另一条对角线
+        pair2 = tuple(i for i in range(4) if i not in pair1)
+
+        if len(pair2) != 2:
+            result.append(s)
+            continue
+
+        line1_pts = [far_points[pair1[0]], far_points[pair1[1]]]
+        line2_pts = [far_points[pair2[0]], far_points[pair2[1]]]
+
+        # 计算两条线的长度
+        len1 = math.hypot(line1_pts[1][0] - line1_pts[0][0],
+                         line1_pts[1][1] - line1_pts[0][1])
+        len2 = math.hypot(line2_pts[1][0] - line2_pts[0][0],
+                         line2_pts[1][1] - line2_pts[0][1])
+
+        # 两条线长度应该相近（差距<30%）
+        if abs(len1 - len2) / max(len1, len2) > 0.3:
+            result.append(s)
+            continue
+
+        # 两条线应该大致在中心交叉（验证一下）
+        # 计算两条线的中点距离
+        mid1 = ((line1_pts[0][0] + line1_pts[1][0]) / 2,
+                (line1_pts[0][1] + line1_pts[1][1]) / 2)
+        mid2 = ((line2_pts[0][0] + line2_pts[1][0]) / 2,
+                (line2_pts[0][1] + line2_pts[1][1]) / 2)
+        mid_dist = math.hypot(mid1[0] - mid2[0], mid1[1] - mid2[1])
+        avg_len = (len1 + len2) / 2
+        if mid_dist > avg_len * 0.2:
+            result.append(s)
+            continue
+
+        # 确认是交叉形状，拆分为两条线
+        color_bgr = s.get('color_bgr', (0, 0, 0))
+        hex_color = s.get('color', '#000000')
+        bbox = s.get('bbox', (0, 0, 0, 0))
+        bw = s.get('border_width', 10)
+
+        # 第一条线
+        line1 = {
+            'type': 'line',
+            'points': line1_pts,
+            'area': float(len1),
+            'line_area': float(s.get('line_area', s['area'] / 2)),
+            'bbox': bbox,
+            'color': hex_color,
+            'color_bgr': color_bgr,
+            'is_inner': False,
+            'is_thin_line': True,
+            'is_border': True,
+            'border_width': bw,
+            'fill_ratio': fill_ratio,
+        }
+        result.append(line1)
+
+        # 第二条线
+        line2 = {
+            'type': 'line',
+            'points': line2_pts,
+            'area': float(len2),
+            'line_area': float(s.get('line_area', s['area'] / 2)),
+            'bbox': bbox,
+            'color': hex_color,
+            'color_bgr': color_bgr,
+            'is_inner': False,
+            'is_thin_line': True,
+            'is_border': True,
+            'border_width': bw,
+            'fill_ratio': fill_ratio,
+        }
+        result.append(line2)
+
+    return result
+
+
+def _filter_text_shapes(shapes, img_size=None):
+    """
+    过滤掉文字/数字/字符形状
+
+    文字特征：
+      1. 面积相对较小（相对于整个图像）
+      2. 形状复杂度高（点数/面积比大）
+      3. 颜色通常为深色（黑色/深灰）
+      4. 长宽比接近1（字符通常接近方形或略高）
+
+    参数:
+        shapes: 形状列表
+        img_size: (w, h) 图像尺寸，用于计算相对大小
+
+    返回:
+        过滤后的形状列表
+    """
+    import math
+
+    if not shapes:
+        return shapes
+
+    # 计算最大面积作为参考
+    max_area = max(s.get('area', 0) for s in shapes)
+    if max_area == 0:
+        return shapes
+
+    filtered = []
+    for s in shapes:
+        area = s.get('area', 0)
+        pts = s.get('points', [])
+        bbox = s.get('bbox', (0, 0, 0, 0))
+        x, y, w, h = bbox
+
+        # 太小的形状直接跳过
+        if area < 100:
+            continue
+
+        # 面积比例太小（小于最大面积的2%）
+        area_ratio = area / max_area
+        if area_ratio > 0.02:
+            filtered.append(s)
+            continue
+
+        # 计算复杂度：轮廓点数 / sqrt(面积)
+        # 文字通常有较高的复杂度（0.1以上）
+        complexity = len(pts) / max(1, math.sqrt(area))
+
+        # 长宽比：文字通常在0.3-3之间
+        aspect = max(w, h) / max(1, min(w, h))
+
+        # 颜色是否为深色（黑色文字）
+        color_bgr = s.get('color_bgr')
+        is_dark = False
+        if color_bgr:
+            brightness = sum(color_bgr) / 3
+            if brightness < 100:
+                is_dark = True
+
+        # 综合判定：小面积 + 高复杂度 + 深色 = 很可能是文字
+        if (area_ratio < 0.01 and complexity > 0.1 and is_dark and aspect < 4):
+            continue  # 过滤掉
+
+        # 另一种情况：非常小且点数多（复杂的小形状很可能是文字）
+        if area < 1500 and complexity > 0.15 and len(pts) >= 6:
+            continue
+
+        filtered.append(s)
+
+    return filtered
+
+
+def _detect_thin_lines_as_shapes(shapes, aspect_threshold=8):
+    """
+    检测细长的填充形状，将其转换为线条
+
+    对于有宽度的线条（如带箭头的直线、粗线条等），
+    它们在filled模式下会被检测为填充多边形，
+    但实际上应该被当作线条处理。
+
+    参数:
+        shapes: 形状列表
+        aspect_threshold: 长宽比阈值，超过此值认为是线条
+
+    返回:
+        转换后的形状列表（新增线条形状）
+    """
+    import math
+
+    if not shapes:
+        return shapes
+
+    line_shapes = []
+    other_shapes = []
+
+    for s in shapes:
+        bbox = s.get('bbox', (0, 0, 0, 0))
+        x, y, w, h = bbox
+        area = s.get('area', 0)
+
+        if w == 0 or h == 0 or area == 0:
+            other_shapes.append(s)
+            continue
+
+        aspect = max(w, h) / min(w, h)
+
+        # 计算填充率（面积/bbox面积）
+        fill_ratio = area / (w * h)
+
+        # 细长且填充率低 → 很可能是有宽度的线条
+        # 但如果填充率很高（接近1），可能是矩形而不是线条
+        if aspect >= aspect_threshold and fill_ratio < 0.5:
+            pts = s.get('points', [])
+            if len(pts) >= 2:
+                # 如果点数较少（<=4），说明是简单的直线段，可以简化为2点直线
+                # 如果点数较多（>4），说明有复杂形状（如箭头、波浪等），保留原样
+                if len(pts) <= 4:
+                    # 找到线条的两个端点（最长距离的两个点）
+                    max_dist = 0
+                    p1, p2 = pts[0], pts[-1]
+                    for i in range(len(pts)):
+                        for j in range(i + 1, len(pts)):
+                            d = math.hypot(pts[i][0] - pts[j][0], pts[i][1] - pts[j][1])
+                            if d > max_dist:
+                                max_dist = d
+                                p1, p2 = pts[i], pts[j]
+
+                    line_shape = {
+                        'type': SHAPE_LINE,
+                        'points': [p1, p2],
+                        'area': max_dist,  # 线条长度作为面积
+                        'bbox': bbox,
+                        'color': s.get('color', '#000000'),
+                        'color_bgr': s.get('color_bgr', (0, 0, 0)),
+                        'is_inner': False,
+                        'is_thin_line': True,
+                    }
+                    line_shapes.append(line_shape)
+                else:
+                    # 复杂形状（如带箭头的线），保留为多边形，但标记为边框性质
+                    s['is_border'] = True
+                    s['is_thin_line'] = False
+                    # 估算线宽
+                    length = 0
+                    for i in range(len(pts)):
+                        x1, y1 = pts[i]
+                        x2, y2 = pts[(i + 1) % len(pts)]
+                        length += math.hypot(x2 - x1, y2 - y1)
+                    if length > 0:
+                        s['border_width'] = area * 2 / length
+                    other_shapes.append(s)
+            else:
+                other_shapes.append(s)
+        else:
+            other_shapes.append(s)
+
+    return other_shapes + line_shapes
 
 
 def _shape_contains(big_shape, small_shape):
@@ -3541,6 +4549,10 @@ def _shape_to_gt_segs(shape, sx, sy, ox, oy, flip_v=False):
         if not pts:
             return [], False
         wsd_pts = [_transform(p[0], p[1]) for p in pts]
+        # 如果是边框形状（空心的），用线条段而不是填充多边形
+        is_border = shape.get('is_border', False)
+        if is_border:
+            return [make_line_seg(wsd_pts)], False
         return [make_gon_seg(wsd_pts)], True
 
     # 折线（开放）

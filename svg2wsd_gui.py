@@ -871,8 +871,15 @@ class Image2WSDApp:
                     all_x = [x for sp in subpaths for x, y in sp]
                     all_y = [y for sp in subpaths for x, y in sp]
                     bbox = (min(all_x), min(all_y), max(all_x), max(all_y))
+                    # 保存每个形状是否为边框/线条的信息
+                    is_border_list = [s.get('is_border', False) or s.get('is_thin_line', False) for s in shapes]
+                    is_line_list = [s.get('type', '') == 'line' for s in shapes]
                     # 保存is_filled标记到extra_info
-                    extra_info = {'is_geo_filled': is_filled}
+                    extra_info = {
+                        'is_geo_filled': is_filled,
+                        'is_border': is_border_list,
+                        'is_line_shape': is_line_list,
+                    }
                     result = (subpaths, colors, bbox, 'geometric', extra_info)
                     shape_info = [(s['type'], s['area']) for s in shapes]
                 else:
@@ -1159,9 +1166,13 @@ class Image2WSDApp:
 
         # 绘制
         is_geo_filled = extra_info.get('is_geo_filled', False)
+        is_border_list = extra_info.get('is_border', [False] * len(subpaths))
+        is_line_list = extra_info.get('is_line_shape', [False] * len(subpaths))
         for i, sp in enumerate(subpaths):
             wsd_sp = [(int(x*sx+ox), int(y*sy+oy)) for x, y in sp]
             color = fill_colors_hex[i] if i < len(fill_colors_hex) else '#cccccc'
+            is_border = is_border_list[i] if i < len(is_border_list) else False
+            is_line = is_line_list[i] if i < len(is_line_list) else False
 
             if is_geo and not is_geo_filled:
                 # 几何线条模式：用线条绘制
@@ -1170,21 +1181,27 @@ class Image2WSDApp:
                 line_color = color if color else '#3366ff'
                 canvas.create_line(flat, fill=line_color, width=2, capstyle='round', joinstyle='round')
             elif is_geo and is_geo_filled:
-                # 几何填充模式：用填充多边形绘制
-                # 几何形状是直线点，不是贝塞尔曲线，直接使用
+                # 几何填充模式
                 pts = [(x*dscale+dox, y*dscale+doy) for x, y in wsd_sp]
                 flat = [coord for pt in pts for coord in pt]
-                if no_fill:
-                    # 无色模式：显示黑色轮廓
-                    fill_color_val = ''
-                    outline_color = '#000000'
-                    outline_w = 1
+                # 边框形状或线条形状：用线条绘制
+                if is_border or is_line:
+                    line_color = color if color else '#000000'
+                    canvas.create_line(flat, fill=line_color, width=2,
+                                       capstyle='round', joinstyle='round')
                 else:
-                    fill_color_val = color
-                    outline_color = ''
-                    outline_w = 0
-                canvas.create_polygon(flat, fill=fill_color_val, outline=outline_color,
-                                      width=outline_w, smooth=False)
+                    # 实心填充形状
+                    if no_fill:
+                        # 无色模式：显示黑色轮廓
+                        fill_color_val = ''
+                        outline_color = '#000000'
+                        outline_w = 1
+                    else:
+                        fill_color_val = color
+                        outline_color = ''
+                        outline_w = 0
+                    canvas.create_polygon(flat, fill=fill_color_val, outline=outline_color,
+                                          width=outline_w, smooth=False)
             elif i < len(is_stroke_list) and is_stroke_list[i]:
                 # SVG描边路径：用线条绘制
                 poly = subpath_to_polygon(wsd_sp, samples_per_seg=6)
