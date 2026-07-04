@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 通用图像 → WSD 转换器
-支持格式: SVG, PNG, JPG, JPEG, BMP, GIF, WebP, TIFF, ICO, TikZ/LaTeX
+支持格式: SVG, PNG, JPG, JPEG, BMP, GIF, WebP, TIFF, ICO
 """
 
 __version__ = "3.2.0"
@@ -38,7 +38,6 @@ SVG_TY = 880.0
 # 支持的图片格式
 IMAGE_EXTENSIONS = {'.png', '.jpg', '.jpeg', '.bmp', '.gif', '.webp', '.tiff', '.tif', '.ico'}
 SVG_EXTENSIONS = {'.svg'}
-TIKZ_EXTENSIONS = {'.tikz', '.tex'}
 
 
 # ========== SVG路径解析 ==========
@@ -1336,9 +1335,9 @@ def parse_input_file(file_path, img_threshold=128, img_turdsize=2,
                      img_scale=0.5, img_smooth_level=1, img_dilate_size=2,
                      progress_cb=None):
     """
-    统一解析输入文件（SVG/图片/TikZ）
+    统一解析输入文件（SVG/图片）
     返回: (subpaths, colors, bbox, file_type, extra_info)
-    file_type: 'svg' 或 'image' 或 'tikz'
+    file_type: 'svg' 或 'image'
     extra_info: 额外信息字典，包含 is_stroke, stroke_widths 等
     """
     extra_info = {}
@@ -1348,13 +1347,6 @@ def parse_input_file(file_path, img_threshold=128, img_turdsize=2,
         extra_info['is_stroke'] = is_stroke
         extra_info['stroke_widths'] = stroke_widths
         return subpaths, colors, bbox, 'svg', extra_info
-    elif ext in TIKZ_EXTENSIONS:
-        if progress_cb:
-            progress_cb("解析 TikZ 代码...", 10)
-        subpaths, colors, bbox, _ = _parse_tikz_file(file_path)
-        extra_info['is_stroke'] = [False] * len(subpaths)
-        extra_info['stroke_widths'] = [1.0] * len(subpaths)
-        return subpaths, colors, bbox, 'tikz', extra_info
     elif ext in IMAGE_EXTENSIONS:
         if img_color:
             # 彩色矢量化模式
@@ -1377,20 +1369,6 @@ def parse_input_file(file_path, img_threshold=128, img_turdsize=2,
         extra_info['stroke_widths'] = [1.0] * len(subpaths)
         return subpaths, colors, bbox, 'image', extra_info
     else:
-        # 尝试当作TikZ处理 (检查内容是否包含 tikzpicture)
-        try:
-            with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
-                content = f.read()
-            if 'tikzpicture' in content or '\\draw' in content or '\\fill' in content:
-                if progress_cb:
-                    progress_cb("解析 TikZ 代码...", 10)
-                subpaths, colors, bbox, _ = _parse_tikz_file(file_path)
-                extra_info['is_stroke'] = [False] * len(subpaths)
-                extra_info['stroke_widths'] = [1.0] * len(subpaths)
-                return subpaths, colors, bbox, 'tikz', extra_info
-        except:
-            pass
-
         # 尝试当作SVG处理
         try:
             subpaths, colors, bbox, is_stroke, stroke_widths = _parse_svg_file(file_path)
@@ -1420,55 +1398,9 @@ def parse_input_file(file_path, img_threshold=128, img_turdsize=2,
                 raise ValueError(f"不支持的文件格式: {ext}")
 
 
-def _parse_tikz_file(file_path):
-    """
-    解析 TikZ 代码文件，直接转换为贝塞尔子路径和颜色
-    TikZ 坐标系 y 轴向上，需要翻转为 WSD 的 y 轴向下
-
-    返回: (subpaths, colors, bbox, shapes)
-        shapes: 形状信息列表，每个元素包含 type/color/data
-    """
-    from tikz_parser import TikZParser
-
-    with open(file_path, 'r', encoding='utf-8') as f:
-        code = f.read()
-
-    parser = TikZParser()
-    subpaths, colors, bbox = parser.parse(code)
-    shapes = parser.shapes
-
-    # 如果没解析到路径，返回空结果
-    if not subpaths:
-        return [], [], (0, 0, 100, 100), []
-
-    # y 轴翻转 (TikZ y向上 → WSD y向下)
-    min_y = bbox[1]
-    max_y = bbox[3]
-    mid_y = (min_y + max_y) / 2
-
-    flipped_subpaths = []
-    for sp in subpaths:
-        flipped = [(x, 2 * mid_y - y) for x, y in sp]
-        flipped_subpaths.append(flipped)
-
-    # 翻转 shapes 中的圆心 y 坐标
-    flipped_shapes = []
-    for shape in shapes:
-        new_shape = shape.copy()
-        new_shape['data'] = shape['data'].copy()
-        if shape['type'] == 'circle' and 'cy' in shape['data']:
-            new_shape['data']['cy'] = 2 * mid_y - shape['data']['cy']
-        flipped_shapes.append(new_shape)
-
-    # 重新计算 bbox (y 翻转后 min/max 互换)
-    flipped_bbox = (bbox[0], min_y, bbox[2], max_y)
-
-    return flipped_subpaths, colors, flipped_bbox, flipped_shapes
-
-
 def is_supported_image(filename):
     ext = os.path.splitext(filename)[1].lower()
-    return ext in IMAGE_EXTENSIONS or ext in SVG_EXTENSIONS or ext in TIKZ_EXTENSIONS
+    return ext in IMAGE_EXTENSIONS or ext in SVG_EXTENSIONS
 
 
 # ========== WSD记录构建 ==========
@@ -1753,11 +1685,6 @@ def convert_to_wsd(input_path, wsd_path, color_mode='rainbow',
     is_stroke_list = extra_info.get('is_stroke', [False] * len(all_subpaths))
     stroke_widths = extra_info.get('stroke_widths', [1.0] * len(all_subpaths))
 
-    # TikZ 额外获取形状信息（用于原生圆/圆弧）
-    tikz_shapes = None
-    if file_type == 'tikz':
-        _, _, _, tikz_shapes = _parse_tikz_file(input_path)
-
     if not all_subpaths:
         raise ValueError("文件中没有找到路径")
 
@@ -1847,13 +1774,7 @@ def convert_to_wsd(input_path, wsd_path, color_mode='rainbow',
         shape_type = 'bezier'
         shape_data = {}
         is_stroke_only = False  # 是否是纯描边路径
-        if tikz_shapes is not None and i < len(tikz_shapes):
-            shape = tikz_shapes[i]
-            shape_type = shape['type']
-            shape_data = shape['data']
-            # do_draw=False 表示这是纯描边的，被当作填充加入了列表
-            is_stroke_only = not shape.get('do_draw', True)
-        elif i < len(is_stroke_list) and is_stroke_list[i]:
+        if i < len(is_stroke_list) and is_stroke_list[i]:
             # SVG描边路径（fill=none但有stroke）
             is_stroke_only = True
 
