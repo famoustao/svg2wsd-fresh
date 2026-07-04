@@ -1642,6 +1642,16 @@ def detect_filled_colored_shapes(img_color, min_area=50, epsilon_ratio=0.02,
             pts = [(float(p[0][0]), float(p[0][1])) for p in approx]
             n = len(pts)
 
+            # 少于3个点的轮廓不是有效填充形状（可能是边缘细线）
+            if n < 3:
+                continue
+
+            # 跳过长宽比极端的细长线条（边缘抗锯齿产生的）
+            if cw > 0 and ch > 0:
+                aspect_ratio = max(cw, ch) / max(1, min(cw, ch))
+                if aspect_ratio > 50 and area < min_area * 10:
+                    continue
+
             # 跳过贴满整个图像边框的轮廓（真正的背景边框）
             bx, by, bw, bh = bbox
             touches_all_edges = (bx <= 1 and by <= 1 and

@@ -907,6 +907,12 @@ class Image2WSDApp:
                     self._hide_parse_progress()
                     if callback:
                         callback(True)
+                    # 几何模式下，如果检测到填充形状，自动切换到原色模式
+                    if self.convert_mode.get() == 'geometric':
+                        extra_info = result[4] if len(result) > 4 else {}
+                        is_filled = extra_info.get('is_geo_filled', False)
+                        if is_filled and self.color_mode.get() == 'none':
+                            self.color_mode.set('svg')
                     # 刷新预览
                     self._draw_orig_preview()
                     self._draw_wsd_preview()
