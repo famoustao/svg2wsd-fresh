@@ -2641,7 +2641,8 @@ def detect_geometric_shapes(image_path, min_area=50, epsilon_ratio=0.01,
                             max_colors=16,
                             detect_symmetry=True,
                             symmetry_threshold=0.85,
-                            enhanced_detection=True):
+                            enhanced_detection=True,
+                            num_circles=-1):
     """
     从图片中检测几何形状（支持线条图和彩色填充图）
 
@@ -2680,6 +2681,10 @@ def detect_geometric_shapes(image_path, min_area=50, epsilon_ratio=0.01,
         max_colors: 最大颜色数（仅filled模式）
         detect_symmetry: 是否检测对称性
         symmetry_threshold: 对称性检测阈值 (0~1)
+        num_circles: 圆形数量限制
+            -1 = 自动模式（默认保留2个置信度最高的圆）
+            0 = 不检测圆（图片中只有直线和多边形）
+            1~99 = 指定保留前N个置信度最高的圆
 
     返回:
         list of dict，每个 dict 包含 type, points, area, bbox 等字段
@@ -2706,6 +2711,7 @@ def detect_geometric_shapes(image_path, min_area=50, epsilon_ratio=0.01,
             img_color, min_area=min_area, epsilon_ratio=epsilon_ratio,
             circularity_threshold=circularity_threshold,
             max_colors=max_colors,
+            num_circles=num_circles,
         )
         # 对称性检测
         if detect_symmetry:
@@ -2733,7 +2739,7 @@ def detect_geometric_shapes(image_path, min_area=50, epsilon_ratio=0.01,
         skeleton = _skeletonize(binary)
 
     # ========== 步骤1：霍夫圆检测（多尺度，在原图灰度图上检测） ==========
-    if use_hough:
+    if use_hough and num_circles != 0:
         circles = _detect_circles_hough(
             gray, min_radius=max(10, min_area // 5), skeleton=skeleton,
             param2_base=circle_param2
@@ -2746,7 +2752,27 @@ def detect_geometric_shapes(image_path, min_area=50, epsilon_ratio=0.01,
                     valid_circles.append((float(c[0]), float(c[1]), float(c[2])))
             except (TypeError, ValueError, IndexError):
                 continue
+        
+        # 计算每个圆的置信度（基于半径大小和检测响应强度）
+        # 用 param2 反向估算：检测到的圆越多说明 param2 越低，置信度需要排序
+        # 这里用半径作为简单置信度（大的圆通常更重要）
+        circles_with_conf = []
         for cx, cy, r in valid_circles:
+            # 置信度：半径越大置信度越高，同时考虑轮廓完整性
+            confidence = r  # 简单用半径作为置信度排序依据
+            circles_with_conf.append((cx, cy, r, confidence))
+        
+        # 按置信度降序排序
+        circles_with_conf.sort(key=lambda x: x[3], reverse=True)
+        
+        # 确定保留数量
+        if num_circles == -1:
+            keep_count = min(2, len(circles_with_conf))  # 自动模式默认2个
+        else:
+            keep_count = min(num_circles, len(circles_with_conf))
+        
+        # 只保留前N个
+        for cx, cy, r, conf in circles_with_conf[:keep_count]:
             shape = {
                 'type': SHAPE_CIRCLE,
                 'center': (float(cx), float(cy)),
@@ -2755,6 +2781,7 @@ def detect_geometric_shapes(image_path, min_area=50, epsilon_ratio=0.01,
                 'area': math.pi * r * r,
                 'bbox': (int(cx - r), int(cy - r), int(2 * r), int(2 * r)),
                 'from_hough': True,
+                'confidence': conf,
             }
             shapes.append(shape)
             hough_circles.append(shape)
@@ -2892,48 +2919,53 @@ def detect_geometric_shapes(image_path, min_area=50, epsilon_ratio=0.01,
                     processed.add(i)
                     processed.add(child)
                     continue
-                (cx, cy), radius_outer = cv2.minEnclosingCircle(cnt)
-                (_, _), radius_inner = cv2.minEnclosingCircle(inner_cnt)
-                avg_radius = (radius_outer + radius_inner) / 2
-                # 检查圆度
-                circularity = area / (math.pi * radius_outer * radius_outer)
-                if circularity > circularity_threshold:
-                    # 圆形度高 → 完整圆（用最小二乘精化圆心和半径）
-                    shape_type = SHAPE_CIRCLE
-                    # 先用minEnclosingCircle做粗估计
-                    (cx0, cy0), r0 = cv2.minEnclosingCircle(cnt)
-                    # 用最小二乘精化（用中心线点，更准确）
-                    ls_pts = mid_pts if mid_pts else outer_pts
-                    ls_result = _fit_circle_least_squares(ls_pts)
-                    if ls_result is not None and ls_result[3] < 0.1:
-                        cx, cy, radius, _ = ls_result
-                    else:
-                        cx, cy = float(cx0), float(cy0)
-                        radius = avg_radius
-                    extra['center'] = (float(cx), float(cy))
-                    extra['radius'] = float(radius)
-                    extra['points'] = mid_pts
-                elif circularity >= 0.5 and circularity <= circularity_threshold:
-                    # 圆形度中等 → 尝试圆弧检测（使用中心线点，最小二乘拟合）
-                    arc_pts = mid_pts if mid_pts else outer_pts
-                    arc = _detect_arc_from_contour(
-                        arc_pts, area, bbox,
-                        circularity_min=0.5,
-                        circularity_max=circularity_threshold,
-                        angle_min_deg=30, angle_max_deg=330,
-                        error_tolerance=0.10
-                    )
-                    if arc is not None:
-                        shape_type = SHAPE_ARC
-                        extra['center'] = arc['center']
-                        extra['radius'] = arc['radius']
-                        extra['start_angle'] = arc['start_angle']
-                        extra['end_angle'] = arc['end_angle']
-                        extra['points'] = arc_pts
+                # 如果指定不检测圆（num_circles==0），跳过圆/圆弧判定，直接当多边形处理
+                if num_circles == 0:
+                    shape_type = SHAPE_POLYGON
+                    extra['points'] = mid_pts if mid_pts else outer_pts
+                else:
+                    (cx, cy), radius_outer = cv2.minEnclosingCircle(cnt)
+                    (_, _), radius_inner = cv2.minEnclosingCircle(inner_cnt)
+                    avg_radius = (radius_outer + radius_inner) / 2
+                    # 检查圆度
+                    circularity = area / (math.pi * radius_outer * radius_outer)
+                    if circularity > circularity_threshold:
+                        # 圆形度高 → 完整圆（用最小二乘精化圆心和半径）
+                        shape_type = SHAPE_CIRCLE
+                        # 先用minEnclosingCircle做粗估计
+                        (cx0, cy0), r0 = cv2.minEnclosingCircle(cnt)
+                        # 用最小二乘精化（用中心线点，更准确）
+                        ls_pts = mid_pts if mid_pts else outer_pts
+                        ls_result = _fit_circle_least_squares(ls_pts)
+                        if ls_result is not None and ls_result[3] < 0.1:
+                            cx, cy, radius, _ = ls_result
+                        else:
+                            cx, cy = float(cx0), float(cy0)
+                            radius = avg_radius
+                        extra['center'] = (float(cx), float(cy))
+                        extra['radius'] = float(radius)
+                        extra['points'] = mid_pts
+                    elif circularity >= 0.5 and circularity <= circularity_threshold:
+                        # 圆形度中等 → 尝试圆弧检测（使用中心线点，最小二乘拟合）
+                        arc_pts = mid_pts if mid_pts else outer_pts
+                        arc = _detect_arc_from_contour(
+                            arc_pts, area, bbox,
+                            circularity_min=0.5,
+                            circularity_max=circularity_threshold,
+                            angle_min_deg=30, angle_max_deg=330,
+                            error_tolerance=0.10
+                        )
+                        if arc is not None:
+                            shape_type = SHAPE_ARC
+                            extra['center'] = arc['center']
+                            extra['radius'] = arc['radius']
+                            extra['start_angle'] = arc['start_angle']
+                            extra['end_angle'] = arc['end_angle']
+                            extra['points'] = arc_pts
+                        else:
+                            extra['points'] = mid_pts if mid_pts else outer_pts
                     else:
                         extra['points'] = mid_pts if mid_pts else outer_pts
-                else:
-                    extra['points'] = mid_pts if mid_pts else outer_pts
             else:
                 extra['points'] = mid_pts if mid_pts else outer_pts
 
@@ -3016,36 +3048,41 @@ def detect_geometric_shapes(image_path, min_area=50, epsilon_ratio=0.01,
                     if use_hough and _contour_overlaps_hough_circle(bbox, hough_circles, 0.5):
                         processed.add(i)
                         continue
-                    (cx, cy), radius = cv2.minEnclosingCircle(cnt)
-                    circle_area = math.pi * radius * radius
-                    circularity = area / circle_area
-                    if circularity > circularity_threshold:
-                        shapes.append({
-                            'type': SHAPE_CIRCLE,
-                            'center': (float(cx), float(cy)),
-                            'radius': float(radius),
-                            'points': pts,
-                            'area': area,
-                            'bbox': bbox,
-                        })
-                        processed.add(i)
-                        continue
-                    elif circularity >= 0.5 and circularity <= circularity_threshold:
-                        # 圆形度中等 → 尝试圆弧检测
-                        # 使用原始轮廓点（而非近似点）进行三点拟合，精度更高
-                        raw_pts = [(float(p[0][0]), float(p[0][1])) for p in cnt]
-                        arc = _detect_arc_from_contour(
-                            raw_pts, area, bbox,
-                            circularity_min=0.5,
-                            circularity_max=circularity_threshold,
-                            angle_min_deg=30, angle_max_deg=330,
-                            error_tolerance=0.15
-                        )
-                        if arc is not None:
-                            arc['points'] = pts
-                            shapes.append(arc)
+                    # 如果指定不检测圆（num_circles==0），跳过圆/圆弧判定
+                    if num_circles == 0:
+                        # 当多边形处理，继续往下走
+                        pass
+                    else:
+                        (cx, cy), radius = cv2.minEnclosingCircle(cnt)
+                        circle_area = math.pi * radius * radius
+                        circularity = area / circle_area
+                        if circularity > circularity_threshold:
+                            shapes.append({
+                                'type': SHAPE_CIRCLE,
+                                'center': (float(cx), float(cy)),
+                                'radius': float(radius),
+                                'points': pts,
+                                'area': area,
+                                'bbox': bbox,
+                            })
                             processed.add(i)
                             continue
+                        elif circularity >= 0.5 and circularity <= circularity_threshold:
+                            # 圆形度中等 → 尝试圆弧检测
+                            # 使用原始轮廓点（而非近似点）进行三点拟合，精度更高
+                            raw_pts = [(float(p[0][0]), float(p[0][1])) for p in cnt]
+                            arc = _detect_arc_from_contour(
+                                raw_pts, area, bbox,
+                                circularity_min=0.5,
+                                circularity_max=circularity_threshold,
+                                angle_min_deg=30, angle_max_deg=330,
+                                error_tolerance=0.15
+                            )
+                            if arc is not None:
+                                arc['points'] = pts
+                                shapes.append(arc)
+                                processed.add(i)
+                                continue
 
                 # 多边形分类
                 if n == 3:
@@ -3078,6 +3115,26 @@ def detect_geometric_shapes(image_path, min_area=50, epsilon_ratio=0.01,
 
     # ========== 步骤5：最终去重 ==========
     shapes = _deduplicate_shapes(shapes)
+
+    # ========== 步骤5.5：圆数量限制 ==========
+    if num_circles != -1:
+        # 分离圆和非圆
+        circle_shapes = [s for s in shapes if s.get('type') == SHAPE_CIRCLE]
+        other_shapes = [s for s in shapes if s.get('type') != SHAPE_CIRCLE]
+        
+        if len(circle_shapes) > num_circles:
+            # 按置信度/半径排序，取前N个
+            def _circle_confidence(s):
+                # 优先用已有的confidence，否则用半径估算
+                if 'confidence' in s:
+                    return s['confidence']
+                # 用面积（半径平方）作为置信度代理
+                return s.get('area', 0)
+            
+            circle_shapes.sort(key=_circle_confidence, reverse=True)
+            circle_shapes = circle_shapes[:num_circles]
+        
+        shapes = other_shapes + circle_shapes
 
     # ========== 步骤6：对称性检测 ==========
     if detect_symmetry:
@@ -3140,7 +3197,8 @@ def _detect_image_mode(img_color):
 
 def detect_filled_colored_shapes(img_color, min_area=50, epsilon_ratio=0.01,
                                    circularity_threshold=0.85,
-                                   max_colors=16):
+                                   max_colors=16,
+                                   num_circles=-1):
     """
     从彩色填充图片中检测几何形状（按颜色分割区域）
 
@@ -3321,7 +3379,7 @@ def detect_filled_colored_shapes(img_color, min_area=50, epsilon_ratio=0.01,
                 dists.append(d)
 
             # ========== 圆形检测 ==========
-            if circularity > circularity_threshold and n > 6:
+            if circularity > circularity_threshold and n > 6 and num_circles != 0:
                 shape_type = SHAPE_CIRCLE
                 extra['center'] = (float(cx), float(cy))
                 extra['radius'] = float(radius)
@@ -3508,6 +3566,19 @@ def detect_filled_colored_shapes(img_color, min_area=50, epsilon_ratio=0.01,
 
     # ========== 步骤4：按面积排序（从大到小，先画大的再画小的覆盖） ==========
     shapes.sort(key=lambda s: s['area'], reverse=True)
+
+    # ========== 步骤4.5：圆数量限制 ==========
+    if num_circles != -1:
+        circle_shapes = [s for s in shapes if s.get('type') == SHAPE_CIRCLE]
+        other_shapes = [s for s in shapes if s.get('type') != SHAPE_CIRCLE]
+        
+        if len(circle_shapes) > num_circles:
+            circle_shapes.sort(key=lambda s: s.get('area', 0), reverse=True)
+            circle_shapes = circle_shapes[:num_circles]
+        
+        shapes = other_shapes + circle_shapes
+        # 重新排序
+        shapes.sort(key=lambda s: s['area'], reverse=True)
 
     return shapes
 
@@ -6434,6 +6505,7 @@ def convert_geo_to_wsd(input_path, wsd_path,
                        auto_label=True,
                        auto_label_min_confidence=0.2,
                        enhanced_detection=True,
+                       num_circles=-1,
                        progress_cb=None):
     """
     几何转换：识别图片中的几何图形并转换为WSD
@@ -6497,6 +6569,7 @@ def convert_geo_to_wsd(input_path, wsd_path,
         detect_symmetry=detect_symmetry,
         symmetry_threshold=symmetry_threshold,
         enhanced_detection=enhanced_detection,
+        num_circles=num_circles,
     ))
 
     if not shapes:

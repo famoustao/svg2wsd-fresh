@@ -138,6 +138,8 @@ class Image2WSDApp:
         self.geo_min_line_length = tk.IntVar(value=80)
         self.geo_line_threshold = tk.IntVar(value=30)
         self.geo_circle_sensitivity = tk.IntVar(value=50)
+        self.geo_num_circles_mode = tk.StringVar(value='auto')  # auto / manual / none
+        self.geo_num_circles = tk.IntVar(value=2)
         self.geo_symmetry_correction = tk.BooleanVar(value=True)
         self.geo_symmetry_type = tk.StringVar(value='auto')
         self.geo_right_angle_correction = tk.BooleanVar(value=True)
@@ -227,6 +229,22 @@ class Image2WSDApp:
         self.cs_scale, self.cs_val_label = _make_slider_row(
             self.geo_frame, "圆检测灵敏度:", self.geo_circle_sensitivity, 20, 100, 5, "{}", width=12,
             hint="越大越灵敏（可能识别出更多圆），越小越保守")
+
+        # 圆形数量
+        circ_row = ttk.Frame(self.geo_frame)
+        circ_row.pack(fill='x', padx=8, pady=(2, 1))
+        ttk.Label(circ_row, text="圆形数量:", width=12).pack(side='left')
+        circ_combo = ttk.Combobox(circ_row, textvariable=self.geo_num_circles_mode,
+                                  values=['自动(默认2个)', '指定数量', '无圆(仅直线)'],
+                                  width=14, state='readonly')
+        circ_combo.pack(side='left')
+        circ_combo.bind('<<ComboboxSelected>>', lambda e: self._on_geo_param_change())
+        self.geo_circle_count_spin = ttk.Spinbox(circ_row, from_=1, to=99, width=5,
+                                                  textvariable=self.geo_num_circles,
+                                                  command=self._on_geo_param_change)
+        self.geo_circle_count_spin.pack(side='left', padx=5)
+        self.geo_circle_count_spin.config(state='disabled')
+        circ_combo.bind('<<ComboboxSelected>>', self._on_circle_mode_change, add='+')
 
         # 矫正选项
         corr_row1 = ttk.Frame(self.geo_frame)
@@ -1368,6 +1386,26 @@ class Image2WSDApp:
             canvas.create_text(10, 10, text=f"PDF预览出错: {e}", anchor='nw', fill='red')
             self.tikz_status.set(f"PDF预览出错: {e}")
 
+    def _on_circle_mode_change(self, *args):
+        """圆形数量模式变化时启用/禁用数量输入框"""
+        mode = self.geo_num_circles_mode.get()
+        if mode == '指定数量':
+            self.geo_circle_count_spin.config(state='normal')
+        else:
+            self.geo_circle_count_spin.config(state='disabled')
+
+    def _get_num_circles_param(self):
+        """根据GUI设置获取num_circles参数值
+        返回: -1=自动(默认2个), 0=无圆, 1~99=指定数量
+        """
+        mode = self.geo_num_circles_mode.get()
+        if mode == '无圆(仅直线)':
+            return 0
+        elif mode == '指定数量':
+            return max(1, min(99, int(self.geo_num_circles.get())))
+        else:  # 自动
+            return -1
+
     def _on_geo_param_change(self, *args):
         """几何参数变化时更新预览（带防抖）"""
         # 更新数值标签
@@ -1737,6 +1775,7 @@ class Image2WSDApp:
                         min_line_length=self.geo_min_line_length.get(),
                         line_threshold=self.geo_line_threshold.get(),
                         circle_param2=circle_param2,
+                        num_circles=self._get_num_circles_param(),
                     )
                     if not shapes:
                         raise ValueError("未检测到几何形状，请调整最小面积参数")
@@ -2370,6 +2409,7 @@ class Image2WSDApp:
                         symmetry_correction=self.geo_symmetry_correction.get(),
                         symmetry_type=self.geo_symmetry_type.get(),
                         right_angle_correction=self.geo_right_angle_correction.get(),
+                        num_circles=self._get_num_circles_param(),
                         progress_cb=self._update_progress,
                     )
                 else:
@@ -2447,6 +2487,7 @@ class Image2WSDApp:
                         symmetry_correction=self.geo_symmetry_correction.get(),
                         symmetry_type=self.geo_symmetry_type.get(),
                         right_angle_correction=self.geo_right_angle_correction.get(),
+                        num_circles=self._get_num_circles_param(),
                         progress_cb=None,
                     )
                 else:
