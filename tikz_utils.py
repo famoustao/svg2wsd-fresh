@@ -874,6 +874,303 @@ def read_tikz_file(file_path):
 
 
 # ============================================================
+# 增强的 TeX 文件支持
+# ============================================================
+
+def extract_tex_preamble(tex_content):
+    """
+    从LaTeX文件中提取导言区内容（颜色定义、宏定义等）
+    
+    返回: dict with keys:
+        - color_defs: 颜色定义列表 [(name, value), ...]
+        - macro_defs: 宏定义列表
+        - preamble_text: 导言区完整文本
+    """
+    result = {
+        'color_defs': [],
+        'macro_defs': [],
+        'preamble_text': '',
+    }
+    
+    # 查找 \begin{document} 之前的内容作为导言区
+    doc_match = re.search(r'\\begin\{document\}', tex_content)
+    if doc_match:
+        preamble = tex_content[:doc_match.start()]
+    else:
+        preamble = tex_content
+    result['preamble_text'] = preamble
+    
+    # 提取颜色定义 \definecolor{name}{model}{value}
+    color_pattern = r'\\definecolor\{([^}]+)\}\{([^}]+)\}\{([^}]+)\}'
+    for m in re.finditer(color_pattern, preamble):
+        name = m.group(1)
+        model = m.group(2)
+        value = m.group(3)
+        result['color_defs'].append((name, model, value))
+    
+    # 提取 \newcommand 宏定义
+    macro_pattern = r'\\newcommand\{\\([^}]+)\}'
+    for m in re.finditer(macro_pattern, preamble):
+        result['macro_defs'].append(m.group(1))
+    
+    # 提取 \xdefinecolor, \colorlet 等
+    colorlet_pattern = r'\\colorlet\{([^}]+)\}\{([^}]+)\}'
+    for m in re.finditer(colorlet_pattern, preamble):
+        result['color_defs'].append((m.group(1), 'alias', m.group(2)))
+    
+    return result
+
+
+def extract_tikz_from_tex_enhanced(tex_content):
+    """
+    增强版：从LaTeX/TeX文件中提取所有 tikzpicture 环境及导言区信息
+    
+    返回: dict with keys:
+        - tikzpictures: TikZ代码列表
+        - preamble: 导言区信息字典
+        - count: tikzpicture 数量
+    """
+    tikz_codes = extract_tikz_from_tex(tex_content)
+    preamble = extract_tex_preamble(tex_content)
+    
+    return {
+        'tikzpictures': tikz_codes,
+        'preamble': preamble,
+        'count': len(tikz_codes),
+    }
+
+
+def read_tex_file_enhanced(file_path):
+    """
+    增强版：读取TeX文件，提取所有 tikzpicture 和导言区信息
+    
+    返回: (all_paths, info_dict)
+    """
+    with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+        content = f.read()
+    
+    info = extract_tikz_from_tex_enhanced(content)
+    tikz_codes = info['tikzpictures']
+    
+    all_paths = []
+    if tikz_codes:
+        for code in tikz_codes:
+            paths = parse_tikz_code(code)
+            all_paths.extend(paths)
+    else:
+        # 纯 tikz 代码
+        all_paths = parse_tikz_code(content)
+    
+    return all_paths, info
+
+
+# ============================================================
+# TikZ 节点提取（用于自动标注）
+# ============================================================
+
+class TikZNode:
+    """TikZ 节点信息"""
+    def __init__(self):
+        self.name = ''          # 节点名称 (name)
+        self.text = ''          # 节点文本内容
+        self.x = 0.0            # x坐标 (cm)
+        self.y = 0.0            # y坐标 (cm)
+        self.options = {}       # 选项字典
+        self.has_superscript = False  # 是否有上标
+        self.has_subscript = False    # 是否有下标
+        self.base_text = ''     # 基础文本（去掉上下标）
+        self.superscript = ''   # 上标文本
+        self.subscript = ''     # 下标文本
+
+
+def _parse_node_text(text):
+    """
+    解析节点文本，识别上标下标
+    
+    支持格式：
+    - A^1  -> base=A, sup=1
+    - A_1  -> base=A, sub=1
+    - A^{12}_{34} -> base=A, sup=12, sub=34
+    - x_i^2 -> base=x_i, sup=2 (或 base=x, sub=i, sup=2)
+    
+    返回: (base_text, superscript, subscript, has_sup, has_sub)
+    """
+    base = text
+    sup = ''
+    sub = ''
+    has_sup = False
+    has_sub = False
+    
+    # 先处理上标 ^
+    sup_match = re.search(r'\^(\{[^}]*\}|[a-zA-Z0-9])', base)
+    if sup_match:
+        sup_content = sup_match.group(1)
+        if sup_content.startswith('{') and sup_content.endswith('}'):
+            sup = sup_content[1:-1]
+        else:
+            sup = sup_content
+        base = base[:sup_match.start()] + base[sup_match.end():]
+        has_sup = True
+    
+    # 再处理下标 _
+    sub_match = re.search(r'_(\{[^}]*\}|[a-zA-Z0-9])', base)
+    if sub_match:
+        sub_content = sub_match.group(1)
+        if sub_content.startswith('{') and sub_content.endswith('}'):
+            sub = sub_content[1:-1]
+        else:
+            sub = sub_content
+        base = base[:sub_match.start()] + base[sub_match.end():]
+        has_sub = True
+    
+    return base, sup, sub, has_sup, has_sub
+
+
+def extract_tikz_nodes(tikz_code):
+    """
+    从TikZ代码中提取所有 \node 节点
+    
+    参数:
+        tikz_code: TikZ 代码字符串
+    
+    返回:
+        nodes: TikZNode 列表
+    """
+    nodes = []
+    
+    # 去掉注释
+    body = re.sub(r'%.*', '', tikz_code)
+    
+    # 提取 tikzpicture 环境内的内容
+    env_match = re.search(
+        r'\\begin\{tikzpicture\}(\[.*?\])?\s*(.*?)\\end\{tikzpicture\}',
+        body, re.DOTALL
+    )
+    if env_match:
+        body = env_match.group(2)
+    
+    # 匹配 \node[options] (name) at (x,y) {content};
+    # 以及变体：\node at (x,y) {content}; \node[options] {content}; 等
+    # 使用更灵活的模式
+    pos = 0
+    while pos < len(body):
+        # 查找 \node
+        m = re.search(r'\\node\b', body[pos:])
+        if not m:
+            break
+        
+        node_start = pos + m.start()
+        pos = node_start + 5  # 跳过 \node
+        
+        # 跳过空白
+        while pos < len(body) and body[pos] in ' \t\n\r':
+            pos += 1
+        
+        # 解析选项 [options]
+        opt_str = ''
+        if pos < len(body) and body[pos] == '[':
+            depth = 1
+            opt_start = pos
+            pos += 1
+            while pos < len(body) and depth > 0:
+                if body[pos] == '[':
+                    depth += 1
+                elif body[pos] == ']':
+                    depth -= 1
+                pos += 1
+            opt_str = body[opt_start + 1:pos - 1]
+        
+        # 跳过空白
+        while pos < len(body) and body[pos] in ' \t\n\r':
+            pos += 1
+        
+        # 解析节点名称 (name)
+        node_name = ''
+        if pos < len(body) and body[pos] == '(':
+            name_start = pos
+            depth = 1
+            pos += 1
+            while pos < len(body) and depth > 0:
+                if body[pos] == '(':
+                    depth += 1
+                elif body[pos] == ')':
+                    depth -= 1
+                pos += 1
+            node_name = body[name_start + 1:pos - 1]
+        
+        # 跳过空白
+        while pos < len(body) and body[pos] in ' \t\n\r':
+            pos += 1
+        
+        # 解析 at (x,y)
+        x, y = 0.0, 0.0
+        if pos + 3 < len(body) and body[pos:pos + 2] == 'at':
+            pos += 2
+            while pos < len(body) and body[pos] in ' \t\n\r':
+                pos += 1
+            
+            if pos < len(body) and body[pos] == '(':
+                coord_start = pos
+                depth = 1
+                pos += 1
+                while pos < len(body) and depth > 0:
+                    if body[pos] == '(':
+                        depth += 1
+                    elif body[pos] == ')':
+                        depth -= 1
+                    pos += 1
+                coord_str = body[coord_start + 1:pos - 1]
+                coord = _parse_coord(coord_str)
+                if coord:
+                    x, y, _ = coord
+        
+        # 跳过空白
+        while pos < len(body) and body[pos] in ' \t\n\r':
+            pos += 1
+        
+        # 解析节点内容 {content}
+        content = ''
+        if pos < len(body) and body[pos] == '{':
+            depth = 1
+            content_start = pos
+            pos += 1
+            while pos < len(body) and depth > 0:
+                if body[pos] == '{':
+                    depth += 1
+                elif body[pos] == '}':
+                    depth -= 1
+                pos += 1
+            content = body[content_start + 1:pos - 1]
+        
+        # 跳过到分号
+        while pos < len(body) and body[pos] != ';':
+            pos += 1
+        if pos < len(body):
+            pos += 1
+        
+        # 创建节点对象
+        if content:
+            node = TikZNode()
+            node.name = node_name
+            node.text = content
+            node.x = x
+            node.y = y
+            node.options = _parse_options(opt_str)
+            
+            # 解析上下标
+            base, sup, sub, has_sup, has_sub = _parse_node_text(content)
+            node.base_text = base
+            node.superscript = sup
+            node.subscript = sub
+            node.has_superscript = has_sup
+            node.has_subscript = has_sub
+            
+            nodes.append(node)
+    
+    return nodes
+
+
+# ============================================================
 # TikZPath → WSD 点列转换
 # ============================================================
 
@@ -1234,14 +1531,185 @@ def tikz_to_wsd_file(tikz_code, output_path, linewidth=80):
         return False, f"转换失败: {e}"
 
 
-def wsd_to_tikz(wsd_file, output_tex=None):
+def wsd_to_tikz_code(wsd_file, canvas_size_cm=(12, 9)):
     """
-    从WSD文件解析形状并导出TikZ代码
-    （简化版本，直接读取WSD二进制解析形状）
+    从WSD文件解析形状并生成TikZ代码
+
+    参数:
+        wsd_file: WSD 文件路径
+        canvas_size_cm: 画布大小 (w, h) cm
+
+    返回:
+        (success, tikz_code_or_error, info)
     """
-    # 从WSD文件读取并解析形状
-    # 这里提供基础的导出接口，完整的WSD解析需要调用wsd_gt_build等模块
-    pass
+    try:
+        from wsd_parser import parse_wsd_file, shapes_to_cm
+
+        # 解析WSD文件
+        shapes, info = parse_wsd_file(wsd_file)
+        if not shapes:
+            return False, f"未能从WSD文件中解析出形状: {info.get('error', '未知错误')}", info
+
+        # 坐标转换：WSD → cm，并翻转Y轴
+        cm_shapes, bbox = shapes_to_cm(shapes, canvas_size_cm, flip_y=True)
+
+        # 生成TikZ代码
+        lines = []
+        lines.append(r'\begin{tikzpicture}[x=1cm, y=1cm]')
+
+        for shape in cm_shapes:
+            stype = shape.shape_type
+            line_color = shape.line_color
+            fill_color = shape.fill_color
+            lw_cm = shape.line_width_cm
+
+            # 颜色格式化
+            def fmt_color(hex_color):
+                if hex_color.startswith('#'):
+                    r = int(hex_color[1:3], 16) / 255
+                    g = int(hex_color[3:5], 16) / 255
+                    b = int(hex_color[5:7], 16) / 255
+                    return f'{{rgb:red,{r:.3f};green,{g:.3f};blue,{b:.3f}}}'
+                return hex_color
+
+            draw_color = fmt_color(line_color)
+
+            # 线宽选项
+            lw_opt = f'line width={lw_cm:.4f}cm'
+
+            if stype == 'circle' and 'cx' in shape.extra and 'radius' in shape.extra:
+                # 原生圆：使用 TikZ circle 语法
+                cx = shape.extra['cx']
+                cy = shape.extra['cy']
+                r = shape.extra['radius']
+                if fill_color:
+                    fill_c = fmt_color(fill_color)
+                    lines.append(
+                        f'  \\filldraw[{draw_color}, fill={fill_c}, {lw_opt}] '
+                        f'({cx:.3f},{cy:.3f}) circle ({r:.3f}cm);'
+                    )
+                else:
+                    lines.append(
+                        f'  \\draw[{draw_color}, {lw_opt}] '
+                        f'({cx:.3f},{cy:.3f}) circle ({r:.3f}cm);'
+                    )
+
+            elif stype == 'arc' and 'cx' in shape.extra:
+                # 圆弧：使用 TikZ arc 语法
+                cx = shape.extra['cx']
+                cy = shape.extra['cy']
+                r = shape.extra['radius']
+                start_angle = shape.extra['start_angle']
+                end_angle = shape.extra['end_angle']
+
+                # 转换为角度（度），TikZ arc 使用角度制
+                start_deg = math.degrees(start_angle)
+                end_deg = math.degrees(end_angle)
+
+                # 弧起点
+                sx = cx + r * math.cos(start_angle)
+                sy = cy + r * math.sin(start_angle)
+
+                lines.append(
+                    f'  \\draw[{draw_color}, {lw_opt}] '
+                    f'({sx:.3f},{sy:.3f}) '
+                    f'arc ({start_deg:.1f}:{end_deg:.1f}:{r:.3f}cm);'
+                )
+
+            elif stype == 'bezier' and len(shape.points) >= 4:
+                # 贝塞尔曲线：使用 .. controls .. 语法
+                pts = shape.points
+                # 假设points按 p0, p1, p2, p3 排列（起点, 控制点1, 控制点2, 终点）
+                p0 = pts[0]
+                p1 = pts[1]
+                p2 = pts[2]
+                p3 = pts[3]
+                lines.append(
+                    f'  \\draw[{draw_color}, {lw_opt}] '
+                    f'({p0[0]:.3f},{p0[1]:.3f}) '
+                    f'.. controls ({p1[0]:.3f},{p1[1]:.3f}) '
+                    f'and ({p2[0]:.3f},{p2[1]:.3f}) '
+                    f'.. ({p3[0]:.3f},{p3[1]:.3f});'
+                )
+
+            elif stype in ('polygon',) and len(shape.points) >= 3:
+                # 多边形：使用 -- cycle 语法
+                pts = shape.points
+                # 去掉重复的闭合点（最后一点=第一点）
+                if pts[0] == pts[-1]:
+                    pts = pts[:-1]
+
+                coord_strs = []
+                for i, (x, y) in enumerate(pts):
+                    if i == 0:
+                        coord_strs.append(f'({x:.3f},{y:.3f})')
+                    else:
+                        coord_strs.append(f' -- ({x:.3f},{y:.3f})')
+                coord_strs.append(' -- cycle')
+
+                if fill_color:
+                    fill_c = fmt_color(fill_color)
+                    lines.append(
+                        f'  \\filldraw[{draw_color}, fill={fill_c}, {lw_opt}] '
+                        f'{"".join(coord_strs)};'
+                    )
+                else:
+                    lines.append(
+                        f'  \\draw[{draw_color}, {lw_opt}] '
+                        f'{"".join(coord_strs)};'
+                    )
+
+            elif stype in ('line', 'polyline') and len(shape.points) >= 2:
+                # 直线/折线
+                pts = shape.points
+                coord_strs = []
+                for i, (x, y) in enumerate(pts):
+                    if i == 0:
+                        coord_strs.append(f'({x:.3f},{y:.3f})')
+                    else:
+                        coord_strs.append(f' -- ({x:.3f},{y:.3f})')
+
+                lines.append(
+                    f'  \\draw[{draw_color}, {lw_opt}] '
+                    f'{"".join(coord_strs)};'
+                )
+
+            else:
+                # 其他形状：按折线/多边形处理
+                pts = shape.points
+                if not pts or len(pts) < 2:
+                    continue
+
+                coord_strs = []
+                for i, (x, y) in enumerate(pts):
+                    if i == 0:
+                        coord_strs.append(f'({x:.3f},{y:.3f})')
+                    else:
+                        coord_strs.append(f' -- ({x:.3f},{y:.3f})')
+
+                if fill_color:
+                    fill_c = fmt_color(fill_color)
+                    if stype == 'polygon':
+                        coord_strs.append(' -- cycle')
+                    lines.append(
+                        f'  \\filldraw[{draw_color}, fill={fill_c}, {lw_opt}] '
+                        f'{"".join(coord_strs)};'
+                    )
+                else:
+                    lines.append(
+                        f'  \\draw[{draw_color}, {lw_opt}] '
+                        f'{"".join(coord_strs)};'
+                    )
+
+        lines.append(r'\end{tikzpicture}')
+        tikz_code = '\n'.join(lines)
+
+        return True, tikz_code, info
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return False, f"WSD转TikZ失败: {e}", {}
 
 
 # ============================================================

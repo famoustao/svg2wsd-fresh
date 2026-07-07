@@ -60,6 +60,14 @@ class Image2WSDApp:
         self.img_color = tk.BooleanVar(value=False)  # 彩色矢量化
         self.img_n_colors = tk.IntVar(value=32)  # 颜色数量
 
+        # 图片预处理增强选项
+        self.img_super_res = tk.BooleanVar(value=False)  # 超分辨率增强
+        self.img_contrast_enhance = tk.BooleanVar(value=True)  # 对比度增强
+        self.img_denoise = tk.BooleanVar(value=False)  # 保边去噪
+        self.img_edge_sharpen = tk.BooleanVar(value=True)  # 边缘锐化
+        self.img_adaptive_binarize = tk.BooleanVar(value=True)  # 自适应二值化
+        self.img_quantize_method = tk.StringVar(value='kmeans')  # 颜色量化方法
+
         # 解析线程管理
         self._parse_thread = None
         self._parse_lock = threading.Lock()
@@ -67,6 +75,10 @@ class Image2WSDApp:
         self._parse_token = 0  # 用于取消旧的解析任务
 
         self._build_ui()
+
+        # 初始化UI状态
+        if self.img_adaptive_binarize.get():
+            self.threshold_scale.config(state='disabled')
 
     def _build_ui(self):
         main = ttk.PanedWindow(self.root, orient='horizontal')
@@ -391,6 +403,31 @@ class Image2WSDApp:
         self.turd_scale, self.turd_val_label = _make_img_slider_row(
             img_frame, "最小区域(像素):", self.img_turdsize, 0, 50, 1, "{}")
 
+        # 图像增强选项
+        enhance_row1 = ttk.Frame(img_frame)
+        enhance_row1.pack(fill='x', padx=8, pady=(4, 0))
+        ttk.Checkbutton(enhance_row1, text="超分辨率增强",
+                        variable=self.img_super_res,
+                        command=self._schedule_img_update).pack(side='left')
+        ttk.Checkbutton(enhance_row1, text="对比度增强",
+                        variable=self.img_contrast_enhance,
+                        command=self._schedule_img_update).pack(side='left', padx=(10, 0))
+
+        enhance_row2 = ttk.Frame(img_frame)
+        enhance_row2.pack(fill='x', padx=8, pady=0)
+        ttk.Checkbutton(enhance_row2, text="保边去噪",
+                        variable=self.img_denoise,
+                        command=self._schedule_img_update).pack(side='left')
+        ttk.Checkbutton(enhance_row2, text="边缘锐化",
+                        variable=self.img_edge_sharpen,
+                        command=self._schedule_img_update).pack(side='left', padx=(10, 0))
+
+        enhance_row3 = ttk.Frame(img_frame)
+        enhance_row3.pack(fill='x', padx=8, pady=(0, 2))
+        ttk.Checkbutton(enhance_row3, text="自适应二值化",
+                        variable=self.img_adaptive_binarize,
+                        command=self._on_adaptive_binarize_toggle).pack(side='left')
+
         # 彩色矢量化开关
         color_row = ttk.Frame(img_frame)
         color_row.pack(fill='x', padx=8, pady=(4, 2))
@@ -437,6 +474,19 @@ class Image2WSDApp:
         self.n_colors_row = ttk.Frame(img_frame)
         self.nc_scale, self.nc_val_label = _make_img_slider_row(
             self.n_colors_row, "颜色数量:", self.img_n_colors, 8, 128, 4, "{}", width=12)
+        # 调色板量化方法行（默认隐藏）
+        self.quantize_method_row = ttk.Frame(img_frame)
+        ttk.Label(self.quantize_method_row, text="量化方法:", width=12).pack(side='left')
+        self.quantize_method_combo = ttk.Combobox(
+            self.quantize_method_row,
+            textvariable=self.img_quantize_method,
+            values=['kmeans', 'median_cut'],
+            state='readonly',
+            width=10
+        )
+        self.quantize_method_combo.pack(side='left', padx=3)
+        self.quantize_method_combo.bind('<<ComboboxSelected>>',
+                                          lambda e: self._schedule_img_update())
         # 默认隐藏调色板行
         self._n_colors_visible = False
 
@@ -616,6 +666,10 @@ class Image2WSDApp:
             self.convert_mode.set('tikz')
         self._invalidate_data()
 
+        # TikZ模式：刷新右侧预览
+        if self.convert_mode.get() == 'tikz':
+            self.root.after(100, self._tikz_refresh_preview)
+
     def _on_mode_change(self):
         """切换转换模式（兼容旧接口，同步到选项卡）"""
         mode = self.convert_mode.get()
@@ -628,7 +682,7 @@ class Image2WSDApp:
         # 注意：选项卡切换会触发 _on_mode_tab_change，进而调用 _invalidate_data
 
     def _build_tikz_tab(self):
-        """构建TikZ转换选项卡"""
+        """构建TikZ转换选项卡（代码编辑器在左侧，预览移到右侧主预览区）"""
         from tkinter import scrolledtext
 
         tab = self.tikz_tab
@@ -649,38 +703,24 @@ class Image2WSDApp:
         ttk.Separator(btn_frame, orient='vertical').pack(side='left', fill='y', padx=5)
         ttk.Button(btn_frame, text="刷新预览", command=self._tikz_refresh_preview).pack(side='left', padx=2)
 
-        # 中间主区域：左代码 + 右预览
-        main_pane = ttk.PanedWindow(tab, orient='horizontal')
-        main_pane.pack(fill='both', expand=True, padx=5, pady=(0, 5))
+        # 第二行按钮：节点标注等功能
+        btn_frame2 = ttk.Frame(tab)
+        btn_frame2.pack(fill='x', padx=5, pady=(0, 2))
+        ttk.Button(btn_frame2, text="提取节点标注", command=self._tikz_extract_nodes).pack(side='left', padx=2)
+        ttk.Label(btn_frame2, text="从TikZ代码中提取\\node节点作为文字标注",
+                  foreground='gray', font=('Arial', 8)).pack(side='left', padx=5)
 
-        # 左侧：代码编辑区
-        code_frame = ttk.LabelFrame(main_pane, text="TikZ 代码")
-        main_pane.add(code_frame, weight=3)
-
-        self.tikz_code_text = scrolledtext.ScrolledText(
-            code_frame, height=12, wrap='none',
-            font=('Consolas', 10), undo=True
-        )
-        self.tikz_code_text.pack(fill='both', expand=True, padx=3, pady=3)
-        # 绑定键盘快捷键
-        self.tikz_code_text.bind('<F5>', lambda e: self._tikz_refresh_preview())
-        self.tikz_code_text.bind('<Control-Return>', lambda e: self._tikz_refresh_preview())
-
-        # 右侧：预览区
-        preview_frame = ttk.LabelFrame(main_pane, text="预览")
-        main_pane.add(preview_frame, weight=2)
-
-        # 预览工具栏
-        preview_toolbar = ttk.Frame(preview_frame)
-        preview_toolbar.pack(fill='x', padx=3, pady=3)
-
+        # 预览模式选择
+        mode_row = ttk.Frame(tab)
+        mode_row.pack(fill='x', padx=5, pady=(0, 2))
+        ttk.Label(mode_row, text="预览模式:").pack(side='left', padx=3)
         self.tikz_preview_mode = tk.StringVar(value='builtin')
-        ttk.Label(preview_toolbar, text="预览模式:").pack(side='left')
-        mode_combo = ttk.Combobox(preview_toolbar, textvariable=self.tikz_preview_mode,
+        mode_combo = ttk.Combobox(mode_row, textvariable=self.tikz_preview_mode,
                                    values=['内置预览', 'PDF编译预览'],
                                    state='readonly', width=12)
         mode_combo.pack(side='left', padx=3)
         mode_combo.bind('<<ComboboxSelected>>', lambda e: self._tikz_refresh_preview())
+        ttk.Label(mode_row, text="(预览显示在右侧面板)", foreground='gray').pack(side='left', padx=5)
 
         # 检测是否有 pdflatex
         self._tikz_has_pdflatex = self._check_pdflatex()
@@ -688,17 +728,25 @@ class Image2WSDApp:
             mode_combo.config(values=['内置预览'])
             self.tikz_preview_mode.set('builtin')
 
-        # 预览画布
-        self.tikz_preview_canvas = tk.Canvas(preview_frame, bg='white', highlightthickness=0)
-        self.tikz_preview_canvas.pack(fill='both', expand=True, padx=3, pady=(0, 3))
-        self.tikz_preview_canvas.bind('<Configure>', lambda e: self._tikz_redraw_preview())
+        # 代码编辑区
+        code_frame = ttk.LabelFrame(tab, text="TikZ 代码 (F5刷新预览，右侧面板显示效果")
+        code_frame.pack(fill='both', expand=True, padx=5, pady=(0, 5))
 
-        # 预览图片（PDF模式用）
+        self.tikz_code_text = scrolledtext.ScrolledText(
+            code_frame, height=10, wrap='none',
+            font=('Consolas', 10), undo=True
+        )
+        self.tikz_code_text.pack(fill='both', expand=True, padx=3, pady=3)
+        # 绑定键盘快捷键
+        self.tikz_code_text.bind('<F5>', lambda e: self._tikz_refresh_preview())
+        self.tikz_code_text.bind('<Control-Return>', lambda e: self._tikz_refresh_preview())
+
+        # 预览图片（PDF模式用，保存在右侧预览）
         self._tikz_preview_img = None
         self._tikz_preview_imgref = None
 
         # 状态栏
-        self.tikz_status = tk.StringVar(value="就绪 - 请输入TikZ代码，按F5刷新预览")
+        self.tikz_status = tk.StringVar(value="就绪 - 请输入TikZ代码，按F5刷新预览（预览显示在右侧面板")
         status_label = ttk.Label(tab, textvariable=self.tikz_status, foreground='gray')
         status_label.pack(fill='x', padx=8, pady=(0, 5))
 
@@ -712,10 +760,10 @@ class Image2WSDApp:
 ''')
 
         # 初始预览
-        self.root.after(200, self._tikz_refresh_preview)
+        self.root.after(300, self._tikz_refresh_preview)
 
     def _tikz_import_file(self):
-        """导入TikZ/TeX文件"""
+        """导入TikZ/TeX文件（支持多tikzpicture环境选择）"""
         file_path = filedialog.askopenfilename(
             title="选择 TikZ 或 TeX 文件",
             filetypes=[
@@ -731,14 +779,75 @@ class Image2WSDApp:
                 content = f.read()
 
             # 尝试提取 tikzpicture 环境
-            from tikz_utils import extract_tikz_from_tex
-            tikz_codes = extract_tikz_from_tex(content)
+            from tikz_utils import extract_tikz_from_tex_enhanced
 
-            if tikz_codes:
-                # 有 tikzpicture，取第一个
+            info = extract_tikz_from_tex_enhanced(content)
+            tikz_codes = info['tikzpictures']
+            preamble = info['preamble']
+
+            if tikz_codes and len(tikz_codes) > 1:
+                # 多个 tikzpicture，让用户选择
+                dlg = tk.Toplevel(self.root)
+                dlg.title("选择 tikzpicture")
+                dlg.geometry("500x400")
+                dlg.transient(self.root)
+                dlg.grab_set()
+
+                ttk.Label(dlg, text=f"检测到 {len(tikz_codes)} 个 tikzpicture 环境，请选择：").pack(
+                    fill='x', padx=10, pady=5)
+
+                from tkinter import scrolledtext
+                listbox = tk.Listbox(dlg, selectmode='single', height=12)
+                listbox.pack(fill='both', expand=True, padx=10, pady=5)
+
+                for i, code in enumerate(tikz_codes):
+                    # 提取前50个字符作为预览
+                    preview = code.replace('\n', ' ')[:60]
+                    listbox.insert(tk.END, f"第{i+1}个: {preview}...")
+                listbox.selection_set(0)
+
+                # 显示导言区信息
+                preamble_info = f"导言区: {len(preamble['color_defs'])}个颜色定义, {len(preamble['macro_defs'])}个宏"
+                ttk.Label(dlg, text=preamble_info, foreground='gray').pack(fill='x', padx=10)
+
+                btn_frame = ttk.Frame(dlg)
+                btn_frame.pack(fill='x', padx=10, pady=10)
+
+                selected_code = [None]
+
+                def _on_ok():
+                    sel = listbox.curselection()
+                    if sel:
+                        selected_code[0] = tikz_codes[sel[0]]
+                    dlg.destroy()
+
+                def _on_cancel():
+                    dlg.destroy()
+
+                ttk.Button(btn_frame, text="确定", command=_on_ok).pack(side='right', padx=5)
+                ttk.Button(btn_frame, text="取消", command=_on_cancel).pack(side='right')
+
+                self.root.wait_window(dlg)
+
+                if selected_code[0] is not None:
+                    self.tikz_code_text.delete('1.0', 'end')
+                    self.tikz_code_text.insert('1.0', selected_code[0])
+                    self.tikz_status.set(
+                        f"已导入: {os.path.basename(file_path)} "
+                        f"(共{len(tikz_codes)}个tikzpicture，已导入第{listbox.curselection()[0]+1}个)"
+                    )
+                    self._invalidate_data()
+                    self._tikz_refresh_preview()
+                return
+
+            elif tikz_codes:
+                # 只有一个 tikzpicture
                 self.tikz_code_text.delete('1.0', 'end')
                 self.tikz_code_text.insert('1.0', tikz_codes[0])
-                self.tikz_status.set(f"已导入: {os.path.basename(file_path)} (检测到 {len(tikz_codes)} 个 tikzpicture)")
+                self.tikz_status.set(
+                    f"已导入: {os.path.basename(file_path)} "
+                    f"(检测到 {len(tikz_codes)} 个 tikzpicture)"
+                )
             else:
                 # 没有环境，当做纯tikz代码
                 self.tikz_code_text.delete('1.0', 'end')
@@ -746,6 +855,7 @@ class Image2WSDApp:
                 self.tikz_status.set(f"已导入: {os.path.basename(file_path)}")
 
             self._invalidate_data()
+            self._tikz_refresh_preview()
         except Exception as e:
             messagebox.showerror("导入失败", f"无法导入文件: {e}")
 
@@ -799,8 +909,66 @@ class Image2WSDApp:
             traceback.print_exc()
             messagebox.showerror("转换失败", f"转换过程中出错: {e}")
 
+    def _tikz_extract_nodes(self):
+        """从TikZ代码中提取\node节点，显示标注信息"""
+        code = self.tikz_code_text.get('1.0', 'end').strip()
+        if not code:
+            messagebox.showwarning("提示", "请先输入或导入TikZ代码")
+            return
+
+        try:
+            from tikz_utils import extract_tikz_nodes
+
+            nodes = extract_tikz_nodes(code)
+            if not nodes:
+                messagebox.showinfo("节点提取", "未在TikZ代码中找到\node节点")
+                return
+
+            # 显示节点信息对话框
+            dlg = tk.Toplevel(self.root)
+            dlg.title(f"节点标注 - 共{len(nodes)}个节点")
+            dlg.geometry("600x450")
+            dlg.transient(self.root)
+
+            # 节点列表
+            from tkinter import scrolledtext
+            list_frame = ttk.LabelFrame(dlg, text=f"节点列表 ({len(nodes)}个)")
+            list_frame.pack(fill='both', expand=True, padx=10, pady=5)
+
+            text = scrolledtext.ScrolledText(list_frame, height=15, font=('Consolas', 10))
+            text.pack(fill='both', expand=True, padx=5, pady=5)
+
+            for i, node in enumerate(nodes):
+                sup_info = f"[上标:{node.superscript}]" if node.has_superscript else ""
+                sub_info = f"[下标:{node.subscript}]" if node.has_subscript else ""
+                text.insert('end', f"{i+1}. 名称: {node.name or '(无)'}\n")
+                text.insert('end', f"   位置: ({node.x:.2f}, {node.y:.2f}) cm\n")
+                text.insert('end', f"   文本: {node.text}\n")
+                if node.has_superscript or node.has_subscript:
+                    text.insert('end', f"   基础文本: {node.base_text} {sup_info} {sub_info}\n")
+                text.insert('end', "\n")
+
+            text.config(state='disabled')
+
+            # 操作按钮
+            btn_frame = ttk.Frame(dlg)
+            btn_frame.pack(fill='x', padx=10, pady=10)
+
+            ttk.Label(btn_frame,
+                      text=f"共 {len(nodes)} 个节点，"
+                           f"{sum(1 for n in nodes if n.has_superscript)}个上标, "
+                           f"{sum(1 for n in nodes if n.has_subscript)}个下标",
+                      foreground='gray').pack(side='left')
+
+            ttk.Button(btn_frame, text="关闭", command=dlg.destroy).pack(side='right')
+
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            messagebox.showerror("提取失败", f"提取节点时出错: {e}")
+
     def _wsd_to_tikz(self):
-        """WSD文件转TikZ代码（基于几何形状检测）"""
+        """WSD文件转TikZ代码（使用WSD二进制解析器）"""
         file_path = filedialog.askopenfilename(
             title="选择 WSD 文件",
             filetypes=[("WSD文件", "*.wsd"), ("所有文件", "*.*")],
@@ -809,22 +977,28 @@ class Image2WSDApp:
             return
 
         try:
-            # 从 WSD 中提取几何信息（通过图片预览转换的方式，或直接解析）
-            # 这里使用几何模式的形状检测逻辑作为中间步骤
-            # 更完善的实现需要完整解析WSD二进制
+            from tikz_utils import wsd_to_tikz_code
 
-            # 先检查是否有当前加载的图片（如果是图片转的WSD，用图片的形状数据）
-            # 简化处理：提示用户使用几何模式
-            messagebox.showinfo(
-                "提示",
-                "WSD转TikZ功能：\n\n"
-                "方式一：先用几何模式导入图片，检测形状后，点击此按钮导出TikZ\n"
-                "方式二：直接选择WSD文件（需要WSD解析器，暂支持基础形状）\n\n"
-                "当前版本：从图片几何检测导出TikZ效果最佳。\n"
-                "请在几何转换选项卡中加载图片并检测后，使用'复制TikZ'或'导出TeX'功能。"
-            )
+            success, result, info = wsd_to_tikz_code(file_path)
+
+            if success:
+                self.tikz_code_text.delete('1.0', 'end')
+                self.tikz_code_text.insert('1.0', result)
+                shape_count = info.get('shape_count', 0)
+                path_count = info.get('path_count', 0)
+                self.tikz_status.set(
+                    f"WSD转TikZ成功: {os.path.basename(file_path)} "
+                    f"({path_count}个路径, {shape_count}个形状)"
+                )
+                # 刷新右侧预览
+                self._tikz_refresh_preview()
+            else:
+                self.tikz_status.set(f"WSD转TikZ失败: {result}")
+                messagebox.showerror("转换失败", result)
 
         except Exception as e:
+            import traceback
+            traceback.print_exc()
             messagebox.showerror("转换失败", f"转换过程中出错: {e}")
 
     def _tikz_copy_code(self):
@@ -877,11 +1051,17 @@ class Image2WSDApp:
         return shutil.which('pdflatex') is not None
 
     def _tikz_refresh_preview(self):
-        """刷新TikZ预览"""
+        """刷新TikZ预览（在右侧主预览区显示）"""
         code = self.tikz_code_text.get('1.0', 'end').strip()
         if not code:
-            self.tikz_preview_canvas.delete('all')
+            self.orig_canvas.delete('all')
+            self.wsd_canvas.delete('all')
             self.tikz_status.set("无代码可预览")
+            return
+
+        # 检查当前是否在TikZ模式
+        if self.convert_mode.get() != 'tikz':
+            self.tikz_status.set("已更新TikZ代码（切换到TikZ模式查看预览）")
             return
 
         mode = self.tikz_preview_mode.get()
@@ -896,13 +1076,16 @@ class Image2WSDApp:
         code = self.tikz_code_text.get('1.0', 'end').strip()
         if not code:
             return
+        if self.convert_mode.get() != 'tikz':
+            return
         mode = self.tikz_preview_mode.get()
         if mode == '内置预览' or not self._tikz_has_pdflatex:
             self._tikz_builtin_preview(code)
 
     def _tikz_builtin_preview(self, code):
-        """内置Canvas预览：基于解析结果绘制"""
-        canvas = self.tikz_preview_canvas
+        """内置Canvas预览：基于解析结果绘制（在右侧主预览区显示）"""
+        # 原图预览：显示TikZ代码解析的图形
+        canvas = self.orig_canvas
         canvas.delete('all')
 
         try:
@@ -999,21 +1182,111 @@ class Image2WSDApp:
 
                 shape_count += 1
 
-            self.tikz_status.set(f"预览：{shape_count} 个图形（内置预览）")
+            self.tikz_status.set(f"TikZ预览：{shape_count} 个图形（原图预览Tab）")
+
+            # WSD预览：显示转换为WSD后的效果
+            self._draw_tikz_wsd_preview(paths)
 
         except Exception as e:
             canvas.delete('all')
             canvas.create_text(10, 10, text=f"预览出错: {e}", anchor='nw', fill='red')
             self.tikz_status.set(f"预览出错: {e}")
 
+    def _draw_tikz_wsd_preview(self, paths=None):
+        """WSD预览Tab：显示TikZ转换为WSD后的效果"""
+        canvas = self.wsd_canvas
+        canvas.delete('all')
+
+        try:
+            from tikz_utils import tikz_paths_to_subpaths
+            from svg2wsd_core import CANVAS_MIN, CANVAS_MAX, MARGIN
+
+            if paths is None:
+                code = self.tikz_code_text.get('1.0', 'end').strip()
+                if not code:
+                    return
+                from tikz_utils import parse_tikz_code
+                paths = parse_tikz_code(code)
+
+            if not paths:
+                return
+
+            subpaths, colors, bbox, extra = tikz_paths_to_subpaths(paths)
+            if not subpaths:
+                return
+
+            w = canvas.winfo_width()
+            h = canvas.winfo_height()
+            if w < 10 or h < 10:
+                return
+
+            # 模拟WSD坐标转换
+            min_x, min_y, max_x, max_y = bbox
+            sw = max_x - min_x
+            sh = max_y - min_y
+            if sw <= 0 or sh <= 0:
+                sw = sh = 1
+
+            # TikZ cm → WSD单位转换（模拟）
+            # 1cm = 10mm = 4000 WSD单位，按比例缩放到画布
+            canvas_range = CANVAS_MAX - CANVAS_MIN - 2 * MARGIN
+            fit_scale = min(canvas_range / (sw * 100), canvas_range / (sh * 100)) * 0.9
+            # cm * 100 = 大致的WSD缩放比例（1cm≈4000WSD，这里用100简化）
+            # 实际应该用4000，但为了显示效果，按bbox自适应
+            sx = sy = fit_scale * 100  # 调整因子
+
+            ox = CANVAS_MIN + (canvas_range - sw * sx) / 2 - min_x * sx
+            oy = CANVAS_MIN + (canvas_range - sh * sy) / 2 - min_y * sy
+
+            # WSD坐标转画布坐标
+            wsd_w = CANVAS_MAX - CANVAS_MIN
+            wsd_h = CANVAS_MAX - CANVAS_MIN
+
+            pad = 20
+            dscale = min((w - 2 * pad) / wsd_w, (h - 2 * pad) / wsd_h)
+            dox = pad + (w - 2 * pad - wsd_w * dscale) / 2 - CANVAS_MIN * dscale
+            doy = pad + (h - 2 * pad - wsd_h * dscale) / 2 - CANVAS_MIN * dscale
+
+            # 绘制画布边框
+            canvas.create_rectangle(
+                CANVAS_MIN * dscale + dox, CANVAS_MIN * dscale + doy,
+                CANVAS_MAX * dscale + dox, CANVAS_MAX * dscale + doy,
+                outline='#999', width=1, dash=(4, 4)
+            )
+
+            # 绘制图形
+            is_stroke_list = extra.get('is_stroke', [False] * len(subpaths))
+            shape_count = 0
+            for i, sp in enumerate(subpaths):
+                # WSD坐标转换
+                wsd_sp = [(int(x * sx + ox), int(y * sy + oy)) for x, y in sp]
+                color = colors[i]
+                is_fill = extra['is_fill'][i] if i < len(extra['is_fill']) else False
+                is_stroke = is_stroke_list[i] if i < len(is_stroke_list) else True
+
+                pts = [(x * dscale + dox, y * dscale + doy) for x, y in wsd_sp]
+                flat = [coord for pt in pts for coord in pt]
+
+                if is_fill and len(flat) >= 6:
+                    canvas.create_polygon(flat, fill=color, outline='',
+                                          width=0, smooth=False)
+                elif is_stroke:
+                    canvas.create_line(flat, fill=color, width=2,
+                                       capstyle='round', joinstyle='round')
+
+                shape_count += 1
+
+        except Exception as e:
+            pass
+
     def _tikz_pdf_preview(self, code):
-        """PDF编译预览：用pdflatex编译后转图片显示"""
+        """PDF编译预览：用pdflatex编译后转图片显示（在右侧原图预览区）"""
         import tempfile
         import subprocess
 
-        canvas = self.tikz_preview_canvas
+        canvas = self.orig_canvas
         canvas.delete('all')
-        canvas.create_text(10, 10, text="正在编译...", anchor='nw', fill='gray')
+        canvas.create_text(10, 10, text="正在编译PDF...", anchor='nw', fill='gray')
         self.tikz_status.set("正在编译 PDF...")
         self.root.update_idletasks()
 
@@ -1077,7 +1350,12 @@ class Image2WSDApp:
                     anchor='center'
                 )
 
-                self.tikz_status.set("PDF编译预览")
+                self.tikz_status.set("PDF编译预览（原图预览Tab）")
+
+                # 同时更新WSD预览
+                from tikz_utils import parse_tikz_code
+                paths = parse_tikz_code(code)
+                self._draw_tikz_wsd_preview(paths)
 
         except subprocess.TimeoutExpired:
             canvas.delete('all')
@@ -1306,6 +1584,7 @@ class Image2WSDApp:
             self.contour_row4.pack_forget()
             self.contour_row5.pack_forget()
             self.n_colors_row.pack_forget()
+            self.quantize_method_row.pack_forget()
             self._n_colors_visible = False
             # 取消彩色矢量化时，如果当前是原色模式，自动切回彩虹
             if self.color_mode.get() == 'svg':
@@ -1315,6 +1594,15 @@ class Image2WSDApp:
     def _on_color_method(self):
         """切换彩色矢量化方法"""
         self._update_color_method_ui()
+        self._invalidate_data()
+
+    def _on_adaptive_binarize_toggle(self):
+        """切换自适应二值化"""
+        # 启用自适应二值化时，禁用固定阈值滑块
+        if self.img_adaptive_binarize.get():
+            self.threshold_scale.config(state='disabled')
+        else:
+            self.threshold_scale.config(state='normal')
         self._invalidate_data()
 
     def _update_color_method_ui(self):
@@ -1329,6 +1617,7 @@ class Image2WSDApp:
             self.contour_row5.pack(fill='x', padx=8, pady=2)
             # 隐藏调色板参数
             self.n_colors_row.pack_forget()
+            self.quantize_method_row.pack_forget()
             self._n_colors_visible = False
         else:
             # 隐藏等高线参数
@@ -1339,6 +1628,7 @@ class Image2WSDApp:
             self.contour_row5.pack_forget()
             # 显示调色板参数
             self.n_colors_row.pack(fill='x', padx=8, pady=2)
+            self.quantize_method_row.pack(fill='x', padx=8, pady=2)
             self._n_colors_visible = True
 
     def _on_img_param_change(self, *args):
@@ -1367,6 +1657,11 @@ class Image2WSDApp:
         self.info_label.config(text="")
 
     def _update_all_previews(self):
+        # TikZ模式：刷新TikZ预览
+        if self.convert_mode.get() == 'tikz':
+            self._tikz_refresh_preview()
+            return
+
         if not self.current_file:
             return
         self._draw_orig_preview()
@@ -1490,6 +1785,12 @@ class Image2WSDApp:
                         img_scale=self.contour_scale.get(),
                         img_smooth_level=self.contour_smooth.get(),
                         img_dilate_size=self.contour_dilate.get(),
+                        img_adaptive_binarize=self.img_adaptive_binarize.get(),
+                        img_preprocess_super_res=self.img_super_res.get(),
+                        img_preprocess_contrast=self.img_contrast_enhance.get(),
+                        img_preprocess_denoise=self.img_denoise.get(),
+                        img_preprocess_sharpen=self.img_edge_sharpen.get(),
+                        img_quantize_method=self.img_quantize_method.get(),
                         progress_cb=_progress_cb,
                     )
                     result = (subpaths, colors, bbox, ftype, extra_info)
@@ -1568,6 +1869,17 @@ class Image2WSDApp:
         return self.current_data and self.current_data[3] == 'geometric'
 
     def _draw_orig_preview(self):
+        # TikZ模式：使用TikZ预览逻辑
+        if self.convert_mode.get() == 'tikz':
+            code = self.tikz_code_text.get('1.0', 'end').strip()
+            if code:
+                mode = self.tikz_preview_mode.get()
+                if mode == 'PDF编译预览' and self._tikz_has_pdflatex:
+                    self._tikz_pdf_preview(code)
+                else:
+                    self._tikz_builtin_preview(code)
+            return
+
         if not self.current_file:
             return
         canvas = self.orig_canvas
@@ -1676,6 +1988,11 @@ class Image2WSDApp:
                 canvas.create_line(flat, fill='#000000', width=1)
 
     def _draw_wsd_preview(self):
+        # TikZ模式：使用TikZ WSD预览逻辑
+        if self.convert_mode.get() == 'tikz':
+            self._draw_tikz_wsd_preview()
+            return
+
         if not self.current_file:
             return
         canvas = self.wsd_canvas
@@ -2075,6 +2392,12 @@ class Image2WSDApp:
                         img_scale=self.contour_scale.get(),
                         img_smooth_level=self.contour_smooth.get(),
                         img_dilate_size=self.contour_dilate.get(),
+                        img_adaptive_binarize=self.img_adaptive_binarize.get(),
+                        img_preprocess_super_res=self.img_super_res.get(),
+                        img_preprocess_contrast=self.img_contrast_enhance.get(),
+                        img_preprocess_denoise=self.img_denoise.get(),
+                        img_preprocess_sharpen=self.img_edge_sharpen.get(),
+                        img_quantize_method=self.img_quantize_method.get(),
                         progress_cb=self._update_progress,
                     )
                 self._update_progress("完成！", 100)
@@ -2145,6 +2468,12 @@ class Image2WSDApp:
                         img_scale=self.contour_scale.get(),
                         img_smooth_level=self.contour_smooth.get(),
                         img_dilate_size=self.contour_dilate.get(),
+                        img_adaptive_binarize=self.img_adaptive_binarize.get(),
+                        img_preprocess_super_res=self.img_super_res.get(),
+                        img_preprocess_contrast=self.img_contrast_enhance.get(),
+                        img_preprocess_denoise=self.img_denoise.get(),
+                        img_preprocess_sharpen=self.img_edge_sharpen.get(),
+                        img_quantize_method=self.img_quantize_method.get(),
                         progress_cb=None,
                     )
                 success += 1

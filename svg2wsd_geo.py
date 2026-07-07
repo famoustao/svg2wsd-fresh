@@ -34,11 +34,579 @@ SHAPE_TRIANGLE = 'triangle'
 SHAPE_CIRCLE = 'circle'
 SHAPE_ARC = 'arc'
 SHAPE_STAR = 'star'
+SHAPE_ELLIPSE = 'ellipse'        # 椭圆
+SHAPE_ELLIPSE_ARC = 'ellipse_arc'  # 椭圆弧
+SHAPE_DASHED_LINE = 'dashed_line'  # 虚线
+SHAPE_CONCENTRIC_CIRCLES = 'concentric_circles'  # 同心圆组
 
 # 对称类型
 SYMMETRY_AXIAL = 'axial'       # 轴对称
 SYMMETRY_ROTATIONAL = 'rotational'  # 旋转对称
 SYMMETRY_CENTRAL = 'central'   # 中心对称（旋转对称的特例，180度）
+
+
+# ============================================================
+# 增强检测工具函数
+# ============================================================
+
+def _fit_ellipse_least_squares(points):
+    """
+    最小二乘椭圆拟合（基于 Fitzgibbon 方法的直接最小二乘椭圆拟合）
+
+    原理：求解 Ax² + Bxy + Cy² + Dx + Ey + F = 0，约束 B² - 4AC < 0
+    使用广义特征值问题求解。
+
+    参数:
+        points: 点列表 [(x, y), ...]
+
+    返回:
+        (cx, cy, a, b, angle, avg_error) 或 None
+        cx, cy: 椭圆中心
+        a, b: 长半轴、短半轴
+        angle: 旋转角度（弧度，x轴到长轴的角度）
+        avg_error: 平均几何误差（像素）
+    """
+    import numpy as np
+
+    if len(points) < 6:
+        return None
+
+    pts = np.array(points, dtype=np.float64)
+    x = pts[:, 0]
+    y = pts[:, 1]
+    n = len(x)
+
+    # 构建设计矩阵 D = [x², xy, y², x, y, 1]
+    D = np.column_stack([x**2, x * y, y**2, x, y, np.ones(n)])
+
+    # 散布矩阵 S = D^T D
+    S = D.T @ D
+
+    # 约束矩阵 C（6x6，仅约束二次项）
+    # 约束: 4AC - B² = 1 → [0, 0, 2, 0, 0, 0; 0, -1, 0, 0, 0, 0; ...]
+    C = np.zeros((6, 6))
+    C[0, 2] = 2
+    C[1, 1] = -1
+    C[2, 0] = 2
+
+    # 求解广义特征值问题 S * a = lambda * C * a
+    try:
+        eigvals, eigvecs = np.linalg.eig(np.linalg.inv(S + np.eye(6) * 1e-10) @ C)
+    except np.linalg.LinAlgError:
+        return None
+
+    # 找到正特征值对应的特征向量
+    mask = np.isreal(eigvals) & (eigvals > 1e-10)
+    if not np.any(mask):
+        return None
+
+    # 取最小正特征值对应的特征向量
+    real_vals = np.where(mask, np.real(eigvals), np.inf)
+    idx = np.argmin(real_vals)
+    a_coeff = np.real(eigvecs[:, idx])
+
+    A, B, C_coeff, D_coeff, E, F = a_coeff
+
+    # 转换为标准参数形式
+    # 计算中心
+    denom = B**2 - 4 * A * C_coeff
+    if abs(denom) < 1e-20:
+        return None
+
+    cx = (2 * C_coeff * D_coeff - B * E) / denom
+    cy = (2 * A * E - B * D_coeff) / denom
+
+    # 计算半轴长度
+    num = 2 * (A * E**2 + C_coeff * D_coeff**2 - B * D_coeff * E + denom * F)
+    if abs(num) < 1e-20:
+        return None
+
+    # 长半轴和短半轴
+    term = math.sqrt((A - C_coeff)**2 + B**2)
+    a_sq = -num / (denom * (A + C_coeff + term))
+    b_sq = -num / (denom * (A + C_coeff - term))
+
+    if a_sq <= 0 or b_sq <= 0:
+        return None
+
+    a_len = math.sqrt(a_sq)
+    b_len = math.sqrt(b_sq)
+
+    # 确保 a >= b（长半轴在前）
+    if a_len < b_len:
+        a_len, b_len = b_len, a_len
+        # 角度调整
+        angle = 0.5 * math.atan2(B, A - C_coeff) + math.pi / 2
+    else:
+        angle = 0.5 * math.atan2(B, A - C_coeff)
+
+    # 归一化角度到 [0, pi)
+    while angle < 0:
+        angle += math.pi
+    while angle >= math.pi:
+        angle -= math.pi
+
+    if a_len < 2 or b_len < 2:
+        return None
+
+    # 计算平均几何误差（点到椭圆的距离近似）
+    # 将点转换到椭圆坐标系下计算
+    cos_a = math.cos(angle)
+    sin_a = math.sin(angle)
+    dx = x - cx
+    dy = y - cy
+    xr = dx * cos_a + dy * sin_a
+    yr = -dx * sin_a + dy * cos_a
+    # 归一化距离
+    norm_dist = np.abs(np.sqrt((xr / a_len)**2 + (yr / b_len)**2) - 1.0)
+    avg_error = float(np.mean(norm_dist * min(a_len, b_len)))
+
+    return (float(cx), float(cy), float(a_len), float(b_len),
+            float(angle), avg_error)
+
+
+def _fit_ellipse_opencv(points):
+    """
+    使用 OpenCV 的 fitEllipse 进行椭圆拟合
+    （基于最小二乘，对轮廓点效果好）
+
+    参数:
+        points: 点列表 [(x, y), ...]
+
+    返回:
+        (cx, cy, a, b, angle, avg_error) 或 None
+        angle 为弧度
+    """
+    import cv2
+    import numpy as np
+
+    if len(points) < 6:
+        return None
+
+    pts = np.array(points, dtype=np.float32).reshape(-1, 1, 2)
+
+    try:
+        ellipse = cv2.fitEllipse(pts)
+    except cv2.error:
+        return None
+
+    (cx, cy), (w, h), angle_deg = ellipse
+
+    # OpenCV 返回的是宽高（直径），转换为半轴
+    a = max(w, h) / 2.0
+    b = min(w, h) / 2.0
+
+    if a < 2 or b < 2:
+        return None
+
+    # OpenCV 角度是度，转换为弧度
+    angle = math.radians(angle_deg)
+
+    # 计算平均误差
+    pts_np = np.array(points, dtype=np.float64)
+    x = pts_np[:, 0]
+    y = pts_np[:, 1]
+    cos_a = math.cos(angle)
+    sin_a = math.sin(angle)
+    dx = x - cx
+    dy = y - cy
+    xr = dx * cos_a + dy * sin_a
+    yr = -dx * sin_a + dy * cos_a
+    norm_dist = np.abs(np.sqrt((xr / a)**2 + (yr / b)**2) - 1.0)
+    avg_error = float(np.mean(norm_dist * b))
+
+    return (float(cx), float(cy), float(a), float(b),
+            float(angle), avg_error)
+
+
+def _ellipse_eccentricity(a, b):
+    """
+    计算椭圆离心率 e = sqrt(1 - (b/a)²)
+
+    参数:
+        a: 长半轴
+        b: 短半轴
+
+    返回:
+        离心率 (0 ~ 1)，0 表示圆，1 表示抛物线
+    """
+    if a <= 0 or b <= 0 or a < b:
+        return 1.0
+    return math.sqrt(1.0 - (b / a) ** 2)
+
+
+def _refine_arc_endpoints(cnt_pts, cx, cy, radius, window=5):
+    """
+    弧端点精化：在端点附近做局部直线拟合，精确确定弧的起止点
+
+    思路：
+    1. 取起点和终点附近的 window 个点
+    2. 对这些点做局部切线方向的直线拟合
+    3. 找到弧上真正的端点（距离圆心最远/最近的过渡点）
+
+    参数:
+        cnt_pts: 轮廓点列表 [(x, y), ...]
+        cx, cy: 圆心
+        radius: 半径
+        window: 端点附近取点窗口大小
+
+    返回:
+        (start_pt, end_pt) 精化后的端点坐标
+    """
+    import numpy as np
+
+    if len(cnt_pts) < window * 2:
+        return cnt_pts[0], cnt_pts[-1]
+
+    pts = np.array(cnt_pts, dtype=np.float64)
+
+    # 精化起点
+    start_window = pts[:window]
+    # 计算起点附近点到圆心的距离，找最接近 radius 的点
+    start_dists = np.sqrt((start_window[:, 0] - cx)**2 + (start_window[:, 1] - cy)**2)
+    start_errors = np.abs(start_dists - radius)
+    best_start_idx = int(np.argmin(start_errors))
+
+    # 精化终点
+    end_window = pts[-window:]
+    end_dists = np.sqrt((end_window[:, 0] - cx)**2 + (end_window[:, 1] - cy)**2)
+    end_errors = np.abs(end_dists - radius)
+    best_end_idx = len(cnt_pts) - window + int(np.argmin(end_errors))
+
+    # 用局部最小二乘直线进一步精化端点位置
+    # 取端点前后各几个点拟合切线，再与圆求交
+    def _refine_single(pts_subset, side='start'):
+        if len(pts_subset) < 3:
+            return tuple(pts_subset[0])
+        result = _fit_line_least_squares([tuple(p) for p in pts_subset])
+        if result is None:
+            return tuple(pts_subset[0])
+        p1, p2, err = result
+        # 求直线与圆的交点（取最接近端点的那个）
+        # 直线参数化: p1 + t*(p2-p1)
+        dx = p2[0] - p1[0]
+        dy = p2[1] - p1[1]
+        # (p1x + t*dx - cx)^2 + (p1y + t*dy - cy)^2 = r^2
+        fx = p1[0] - cx
+        fy = p1[1] - cy
+        a_eq = dx**2 + dy**2
+        b_eq = 2 * (fx * dx + fy * dy)
+        c_eq = fx**2 + fy**2 - radius**2
+        if abs(a_eq) < 1e-10:
+            return tuple(pts_subset[0])
+        disc = b_eq**2 - 4 * a_eq * c_eq
+        if disc < 0:
+            return tuple(pts_subset[0])
+        sqrt_disc = math.sqrt(disc)
+        t1 = (-b_eq + sqrt_disc) / (2 * a_eq)
+        t2 = (-b_eq - sqrt_disc) / (2 * a_eq)
+        # 选最接近 t=0 或 t=1 的交点
+        if side == 'start':
+            t_ref = 0.0
+        else:
+            t_ref = 1.0
+        if abs(t1 - t_ref) < abs(t2 - t_ref):
+            t = t1
+        else:
+            t = t2
+        ix = p1[0] + t * dx
+        iy = p1[1] + t * dy
+        return (float(ix), float(iy))
+
+    start_pts = pts[:min(window + 3, len(pts))]
+    end_pts = pts[-min(window + 3, len(pts)):]
+
+    refined_start = _refine_single(start_pts, 'start')
+    refined_end = _refine_single(end_pts, 'end')
+
+    return refined_start, refined_end
+
+
+def _detect_arc_hough(gray, skeleton, min_radius=20, max_radius=0,
+                      param2_base=120, angle_min_deg=30, angle_max_deg=330):
+    """
+    基于霍夫变换的圆弧检测
+
+    思路：
+    1. 先用 cv2.HoughCircles 检测可能的圆（候选圆心和半径）
+    2. 对每个候选圆，在骨架图上沿圆周采样，统计有多少骨架点在圆周附近
+    3. 如果有骨架点但覆盖率 < 100%，且覆盖角度在阈值范围内，则判定为圆弧
+
+    参数:
+        gray: 灰度图像
+        skeleton: 骨架二值图像
+        min_radius: 最小半径
+        max_radius: 最大半径（0表示自动）
+        param2_base: 霍夫圆检测param2基准
+        angle_min_deg: 最小覆盖角度（度）
+        angle_max_deg: 最大覆盖角度（度）
+
+    返回:
+        list of arc dict: 每个 dict 包含 center, radius, start_angle, end_angle, bbox
+    """
+    import cv2
+    import numpy as np
+
+    if skeleton is None:
+        return []
+
+    h, w = skeleton.shape[:2]
+
+    # 步骤1：霍夫圆检测（获取候选圆心和半径）
+    # 用较低的阈值获取更多候选
+    circles = cv2.HoughCircles(
+        gray, cv2.HOUGH_GRADIENT, dp=1.5, minDist=50,
+        param1=80, param2=int(param2_base * 0.6),
+        minRadius=min_radius, maxRadius=max_radius
+    )
+
+    if circles is None:
+        return []
+
+    circle_candidates = circles[0].tolist()
+
+    # 对候选圆做去重
+    circle_candidates = _nms_circles(circle_candidates, overlap_thresh=0.2)
+
+    arcs = []
+    threshold_ratio = 0.5  # 骨架点占比阈值
+    ring_width = 3  # 圆环采样宽度（像素）
+
+    for cx, cy, r in circle_candidates:
+        cx = float(cx)
+        cy = float(cy)
+        r = float(r)
+
+        if r < min_radius:
+            continue
+
+        # 在骨架图上沿圆周采样，统计有效角度范围
+        num_samples = int(2 * math.pi * r)  # 每像素一个采样点
+        if num_samples < 36:
+            num_samples = 36
+
+        angles_hit = []  # 记录有骨架点的角度
+
+        for i in range(num_samples):
+            angle = 2 * math.pi * i / num_samples
+            # 采样圆周附近的点
+            for dr in range(-ring_width, ring_width + 1):
+                rr = r + dr
+                px = int(cx + rr * math.cos(angle) + 0.5)
+                py = int(cy + rr * math.sin(angle) + 0.5)
+                if 0 <= px < w and 0 <= py < h:
+                    if skeleton[py, px] > 0:
+                        angles_hit.append(angle)
+                        break
+
+        if len(angles_hit) < 5:
+            continue
+
+        # 计算覆盖角度
+        angles_hit_sorted = sorted(angles_hit)
+
+        # 找最大连续覆盖区间
+        # 由于角度是环形的，需要特殊处理
+        # 将角度复制一份到 [0, 4pi) 处理环绕情况
+        extended = angles_hit_sorted + [a + 2 * math.pi for a in angles_hit_sorted]
+
+        max_gap = 0
+        max_gap_start = 0
+        for i in range(len(extended) - 1):
+            gap = extended[i + 1] - extended[i]
+            if gap > max_gap:
+                max_gap = gap
+                max_gap_start = extended[i]
+
+        # 覆盖率
+        coverage = 1.0 - max_gap / (2 * math.pi)
+        if coverage > 0.95:
+            continue  # 接近完整圆，留给圆检测处理
+
+        arc_angle = 2 * math.pi - max_gap
+        arc_angle_deg = arc_angle * 180 / math.pi
+
+        if arc_angle_deg < angle_min_deg or arc_angle_deg > angle_max_deg:
+            continue
+
+        # 计算圆弧的起点和终点角度
+        # 最大间隙的终点就是弧的起点，最大间隙的起点就是弧的终点
+        start_angle = (max_gap_start + max_gap) % (2 * math.pi)
+        end_angle = max_gap_start % (2 * math.pi)
+
+        # 确保角度在合理范围
+        if start_angle > math.pi:
+            start_angle -= 2 * math.pi
+        if end_angle > math.pi:
+            end_angle -= 2 * math.pi
+
+        # 计算 bbox
+        x_min = int(cx - r)
+        y_min = int(cy - r)
+        bbox = (x_min, y_min, int(2 * r), int(2 * r))
+
+        arcs.append({
+            'type': SHAPE_ARC,
+            'center': (cx, cy),
+            'radius': r,
+            'start_angle': start_angle,
+            'end_angle': end_angle,
+            'coverage_ratio': coverage,
+            'area': arc_angle * r * r / 2,  # 扇形面积近似
+            'bbox': bbox,
+            'from_hough_arc': True,
+        })
+
+    return arcs
+
+
+def _detect_ellipse_from_contour(cnt_pts, area, bbox,
+                                 eccentricity_min=0.2, eccentricity_max=0.95,
+                                 error_tolerance=0.10):
+    """
+    从轮廓点中检测完整椭圆
+
+    参数:
+        cnt_pts: 轮廓点列表 [(x, y), ...]
+        area: 轮廓面积
+        bbox: 外接矩形 (x, y, w, h)
+        eccentricity_min: 最小离心率（小于此值更像圆）
+        eccentricity_max: 最大离心率（大于此值太扁）
+        error_tolerance: 拟合误差容差（比例）
+
+    返回:
+        椭圆形状字典 或 None
+    """
+    if not cnt_pts or len(cnt_pts) < 6:
+        return None
+
+    # 先用 OpenCV fitEllipse 拟合
+    result = _fit_ellipse_opencv(cnt_pts)
+    if result is None:
+        return None
+
+    cx, cy, a, b, angle, avg_error = result
+
+    # 离心率判断
+    ecc = _ellipse_eccentricity(a, b)
+    if ecc < eccentricity_min or ecc > eccentricity_max:
+        return None
+
+    # 误差判断（相对短轴的误差比例）
+    if b > 0 and avg_error / b > error_tolerance:
+        return None
+
+    x, y, w, h = bbox
+    return {
+        'type': SHAPE_ELLIPSE,
+        'center': (cx, cy),
+        'a': a,  # 长半轴
+        'b': b,  # 短半轴
+        'angle': angle,  # 旋转角度（弧度）
+        'eccentricity': ecc,
+        'area': area,
+        'bbox': bbox,
+        'points': cnt_pts[:],
+    }
+
+
+def _detect_ellipse_arc_from_contour(cnt_pts, area, bbox,
+                                     eccentricity_min=0.2,
+                                     angle_min_deg=30, angle_max_deg=330,
+                                     error_tolerance=0.10):
+    """
+    从轮廓点中检测椭圆弧
+
+    思路：
+    1. 用 cv2.fitEllipse 拟合候选椭圆
+    2. 检查轮廓点到椭圆的距离
+    3. 计算椭圆弧的覆盖角度范围
+
+    参数:
+        cnt_pts: 轮廓点列表
+        area: 轮廓面积
+        bbox: 外接矩形
+        eccentricity_min: 最小离心率
+        angle_min_deg: 最小覆盖角度
+        angle_max_deg: 最大覆盖角度
+        error_tolerance: 误差容差
+
+    返回:
+        椭圆弧形状字典 或 None
+    """
+    if not cnt_pts or len(cnt_pts) < 6:
+        return None
+
+    # 拟合椭圆
+    result = _fit_ellipse_opencv(cnt_pts)
+    if result is None:
+        return None
+
+    cx, cy, a, b, angle, avg_error = result
+
+    # 离心率判断
+    ecc = _ellipse_eccentricity(a, b)
+    if ecc < eccentricity_min:
+        return None  # 太接近圆，交给圆弧检测
+
+    # 误差判断
+    if b > 0 and avg_error / b > error_tolerance:
+        return None
+
+    # 计算每个点在椭圆坐标系下的角度
+    import numpy as np
+    pts = np.array(cnt_pts, dtype=np.float64)
+    cos_a = math.cos(angle)
+    sin_a = math.sin(angle)
+    dx = pts[:, 0] - cx
+    dy = pts[:, 1] - cy
+    xr = dx * cos_a + dy * sin_a
+    yr = -dx * sin_a + dy * cos_a
+
+    # 椭圆参数角（偏心角）
+    ellipse_angles = np.arctan2(yr / b, xr / a)
+
+    # 计算覆盖角度范围
+    angles_sorted = sorted(ellipse_angles.tolist())
+
+    # 找最大间隙（环形处理）
+    extended = angles_sorted + [a + 2 * math.pi for a in angles_sorted]
+    max_gap = 0
+    max_gap_start = 0
+    for i in range(len(extended) - 1):
+        gap = extended[i + 1] - extended[i]
+        if gap > max_gap:
+            max_gap = gap
+            max_gap_start = extended[i]
+
+    arc_angle = 2 * math.pi - max_gap
+    arc_angle_deg = arc_angle * 180 / math.pi
+
+    if arc_angle_deg < angle_min_deg or arc_angle_deg > angle_max_deg:
+        return None
+
+    start_angle = (max_gap_start + max_gap) % (2 * math.pi)
+    end_angle = max_gap_start % (2 * math.pi)
+
+    if start_angle > math.pi:
+        start_angle -= 2 * math.pi
+    if end_angle > math.pi:
+        end_angle -= 2 * math.pi
+
+    x, y, w, h = bbox
+    return {
+        'type': SHAPE_ELLIPSE_ARC,
+        'center': (cx, cy),
+        'a': a,
+        'b': b,
+        'angle': angle,
+        'eccentricity': ecc,
+        'start_angle': start_angle,
+        'end_angle': end_angle,
+        'area': area,
+        'bbox': bbox,
+        'points': cnt_pts[:],
+    }
 
 
 # ============================================================
@@ -653,6 +1221,474 @@ def _detect_arc_from_contour(cnt_pts, area, bbox,
         'area': float(arc_area),
         'bbox': bbox,
     }
+
+
+def _detect_concentric_circles(circles, center_tolerance=0.05, min_count=2):
+    """
+    检测同心圆（同一中心不同半径的多个圆）
+
+    参数:
+        circles: list of (cx, cy, radius)
+        center_tolerance: 圆心距离容差（相对于半径的比例）
+        min_count: 最少同心圆数量
+
+    返回:
+        list of 同心圆组，每组为 [circle_dict, ...]（按半径从小到大排序）
+    """
+    if len(circles) < min_count:
+        return []
+
+    groups = []
+    used = [False] * len(circles)
+
+    for i in range(len(circles)):
+        if used[i]:
+            continue
+        cx1, cy1, r1 = circles[i]
+        group = [i]
+        used[i] = True
+
+        for j in range(i + 1, len(circles)):
+            if used[j]:
+                continue
+            cx2, cy2, r2 = circles[j]
+            # 圆心距离
+            dist = math.hypot(cx1 - cx2, cy1 - cy2)
+            # 容差：两圆半径平均值的一定比例
+            tol = max(r1, r2) * center_tolerance
+            if dist < tol:
+                group.append(j)
+                used[j] = True
+
+        if len(group) >= min_count:
+            # 按半径从小到大排序
+            group_sorted = sorted(group, key=lambda k: circles[k][2])
+            group_circles = [
+                {
+                    'center': (float(circles[k][0]), float(circles[k][1])),
+                    'radius': float(circles[k][2]),
+                }
+                for k in group_sorted
+            ]
+            # 计算平均圆心
+            avg_cx = sum(circles[k][0] for k in group) / len(group)
+            avg_cy = sum(circles[k][1] for k in group) / len(group)
+            groups.append({
+                'type': SHAPE_CONCENTRIC_CIRCLES,
+                'center': (float(avg_cx), float(avg_cy)),
+                'circles': group_circles,
+                'count': len(group_circles),
+                'min_radius': group_circles[0]['radius'],
+                'max_radius': group_circles[-1]['radius'],
+                'bbox': (
+                    int(avg_cx - group_circles[-1]['radius']),
+                    int(avg_cy - group_circles[-1]['radius']),
+                    int(2 * group_circles[-1]['radius']),
+                    int(2 * group_circles[-1]['radius']),
+                ),
+                'area': math.pi * (group_circles[-1]['radius']**2 -
+                                   group_circles[0]['radius']**2),
+            })
+
+    return groups
+
+
+def _detect_circle_tangent_points(circle_cx, circle_cy, circle_r,
+                                  line_p1, line_p2, tolerance=2.0):
+    """
+    检测圆与直线的切点
+
+    参数:
+        circle_cx, circle_cy, circle_r: 圆的圆心和半径
+        line_p1, line_p2: 直线的两个端点
+        tolerance: 距离容差（像素）
+
+    返回:
+        [(tx, ty), ...] 切点列表（0~2个），如果直线与圆不相切则返回空
+    """
+    import numpy as np
+
+    x1, y1 = line_p1
+    x2, y2 = line_p2
+
+    # 计算圆心到直线的距离
+    dx = x2 - x1
+    dy = y2 - y1
+    line_len = math.hypot(dx, dy)
+    if line_len < 1:
+        return []
+
+    # 直线法向量
+    nx = -dy / line_len
+    ny = dx / line_len
+
+    # 圆心到直线的有向距离
+    dist = (circle_cx - x1) * nx + (circle_cy - y1) * ny
+
+    # 判断是否相切（距离接近半径）
+    if abs(abs(dist) - circle_r) > tolerance:
+        return []
+
+    # 计算切点：圆心沿法向量方向移动半径距离
+    sign = 1 if dist > 0 else -1
+    tx = circle_cx - sign * circle_r * nx
+    ty = circle_cy - sign * circle_r * ny
+
+    # 检查切点是否在线段范围内（投影到线段方向）
+    t_dir_x = dx / line_len
+    t_dir_y = dy / line_len
+    t_val = (tx - x1) * t_dir_x + (ty - y1) * t_dir_y
+
+    if t_val < -tolerance or t_val > line_len + tolerance:
+        return []
+
+    return [(float(tx), float(ty))]
+
+
+def _detect_lines_connections(lines, dist_thresh=15, angle_thresh=15):
+    """
+    检测线段之间的连接关系：T型连接、L型连接
+
+    参数:
+        lines: list of ((x1, y1), (x2, y2))
+        dist_thresh: 端点距离阈值（像素）
+        angle_thresh: 角度阈值（度）
+
+    返回:
+        dict 包含:
+            't_connections': list of (line_idx1, line_idx2, point) T型连接
+            'l_connections': list of (line_idx1, line_idx2, point) L型连接
+            'parallel_groups': list of [line_idx, ...] 平行线段组
+            'perpendicular_pairs': list of (idx1, idx2) 垂直线段对
+    """
+    if len(lines) < 2:
+        return {
+            't_connections': [],
+            'l_connections': [],
+            'parallel_groups': [],
+            'perpendicular_pairs': [],
+        }
+
+    t_connections = []
+    l_connections = []
+    parallel_groups = []
+    perpendicular_pairs = []
+
+    # 计算每条线段的角度和端点
+    line_info = []
+    for (x1, y1), (x2, y2) in lines:
+        dx = x2 - x1
+        dy = y2 - y1
+        length = math.hypot(dx, dy)
+        angle = math.atan2(dy, dx)
+        # 归一化到 [0, pi)
+        if angle < 0:
+            angle += math.pi
+        line_info.append({
+            'p1': (x1, y1),
+            'p2': (x2, y2),
+            'angle': angle,
+            'length': length,
+        })
+
+    n = len(lines)
+
+    # 平行线段分组
+    angle_thresh_rad = math.radians(angle_thresh)
+    used_parallel = [False] * n
+    for i in range(n):
+        if used_parallel[i]:
+            continue
+        group = [i]
+        used_parallel[i] = True
+        angle_i = line_info[i]['angle']
+        for j in range(i + 1, n):
+            if used_parallel[j]:
+                continue
+            angle_j = line_info[j]['angle']
+            dangle = abs(angle_i - angle_j)
+            if dangle > math.pi / 2:
+                dangle = math.pi - dangle
+            if dangle < angle_thresh_rad:
+                group.append(j)
+                used_parallel[j] = True
+        if len(group) >= 2:
+            parallel_groups.append(group)
+
+    # 垂直线段对
+    for i in range(n):
+        angle_i = line_info[i]['angle']
+        for j in range(i + 1, n):
+            angle_j = line_info[j]['angle']
+            # 垂直: 角度差接近 90 度
+            dangle = abs(angle_i - angle_j)
+            if dangle > math.pi / 2:
+                dangle = math.pi - dangle
+            if abs(dangle - math.pi / 2) < angle_thresh_rad:
+                perpendicular_pairs.append((i, j))
+
+    # L型连接：两条线段的端点接近，且近似垂直
+    for i in range(n):
+        p1_i, p2_i = line_info[i]['p1'], line_info[i]['p2']
+        angle_i = line_info[i]['angle']
+        for j in range(i + 1, n):
+            p1_j, p2_j = line_info[j]['p1'], line_info[j]['p2']
+            angle_j = line_info[j]['angle']
+
+            # 检查是否近似垂直
+            dangle = abs(angle_i - angle_j)
+            if dangle > math.pi / 2:
+                dangle = math.pi - dangle
+            if abs(dangle - math.pi / 2) > angle_thresh_rad:
+                continue
+
+            # 检查端点是否接近
+            endpoints_i = [p1_i, p2_i]
+            endpoints_j = [p1_j, p2_j]
+            best_dist = float('inf')
+            best_pt = None
+            for ei in endpoints_i:
+                for ej in endpoints_j:
+                    d = math.hypot(ei[0] - ej[0], ei[1] - ej[1])
+                    if d < best_dist and d < dist_thresh:
+                        best_dist = d
+                        best_pt = ((ei[0] + ej[0]) / 2, (ei[1] + ej[1]) / 2)
+            if best_pt is not None:
+                l_connections.append((i, j, best_pt))
+
+    # T型连接：一条线段的端点在另一条线段上（且两条线段近似垂直）
+    def _point_on_segment(pt, seg_p1, seg_p2, tolerance=dist_thresh):
+        """判断点是否在线段上（带容差）"""
+        px, py = pt
+        sx1, sy1 = seg_p1
+        sx2, sy2 = seg_p2
+        dx = sx2 - sx1
+        dy = sy2 - sy1
+        seg_len = math.hypot(dx, dy)
+        if seg_len < 1:
+            return False, None
+        # 投影参数 t
+        t = ((px - sx1) * dx + (py - sy1) * dy) / (seg_len * seg_len)
+        if t < -0.05 or t > 1.05:
+            return False, None
+        # 垂直距离
+        proj_x = sx1 + t * dx
+        proj_y = sy1 + t * dy
+        dist = math.hypot(px - proj_x, py - proj_y)
+        if dist < tolerance:
+            return True, (proj_x, proj_y)
+        return False, None
+
+    for i in range(n):
+        p1_i, p2_i = line_info[i]['p1'], line_info[i]['p2']
+        angle_i = line_info[i]['angle']
+        endpoints_i = [p1_i, p2_i]
+
+        for j in range(n):
+            if i == j:
+                continue
+            p1_j, p2_j = line_info[j]['p1'], line_info[j]['p2']
+            angle_j = line_info[j]['angle']
+
+            # 检查是否近似垂直
+            dangle = abs(angle_i - angle_j)
+            if dangle > math.pi / 2:
+                dangle = math.pi - dangle
+            if abs(dangle - math.pi / 2) > angle_thresh_rad:
+                continue
+
+            # 检查线段i的端点是否在线段j上
+            for ep in endpoints_i:
+                on_seg, proj_pt = _point_on_segment(ep, p1_j, p2_j)
+                if on_seg:
+                    # 排除L型连接的情况（端点也接近）
+                    is_l_type = False
+                    for ep_j in [p1_j, p2_j]:
+                        if math.hypot(ep[0] - ep_j[0], ep[1] - ep_j[1]) < dist_thresh * 1.5:
+                            is_l_type = True
+                            break
+                    if not is_l_type:
+                        t_connections.append((i, j, proj_pt))
+                    break
+
+    return {
+        't_connections': t_connections,
+        'l_connections': l_connections,
+        'parallel_groups': parallel_groups,
+        'perpendicular_pairs': perpendicular_pairs,
+    }
+
+
+def _detect_dashed_lines(lines, dist_thresh=30, angle_thresh=5, min_segments=3):
+    """
+    虚线识别：将间隔均匀的共线短线段识别为一条虚线
+
+    思路：
+    1. 找出所有共线的短线段组
+    2. 检查线段之间的间隔是否均匀
+    3. 间隔均匀且数量 >= min_segments 则判定为虚线
+
+    参数:
+        lines: list of ((x1, y1), (x2, y2)) 线段列表
+        dist_thresh: 距离阈值（像素），线段到直线的距离
+        angle_thresh: 角度阈值（度）
+        min_segments: 最少线段数量
+
+    返回:
+        list of 虚线字典，每个包含:
+            'type': SHAPE_DASHED_LINE
+            'points': [(x1, y1), (x2, y2)] 虚线整体的起止点
+            'segments': 组成虚线的线段列表
+            'dash_length': 平均线段长度
+            'gap_length': 平均间隔长度
+            'bbox': 外接矩形
+    """
+    if len(lines) < min_segments:
+        return []
+
+    # 先用共线合并的思路找出共线段组
+    # 将线段转为 (rho, theta, t_min, t_max, length)
+    line_data = []
+    for (x1, y1), (x2, y2) in lines:
+        dx = x2 - x1
+        dy = y2 - y1
+        length = math.hypot(dx, dy)
+        if length < 1:
+            continue
+        # 计算 theta 和 rho
+        theta = math.atan2(-dx, dy)
+        rho = x1 * math.cos(theta) + y1 * math.sin(theta)
+        # 归一化
+        if rho < 0:
+            rho = -rho
+            theta += math.pi
+        if theta >= math.pi:
+            theta -= math.pi
+        # 计算沿直线方向的投影
+        dir_x = -math.sin(theta)
+        dir_y = math.cos(theta)
+        t1 = x1 * dir_x + y1 * dir_y
+        t2 = x2 * dir_x + y2 * dir_y
+        t_min = min(t1, t2)
+        t_max = max(t1, t2)
+        line_data.append({
+            'rho': rho,
+            'theta': theta,
+            't_min': t_min,
+            't_max': t_max,
+            'length': length,
+            'pts': ((x1, y1), (x2, y2)),
+            'dir_x': dir_x,
+            'dir_y': dir_y,
+        })
+
+    if len(line_data) < min_segments:
+        return []
+
+    angle_thresh_rad = math.radians(angle_thresh)
+    n = len(line_data)
+    used = [False] * n
+    dashed_lines = []
+
+    for i in range(n):
+        if used[i]:
+            continue
+        group = [i]
+        used[i] = True
+        rho_i = line_data[i]['rho']
+        theta_i = line_data[i]['theta']
+
+        # 找同方向、同rho的线段
+        for j in range(i + 1, n):
+            if used[j]:
+                continue
+            rho_j = line_data[j]['rho']
+            theta_j = line_data[j]['theta']
+            # 角度差
+            dtheta = abs(theta_i - theta_j)
+            if dtheta > math.pi / 2:
+                dtheta = math.pi - dtheta
+            if dtheta < angle_thresh_rad and abs(rho_i - rho_j) < dist_thresh:
+                group.append(j)
+                used[j] = True
+
+        if len(group) < min_segments:
+            continue
+
+        # 检查间隔是否均匀
+        # 按 t_min 排序
+        group_sorted = sorted(group, key=lambda k: line_data[k]['t_min'])
+
+        # 计算间隔
+        gaps = []
+        dash_lengths = []
+        for k in range(len(group_sorted)):
+            idx = group_sorted[k]
+            dash_lengths.append(line_data[idx]['length'])
+            if k > 0:
+                prev_idx = group_sorted[k - 1]
+                gap = line_data[idx]['t_min'] - line_data[prev_idx]['t_max']
+                if gap > 0:
+                    gaps.append(gap)
+
+        if len(gaps) < 2:
+            continue
+
+        # 检查间隔均匀性（变异系数 < 0.5）
+        avg_gap = sum(gaps) / len(gaps)
+        if avg_gap < 2:
+            continue
+        gap_std = math.sqrt(sum((g - avg_gap)**2 for g in gaps) / len(gaps))
+        gap_cv = gap_std / avg_gap if avg_gap > 0 else 1.0
+
+        # 检查线段长度均匀性
+        avg_dash = sum(dash_lengths) / len(dash_lengths)
+        if avg_dash < 2:
+            continue
+        dash_std = math.sqrt(sum((d - avg_dash)**2 for d in dash_lengths) / len(dash_lengths))
+        dash_cv = dash_std / avg_dash if avg_dash > 0 else 1.0
+
+        if gap_cv > 0.5 or dash_cv > 0.5:
+            continue
+
+        # 计算虚线整体的起止点
+        first_idx = group_sorted[0]
+        last_idx = group_sorted[-1]
+        avg_rho = sum(line_data[k]['rho'] for k in group) / len(group)
+        avg_theta = sum(line_data[k]['theta'] for k in group) / len(group)
+        # 起点
+        dir_x = -math.sin(avg_theta)
+        dir_y = math.cos(avg_theta)
+        px = avg_rho * math.cos(avg_theta)
+        py = avg_rho * math.sin(avg_theta)
+
+        t_start = min(line_data[k]['t_min'] for k in group)
+        t_end = max(line_data[k]['t_max'] for k in group)
+
+        x_start = px + t_start * dir_x
+        y_start = py + t_start * dir_y
+        x_end = px + t_end * dir_x
+        y_end = py + t_end * dir_y
+
+        # bbox
+        bx = int(min(x_start, x_end))
+        by = int(min(y_start, y_end))
+        bw = int(abs(x_end - x_start))
+        bh = int(abs(y_end - y_start))
+
+        dashed_lines.append({
+            'type': SHAPE_DASHED_LINE,
+            'points': [(float(x_start), float(y_start)),
+                       (float(x_end), float(y_end))],
+            'segments': [line_data[k]['pts'] for k in group_sorted],
+            'dash_length': float(avg_dash),
+            'gap_length': float(avg_gap),
+            'num_segments': len(group),
+            'area': abs(t_end - t_start),
+            'bbox': (bx, by, max(bw, 1), max(bh, 1)),
+        })
+
+    return dashed_lines
 
 
 def _nms_circles(circles, overlap_thresh=0.15):
@@ -1310,6 +2346,291 @@ def _contour_overlaps_hough_line(cnt_bbox, hough_lines, overlap_thresh=0.6):
     return False
 
 
+def _build_image_pyramid(gray, num_levels=3, scale=0.5):
+    """
+    构建图像金字塔
+
+    参数:
+        gray: 灰度图像
+        num_levels: 金字塔层数
+        scale: 每层缩放比例
+
+    返回:
+        list of (image, scale_factor)，从粗到细（索引0是最粗的）
+    """
+    import cv2
+
+    pyramid = []
+    current = gray.copy()
+    current_scale = 1.0
+
+    # 从原图开始，逐级缩小（先存原图，再存缩小的）
+    # 这里按从小到大排列，方便粗到细检测
+    for i in range(num_levels):
+        if i == 0:
+            pyramid.append((current.copy(), 1.0))
+        else:
+            current_scale *= scale
+            new_w = int(current.shape[1] * scale)
+            new_h = int(current.shape[0] * scale)
+            if new_w < 50 or new_h < 50:
+                break
+            current = cv2.resize(current, (new_w, new_h),
+                                 interpolation=cv2.INTER_AREA)
+            pyramid.append((current.copy(), current_scale))
+
+    # 反转：从粗到细
+    pyramid.reverse()
+    return pyramid
+
+
+def _detect_enhanced_shapes(gray, skeleton, binary,
+                            min_area=50,
+                            min_line_length=50,
+                            line_threshold=30,
+                            circle_param2=120,
+                            circularity_threshold=0.85,
+                            use_pyramid=True):
+    """
+    增强形状检测入口函数
+
+    执行所有增强检测：
+    1. 霍夫弧检测
+    2. 同心圆检测
+    3. 虚线识别
+    4. 线段连接分析（T型、L型、平行、垂直）
+    5. 图像金字塔优化（可选）
+
+    参数:
+        gray: 灰度图像
+        skeleton: 骨架图像
+        binary: 二值图像
+        min_area: 最小面积
+        min_line_length: 最小直线长度
+        line_threshold: 直线检测阈值
+        circle_param2: 圆检测参数
+        circularity_threshold: 圆形度阈值
+        use_pyramid: 是否使用图像金字塔
+
+    返回:
+        dict 包含各类增强检测结果:
+            'arcs': 霍夫弧检测结果
+            'concentric_circles': 同心圆组
+            'dashed_lines': 虚线
+            'line_connections': 线段连接关系
+            'ellipses': 椭圆检测结果（从轮廓）
+    """
+    import cv2
+
+    results = {
+        'arcs': [],
+        'concentric_circles': [],
+        'dashed_lines': [],
+        'line_connections': {},
+        'ellipses': [],
+        'ellipse_arcs': [],
+    }
+
+    # 步骤1：霍夫弧检测
+    hough_arcs = _detect_arc_hough(
+        gray, skeleton,
+        min_radius=max(10, min_area // 5),
+        param2_base=circle_param2,
+        angle_min_deg=30, angle_max_deg=330,
+    )
+    results['arcs'] = hough_arcs
+
+    # 步骤2：霍夫圆检测 + 同心圆检测
+    circles_hough = _detect_circles_hough(
+        gray, min_radius=max(10, min_area // 5),
+        skeleton=skeleton, param2_base=circle_param2
+    )
+    if circles_hough:
+        concentric = _detect_concentric_circles(
+            circles_hough, center_tolerance=0.05, min_count=2
+        )
+        results['concentric_circles'] = concentric
+
+    # 步骤3：直线检测 + 虚线识别
+    lines_hough = _detect_lines_hough(
+        gray, min_length=min_line_length,
+        skeleton=skeleton, threshold=line_threshold
+    )
+    if lines_hough:
+        # 虚线识别
+        dashed = _detect_dashed_lines(
+            lines_hough, dist_thresh=30, angle_thresh=5, min_segments=3
+        )
+        results['dashed_lines'] = dashed
+
+        # 线段连接分析
+        connections = _detect_lines_connections(
+            lines_hough, dist_thresh=15, angle_thresh=15
+        )
+        results['line_connections'] = connections
+
+    # 步骤4：从轮廓检测椭圆和椭圆弧
+    if binary is not None:
+        contours, _ = cv2.findContours(
+            binary, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE
+        )
+        ellipses = []
+        ellipse_arcs = []
+        for cnt in contours:
+            area = cv2.contourArea(cnt)
+            if area < min_area:
+                continue
+            x, y, w, h = cv2.boundingRect(cnt)
+            bbox = (x, y, w, h)
+            raw_pts = [(float(p[0][0]), float(p[0][1])) for p in cnt]
+
+            # 尝试检测完整椭圆
+            ellipse = _detect_ellipse_from_contour(
+                raw_pts, area, bbox,
+                eccentricity_min=0.2, eccentricity_max=0.95,
+                error_tolerance=0.10
+            )
+            if ellipse is not None:
+                ellipses.append(ellipse)
+                continue
+
+            # 尝试检测椭圆弧
+            e_arc = _detect_ellipse_arc_from_contour(
+                raw_pts, area, bbox,
+                eccentricity_min=0.2,
+                angle_min_deg=30, angle_max_deg=330,
+                error_tolerance=0.10
+            )
+            if e_arc is not None:
+                ellipse_arcs.append(e_arc)
+
+        results['ellipses'] = ellipses
+        results['ellipse_arcs'] = ellipse_arcs
+
+    return results
+
+
+def _merge_enhanced_results(base_shapes, enhanced_results):
+    """
+    将增强检测结果合并到基础检测结果中，去重
+
+    参数:
+        base_shapes: 基础检测结果（list of dict）
+        enhanced_results: 增强检测结果（dict）
+
+    返回:
+        合并后的形状列表
+    """
+    merged = list(base_shapes)
+
+    # 合并霍夫弧（去重：与已有圆弧比较）
+    for arc in enhanced_results.get('arcs', []):
+        # 检查是否与已有弧/圆重叠
+        is_dup = False
+        for s in merged:
+            if s.get('type') in (SHAPE_ARC, SHAPE_CIRCLE):
+                if _arc_shape_overlap(arc, s):
+                    is_dup = True
+                    break
+        if not is_dup:
+            # 补充 points 字段
+            if 'points' not in arc:
+                arc['points'] = circle_to_polyline(
+                    arc['center'][0], arc['center'][1], arc['radius'],
+                    segments=36
+                )
+            merged.append(arc)
+
+    # 合并椭圆
+    for ellipse in enhanced_results.get('ellipses', []):
+        is_dup = False
+        for s in merged:
+            if s.get('type') in (SHAPE_ELLIPSE, SHAPE_CIRCLE):
+                if _ellipse_shape_overlap(ellipse, s):
+                    is_dup = True
+                    break
+        if not is_dup:
+            merged.append(ellipse)
+
+    # 合并椭圆弧
+    for e_arc in enhanced_results.get('ellipse_arcs', []):
+        is_dup = False
+        for s in merged:
+            if s.get('type') in (SHAPE_ELLIPSE_ARC, SHAPE_ARC, SHAPE_ELLIPSE):
+                if _ellipse_shape_overlap(e_arc, s):
+                    is_dup = True
+                    break
+        if not is_dup:
+            merged.append(e_arc)
+
+    # 合并虚线（虚线会替换掉组成它的短线段）
+    dashed_lines = enhanced_results.get('dashed_lines', [])
+    if dashed_lines:
+        # 先标记要移除的短线段索引
+        to_remove = set()
+        for dl in dashed_lines:
+            seg_pts = dl.get('segments', [])
+            # 检查哪些已有线段属于这条虚线
+            for i, s in enumerate(merged):
+                if s.get('type') != SHAPE_LINE:
+                    continue
+                s_pts = s.get('points', [])
+                if len(s_pts) != 2:
+                    continue
+                s_p1, s_p2 = s_pts
+                for seg_p1, seg_p2 in seg_pts:
+                    d1 = math.hypot(s_p1[0] - seg_p1[0], s_p1[1] - seg_p1[1])
+                    d2 = math.hypot(s_p2[0] - seg_p2[0], s_p2[1] - seg_p2[1])
+                    d3 = math.hypot(s_p1[0] - seg_p2[0], s_p1[1] - seg_p2[1])
+                    d4 = math.hypot(s_p2[0] - seg_p1[0], s_p2[1] - seg_p1[1])
+                    min_d = min(d1 + d2, d3 + d4)
+                    if min_d < 10:
+                        to_remove.add(i)
+                        break
+
+        # 移除被虚线包含的线段
+        filtered = [s for i, s in enumerate(merged) if i not in to_remove]
+        # 添加虚线
+        filtered.extend(dashed_lines)
+        merged = filtered
+
+    # 同心圆组作为附加信息，不替换原有圆
+    # （同心圆组是元信息，可用于后续处理）
+    for cc in enhanced_results.get('concentric_circles', []):
+        cc['_concentric_group'] = True
+        merged.append(cc)
+
+    return merged
+
+
+def _arc_shape_overlap(arc1, shape2):
+    """
+    判断两个弧/圆形状是否重叠（基于圆心和半径）
+    """
+    center1 = arc1.get('center')
+    r1 = arc1.get('radius', 0)
+    center2 = shape2.get('center')
+    r2 = shape2.get('radius', 0)
+
+    if not center1 or not center2 or r1 <= 0 or r2 <= 0:
+        # 退化为 bbox 重叠判断
+        return _shapes_overlap(arc1, shape2) > 0.6
+
+    dist = math.hypot(center1[0] - center2[0], center1[1] - center2[1])
+    # 圆心接近且半径相近
+    if dist < (r1 + r2) * 0.1 and abs(r1 - r2) / max(r1, r2) < 0.2:
+        return True
+    return False
+
+
+def _ellipse_shape_overlap(ellipse1, shape2):
+    """
+    判断椭圆与另一个形状是否重叠
+    """
+    # 简单用 bbox 重叠判断
+    return _shapes_overlap(ellipse1, shape2) > 0.6
+
+
 def detect_geometric_shapes(image_path, min_area=50, epsilon_ratio=0.01,
                             circularity_threshold=0.85,
                             min_line_length=50,
@@ -1319,7 +2640,8 @@ def detect_geometric_shapes(image_path, min_area=50, epsilon_ratio=0.01,
                             mode='auto',
                             max_colors=16,
                             detect_symmetry=True,
-                            symmetry_threshold=0.85):
+                            symmetry_threshold=0.85,
+                            enhanced_detection=True):
     """
     从图片中检测几何形状（支持线条图和彩色填充图）
 
@@ -1741,10 +3063,23 @@ def detect_geometric_shapes(image_path, min_area=50, epsilon_ratio=0.01,
                 })
                 processed.add(i)
 
-    # ========== 步骤4：最终去重 ==========
+    # ========== 步骤4：增强检测（可选） ==========
+    if enhanced_detection and use_hough:
+        enhanced = _detect_enhanced_shapes(
+            gray, skeleton, binary,
+            min_area=min_area,
+            min_line_length=min_line_length,
+            line_threshold=line_threshold,
+            circle_param2=circle_param2,
+            circularity_threshold=circularity_threshold,
+            use_pyramid=False,
+        )
+        shapes = _merge_enhanced_results(shapes, enhanced)
+
+    # ========== 步骤5：最终去重 ==========
     shapes = _deduplicate_shapes(shapes)
 
-    # ========== 步骤5：对称性检测 ==========
+    # ========== 步骤6：对称性检测 ==========
     if detect_symmetry:
         for s in shapes:
             s['symmetries'] = detect_shape_symmetry(
@@ -4453,6 +5788,77 @@ def circle_to_polyline(cx, cy, radius, segments=72):
     return points
 
 
+def _ellipse_to_polyline(cx, cy, a, b, angle=0, segments=72):
+    """
+    将椭圆转换为折线点
+
+    参数:
+        cx, cy: 椭圆中心
+        a, b: 长半轴、短半轴
+        angle: 旋转角度（弧度）
+        segments: 分段数
+
+    返回:
+        折线点列表（闭合）
+    """
+    points = []
+    cos_a = math.cos(angle)
+    sin_a = math.sin(angle)
+    for i in range(segments):
+        t = 2 * math.pi * i / segments
+        # 椭圆参数方程（未旋转）
+        x0 = a * math.cos(t)
+        y0 = b * math.sin(t)
+        # 旋转 + 平移
+        x = cx + x0 * cos_a - y0 * sin_a
+        y = cy + x0 * sin_a + y0 * cos_a
+        points.append((float(x), float(y)))
+    points.append(points[0])  # 闭合
+    return points
+
+
+def _ellipse_arc_to_polyline(cx, cy, a, b, angle, start_angle, end_angle,
+                              segments=36):
+    """
+    将椭圆弧转换为折线点
+
+    参数:
+        cx, cy: 椭圆中心
+        a, b: 长半轴、短半轴
+        angle: 椭圆旋转角度（弧度）
+        start_angle: 起始参数角（弧度）
+        end_angle: 结束参数角（弧度）
+        segments: 分段数
+
+    返回:
+        折线点列表（不闭合）
+    """
+    # 确定扫过的角度
+    sweep = end_angle - start_angle
+    # 归一化到 [-2pi, 2pi]
+    while sweep > 2 * math.pi:
+        sweep -= 2 * math.pi
+    while sweep < -2 * math.pi:
+        sweep += 2 * math.pi
+
+    points = []
+    cos_a = math.cos(angle)
+    sin_a = math.sin(angle)
+
+    n = max(segments, int(abs(sweep) * 180 / math.pi / 5))  # 每5度一个点
+    n = max(n, 2)
+
+    for i in range(n + 1):
+        t = start_angle + sweep * i / n
+        x0 = a * math.cos(t)
+        y0 = b * math.sin(t)
+        x = cx + x0 * cos_a - y0 * sin_a
+        y = cy + x0 * sin_a + y0 * cos_a
+        points.append((float(x), float(y)))
+
+    return points
+
+
 def fit_geometric_shapes_from_paths(subpaths, colors=None, epsilon_ratio=0.02):
     """
     从矢量化路径（贝塞尔曲线）拟合几何形状
@@ -4662,6 +6068,72 @@ def shape_to_polyline_points(shape):
             y = cy + r * math.sin(angle)
             pts.append((x, y))
         return pts
+    elif shape['type'] == SHAPE_ELLIPSE:
+        # 椭圆：用近似折线
+        center = shape.get('center')
+        a = shape.get('a', 0)
+        b = shape.get('b', 0)
+        angle = shape.get('angle', 0)
+        if not isinstance(center, (tuple, list)) or len(center) != 2:
+            return []
+        try:
+            cx = float(center[0])
+            cy = float(center[1])
+            a_val = float(a)
+            b_val = float(b)
+            ang = float(angle)
+        except (TypeError, ValueError, IndexError):
+            return []
+        return _ellipse_to_polyline(cx, cy, a_val, b_val, ang)
+    elif shape['type'] == SHAPE_ELLIPSE_ARC:
+        # 椭圆弧：用近似折线
+        center = shape.get('center')
+        a = shape.get('a', 0)
+        b = shape.get('b', 0)
+        angle = shape.get('angle', 0)
+        start_angle = shape.get('start_angle', 0)
+        end_angle = shape.get('end_angle', math.pi)
+        if not isinstance(center, (tuple, list)) or len(center) != 2:
+            return []
+        try:
+            cx = float(center[0])
+            cy = float(center[1])
+            a_val = float(a)
+            b_val = float(b)
+            ang = float(angle)
+            sa = float(start_angle)
+            ea = float(end_angle)
+        except (TypeError, ValueError, IndexError):
+            return []
+        return _ellipse_arc_to_polyline(cx, cy, a_val, b_val, ang, sa, ea)
+    elif shape['type'] == SHAPE_DASHED_LINE:
+        # 虚线：返回整体起止点
+        pts = shape.get('points', [])
+        valid_pts = []
+        for p in pts:
+            try:
+                if isinstance(p, (tuple, list)) and len(p) == 2:
+                    valid_pts.append((float(p[0]), float(p[1])))
+            except (TypeError, ValueError, IndexError):
+                continue
+        return valid_pts
+    elif shape['type'] == SHAPE_CONCENTRIC_CIRCLES:
+        # 同心圆组：返回最外层圆的折线
+        circles = shape.get('circles', [])
+        if not circles:
+            return []
+        outermost = circles[-1]
+        center = outermost.get('center')
+        radius = outermost.get('radius', 0)
+        if not isinstance(center, (tuple, list)) or len(center) != 2:
+            return []
+        try:
+            cx = float(center[0])
+            cy = float(center[1])
+            r = float(radius)
+        except (TypeError, ValueError, IndexError):
+            return []
+        return circle_to_polyline(cx, cy, r)
     elif shape['type'] in (SHAPE_RECTANGLE, SHAPE_TRIANGLE, SHAPE_POLYGON, SHAPE_STAR):
         # 闭合多边形/五角星：首尾相连
         pts = shape['points']
@@ -4851,6 +6323,79 @@ def _shape_to_gt_segs(shape, sx, sy, ox, oy, flip_v=False):
         wsd_pts = [_transform(p[0], p[1]) for p in pts]
         return [make_line_seg(wsd_pts)], False
 
+    # 椭圆：用贝塞尔曲线近似（WSD无原生椭圆段）
+    elif shape_type == SHAPE_ELLIPSE:
+        center = _validate_point(shape.get('center'))
+        if center is None:
+            return [], False
+        a = shape.get('a', 0)
+        b = shape.get('b', 0)
+        angle = shape.get('angle', 0)
+        try:
+            a = float(a)
+            b = float(b)
+            angle = float(angle)
+        except (TypeError, ValueError):
+            return [], False
+        # 生成椭圆多边形近似点
+        pts = _ellipse_to_polyline(center[0], center[1], a, b, angle, segments=72)
+        wsd_pts = [_transform(p[0], p[1]) for p in pts]
+        return [make_gon_seg(wsd_pts)], True
+
+    # 椭圆弧：用贝塞尔曲线近似
+    elif shape_type == SHAPE_ELLIPSE_ARC:
+        center = _validate_point(shape.get('center'))
+        if center is None:
+            return [], False
+        a = shape.get('a', 0)
+        b = shape.get('b', 0)
+        angle = shape.get('angle', 0)
+        start_angle = shape.get('start_angle', 0)
+        end_angle = shape.get('end_angle', math.pi)
+        try:
+            a = float(a)
+            b = float(b)
+            angle = float(angle)
+            start_angle = float(start_angle)
+            end_angle = float(end_angle)
+        except (TypeError, ValueError):
+            return [], False
+        pts = _ellipse_arc_to_polyline(
+            center[0], center[1], a, b, angle,
+            start_angle, end_angle, segments=36
+        )
+        wsd_pts = [_transform(p[0], p[1]) for p in pts]
+        return [make_line_seg(wsd_pts)], False
+
+    # 虚线：用折线表示（首尾点），保留虚线信息
+    elif shape_type == SHAPE_DASHED_LINE:
+        pts = _validate_points(shape.get('points', []))
+        if not pts:
+            return [], False
+        wsd_pts = [_transform(p[0], p[1]) for p in pts]
+        # 先用普通直线段表示，虚线信息保存在 shape 属性中
+        return [make_line_seg(wsd_pts)], False
+
+    # 同心圆组：展开为多个圆
+    elif shape_type == SHAPE_CONCENTRIC_CIRCLES:
+        circles = shape.get('circles', [])
+        if not circles:
+            return [], False
+        # 取最外层圆的bbox近似
+        all_segs = []
+        for c in circles:
+            cc = c.get('center')
+            cr = c.get('radius', 0)
+            if cc and cr > 0:
+                cx = cc[0] * sx + ox
+                cy = cc[1] * sy + oy
+                r = cr * abs(sx)
+                from wsd_gt_build import make_circle_native_seg
+                all_segs.append(make_circle_native_seg(cx, cy, r))
+        if all_segs:
+            return all_segs, True
+        return [], False
+
     # 默认：用折线表示
     pts = shape_to_polyline_points(shape)
     valid_pts = _validate_points(pts)
@@ -4885,6 +6430,9 @@ def convert_geo_to_wsd(input_path, wsd_path,
                        symmetry_correction=True,
                        symmetry_type='auto',
                        right_angle_correction=True,
+                       auto_label=True,
+                       auto_label_min_confidence=0.2,
+                       enhanced_detection=True,
                        progress_cb=None):
     """
     几何转换：识别图片中的几何图形并转换为WSD
@@ -4919,6 +6467,10 @@ def convert_geo_to_wsd(input_path, wsd_path,
         show_symmetry_axes: 是否在WSD中绘制对称轴/对称中心（辅助线）
         symmetry_correction: 是否启用对称性矫正（默认开启）
         right_angle_correction: 是否启用直角矫正（默认开启）
+        auto_label: 是否自动识别字母标注（默认True）
+        auto_label_min_confidence: 自动标注最低置信度阈值（默认0.35）
+        enhanced_detection: 是否启用增强检测（默认True）
+            包含：霍夫弧检测、椭圆检测、虚线识别、同心圆检测等
     """
     import traceback
 
@@ -4940,6 +6492,7 @@ def convert_geo_to_wsd(input_path, wsd_path,
         mode=mode, max_colors=max_colors,
         detect_symmetry=detect_symmetry,
         symmetry_threshold=symmetry_threshold,
+        enhanced_detection=enhanced_detection,
     ))
 
     if not shapes:
@@ -4947,6 +6500,39 @@ def convert_geo_to_wsd(input_path, wsd_path,
 
     if progress_cb:
         progress_cb(f"检测到 {len(shapes)} 个形状", 20)
+
+    # 步骤1.2：字母自动识别（如果启用）
+    letter_recognition_result = None
+    img_color_for_letters = None
+    if auto_label:
+        try:
+            import cv2
+            from PIL import Image
+            from wsd_letter_recognizer import recognize_letters_from_image
+
+            # 读取原图（用于字母识别）
+            img_color_for_letters = cv2.imread(input_path)
+            if img_color_for_letters is None:
+                img_pil = Image.open(input_path).convert('RGB')
+                img_color_for_letters = np.array(img_pil)
+                img_color_for_letters = cv2.cvtColor(img_color_for_letters, cv2.COLOR_RGB2BGR)
+
+            if img_color_for_letters is not None:
+                h, w = img_color_for_letters.shape[:2]
+                letter_recognition_result = recognize_letters_from_image(
+                    img_color_for_letters, shapes,
+                    img_size=(w, h),
+                    min_confidence=auto_label_min_confidence,
+                    direct_detect=True,
+                )
+                n_letters = len(letter_recognition_result.get('merged_annotations', []))
+                if progress_cb:
+                    progress_cb(f"识别到 {n_letters} 个字母标注", 22)
+        except Exception as e:
+            print(f"字母识别失败: {e}")
+            import traceback
+            traceback.print_exc()
+            letter_recognition_result = None
 
     # 步骤1.5：形状矫正（直角、对称性）
     if symmetry_correction or right_angle_correction:
@@ -5158,6 +6744,45 @@ def convert_geo_to_wsd(input_path, wsd_path,
 
     wsd_data = _step("组装文件", _build_file)
 
+    # 步骤5.5：合并自动字母标注（如果启用）
+    text_annotations_info = {}
+    if auto_label and letter_recognition_result:
+        try:
+            from wsd_letter_recognizer import (
+                associate_letters_to_geometry, annotations_to_wsd_config
+            )
+            from wsd_mixed_build import merge_geo_and_text
+
+            merged_anns = letter_recognition_result.get('merged_annotations', [])
+            if merged_anns:
+                # 关联到几何元素
+                geo_shapes_for_assoc = [s for s in shapes if not s.get('_is_text_candidate', False)]
+                associated = associate_letters_to_geometry(
+                    list(merged_anns), geo_shapes_for_assoc
+                )
+
+                # 转换为WSD坐标
+                wsd_anns = annotations_to_wsd_config(
+                    associated, sx=sx, sy=sy, ox=ox, oy=oy
+                )
+
+                # 合并到WSD文件
+                if wsd_anns:
+                    wsd_data = merge_geo_and_text(wsd_data, wsd_anns)
+                    # 重新写入文件
+                    with open(wsd_path, 'wb') as f:
+                        f.write(wsd_data)
+                    text_annotations_info = {
+                        'count': len(wsd_anns),
+                        'annotations': wsd_anns,
+                    }
+                    if progress_cb:
+                        progress_cb(f"已添加 {len(wsd_anns)} 个文字标注", 96)
+        except Exception as e:
+            print(f"合并文字标注失败: {e}")
+            import traceback
+            traceback.print_exc()
+
     if progress_cb:
         progress_cb("完成！", 100)
 
@@ -5176,6 +6801,7 @@ def convert_geo_to_wsd(input_path, wsd_path,
         'seglists': len(seglists),
         'size': len(wsd_data),
         'symmetries': symmetry_stats,  # 对称类型统计
+        'text_annotations': text_annotations_info,  # 文字标注信息
     }
 
 
@@ -5226,6 +6852,7 @@ def convert_geo_to_wsd_multi(input_files, output_path, **kwargs):
                 mode=mode, max_colors=max_colors,
                 detect_symmetry=detect_symmetry,
                 symmetry_threshold=symmetry_threshold,
+                enhanced_detection=enhanced_detection,
             )
         except Exception as e:
             err_msg = f"形状检测失败: {e}"

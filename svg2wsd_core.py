@@ -414,6 +414,137 @@ def reverse_path(sp):
     return result
 
 
+# ========== SVG基础元素转路径 ==========
+
+def _svg_shape_to_path_d(elem):
+    """
+    将SVG基础形状元素转换为path的d属性字符串
+    支持: rect, circle, ellipse, line, polyline, polygon
+
+    返回: d字符串（或None如果不支持）
+    """
+    import math
+
+    tag = elem.tag.split('}')[-1] if '}' in elem.tag else elem.tag
+
+    def _attr(name, default='0'):
+        val = elem.get(name, default)
+        try:
+            return float(val)
+        except (ValueError, TypeError):
+            return float(default)
+
+    if tag == 'rect':
+        x = _attr('x')
+        y = _attr('y')
+        w = _attr('width')
+        h = _attr('height')
+        rx = elem.get('rx', None)
+        ry = elem.get('ry', None)
+
+        if rx is not None or ry is not None:
+            # 圆角矩形
+            rx = _attr('rx', '0') if rx is not None else _attr('ry', '0')
+            ry = _attr('ry', '0') if ry is not None else rx
+            rx = min(rx, w / 2)
+            ry = min(ry, h / 2)
+            if rx > 0 and ry > 0:
+                # 使用贝塞尔曲线近似圆角（圆弧用贝塞尔近似）
+                # 近似系数 k = 0.5522847498
+                k = 0.5522847498
+                cx = rx * k
+                cy = ry * k
+                d = (
+                    f"M{x + rx},{y} "
+                    f"L{x + w - rx},{y} "
+                    f"C{x + w - rx + cx},{y} {x + w},{y + ry - cy} {x + w},{y + ry} "
+                    f"L{x + w},{y + h - ry} "
+                    f"C{x + w},{y + h - ry + cy} {x + w - rx + cx},{y + h} {x + w - rx},{y + h} "
+                    f"L{x + rx},{y + h} "
+                    f"C{x + rx - cx},{y + h} {x},{y + h - ry + cy} {x},{y + h - ry} "
+                    f"L{x},{y + ry} "
+                    f"C{x},{y + ry - cy} {x + rx - cx},{y} {x + rx},{y} "
+                    f"Z"
+                )
+                return d
+        # 普通矩形
+        return f"M{x},{y} L{x + w},{y} L{x + w},{y + h} L{x},{y + h} Z"
+
+    elif tag == 'circle':
+        cx = _attr('cx')
+        cy = _attr('cy')
+        r = _attr('r')
+        if r <= 0:
+            return None
+        # 用4段贝塞尔曲线近似圆
+        k = 0.5522847498
+        offset = r * k
+        d = (
+            f"M{cx + r},{cy} "
+            f"C{cx + r},{cy - offset} {cx + offset},{cy - r} {cx},{cy - r} "
+            f"C{cx - offset},{cy - r} {cx - r},{cy - offset} {cx - r},{cy} "
+            f"C{cx - r},{cy + offset} {cx - offset},{cy + r} {cx},{cy + r} "
+            f"C{cx + offset},{cy + r} {cx + r},{cy + offset} {cx + r},{cy} "
+            f"Z"
+        )
+        return d
+
+    elif tag == 'ellipse':
+        cx = _attr('cx')
+        cy = _attr('cy')
+        rx = _attr('rx')
+        ry = _attr('ry')
+        if rx <= 0 or ry <= 0:
+            return None
+        k = 0.5522847498
+        ox = rx * k
+        oy = ry * k
+        d = (
+            f"M{cx + rx},{cy} "
+            f"C{cx + rx},{cy - oy} {cx + ox},{cy - ry} {cx},{cy - ry} "
+            f"C{cx - ox},{cy - ry} {cx - rx},{cy - oy} {cx - rx},{cy} "
+            f"C{cx - rx},{cy + oy} {cx - ox},{cy + ry} {cx},{cy + ry} "
+            f"C{cx + ox},{cy + ry} {cx + rx},{cy + oy} {cx + rx},{cy} "
+            f"Z"
+        )
+        return d
+
+    elif tag == 'line':
+        x1 = _attr('x1')
+        y1 = _attr('y1')
+        x2 = _attr('x2')
+        y2 = _attr('y2')
+        return f"M{x1},{y1} L{x2},{y2}"
+
+    elif tag == 'polyline':
+        points = elem.get('points', '').strip()
+        if not points:
+            return None
+        # 解析点列表
+        coords = re.findall(r'[-+]?(?:\d+\.?\d*|\.\d+)', points)
+        if len(coords) < 4:
+            return None
+        d_parts = [f"M{coords[0]},{coords[1]}"]
+        for i in range(2, len(coords) - 1, 2):
+            d_parts.append(f"L{coords[i]},{coords[i + 1]}")
+        return ' '.join(d_parts)
+
+    elif tag == 'polygon':
+        points = elem.get('points', '').strip()
+        if not points:
+            return None
+        coords = re.findall(r'[-+]?(?:\d+\.?\d*|\.\d+)', points)
+        if len(coords) < 6:
+            return None
+        d_parts = [f"M{coords[0]},{coords[1]}"]
+        for i in range(2, len(coords) - 1, 2):
+            d_parts.append(f"L{coords[i]},{coords[i + 1]}")
+        d_parts.append("Z")
+        return ' '.join(d_parts)
+
+    return None
+
+
 # ========== SVG transform 解析 ==========
 
 def _parse_transform(transform_str):
@@ -564,6 +695,16 @@ def _parse_svg_file(svg_path):
                 t = _parse_transform(child.get('transform', ''))
                 full_t = _concat_transform(combined, t)
                 paths.append((d, fill, stroke, stroke_width, full_t))
+            elif tag in ('rect', 'circle', 'ellipse', 'line', 'polyline', 'polygon'):
+                # SVG基础形状元素，转换为路径
+                d = _svg_shape_to_path_d(child)
+                if d:
+                    fill = _get_fill(child, g_fill)
+                    stroke = _get_stroke(child, g_stroke)
+                    stroke_width = _get_stroke_width(child, g_stroke_width)
+                    t = _parse_transform(child.get('transform', ''))
+                    full_t = _concat_transform(combined, t)
+                    paths.append((d, fill, stroke, stroke_width, full_t))
 
     _collect(root, '#000000', 'none', 1.0, None)
 
@@ -610,6 +751,237 @@ def _parse_svg_file(svg_path):
 
     # 保存描边信息到全局（供convert_to_wsd使用）
     return all_subpaths, all_colors, bbox, all_is_stroke, all_stroke_widths
+
+
+# ========== 图像预处理增强 ==========
+
+def _preprocess_image(img, options=None):
+    """
+    图像预处理增强函数
+
+    参数:
+        img: numpy数组图像 (BGR或灰度)
+        options: 字典，可选预处理开关
+            - super_resolution: bool, 超分辨率增强（双三次插值放大2倍+锐化）
+            - contrast_enhance: bool, 自适应对比度增强（CLAHE）
+            - denoise: bool, 保边去噪（双边滤波）
+            - edge_sharpen: bool, 边缘增强（Unsharp Mask）
+
+    返回: 处理后的图像 (numpy数组)
+    """
+    import cv2
+    import numpy as np
+
+    if options is None:
+        return img
+
+    result = img.copy()
+    is_color = len(result.shape) == 3 and result.shape[2] >= 3
+
+    # 1. 超分辨率增强（放大2倍 + 锐化核）
+    if options.get('super_resolution', False):
+        h, w = result.shape[:2]
+        result = cv2.resize(result, (w * 2, h * 2),
+                            interpolation=cv2.INTER_CUBIC)
+        # 锐化核（拉普拉斯风格，增强边缘）
+        sharpen_kernel = np.array([
+            [-1, -1, -1],
+            [-1,  9, -1],
+            [-1, -1, -1]
+        ], dtype=np.float32)
+        result = cv2.filter2D(result, -1, sharpen_kernel)
+
+    # 2. 自适应对比度增强（CLAHE）
+    if options.get('contrast_enhance', False):
+        if is_color:
+            # 彩色图：在LAB空间的L通道上做CLAHE，避免色偏
+            lab = cv2.cvtColor(result, cv2.COLOR_BGR2LAB)
+            l, a, b = cv2.split(lab)
+            clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+            l = clahe.apply(l)
+            lab = cv2.merge([l, a, b])
+            result = cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
+        else:
+            # 灰度图：直接做CLAHE
+            clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+            result = clahe.apply(result)
+
+    # 3. 保边去噪（双边滤波）
+    if options.get('denoise', False):
+        if is_color:
+            result = cv2.bilateralFilter(result, 9, 75, 75)
+        else:
+            result = cv2.bilateralFilter(result, 9, 75, 75)
+
+    # 4. 边缘增强（Unsharp Mask 非锐化掩膜）
+    if options.get('edge_sharpen', False):
+        if is_color:
+            # 对亮度通道做USM，避免色偏
+            lab = cv2.cvtColor(result, cv2.COLOR_BGR2LAB)
+            l, a, b = cv2.split(lab)
+            blurred = cv2.GaussianBlur(l, (0, 0), sigmaX=1.5)
+            l_usm = cv2.addWeighted(l, 1.5, blurred, -0.5, 0)
+            lab = cv2.merge([l_usm, a, b])
+            result = cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
+        else:
+            blurred = cv2.GaussianBlur(result, (0, 0), sigmaX=1.5)
+            result = cv2.addWeighted(result, 1.5, blurred, -0.5, 0)
+
+    return result
+
+
+def _adaptive_binarize(gray_img, method='sauvola', block_size=35, C=10):
+    """
+    自适应二值化
+
+    参数:
+        gray_img: 灰度图像 (uint8)
+        method: 'sauvola' - Sauvola风格（高斯权重自适应阈值）
+                'gaussian' - OpenCV高斯加权自适应阈值
+                'otsu' - OTSU全局阈值（备选）
+        block_size: 邻域块大小（必须是奇数）
+        C: 从均值或加权均值中减去的常数
+
+    返回: 二值掩码 (bool数组，True=前景/黑色)
+    """
+    import cv2
+    import numpy as np
+
+    if method == 'otsu':
+        _, bw = cv2.threshold(gray_img, 0, 255,
+                              cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        return bw < 128
+    elif method == 'sauvola':
+        # Sauvola风格：基于局部均值和标准差的自适应阈值
+        # T(x,y) = mean(x,y) * (1 + k * (std(x,y)/R - 1))
+        # k=0.2, R=128 (8位图像的动态范围的一半)
+        k = 0.2
+        R = 128.0
+
+        # 确保block_size是奇数
+        if block_size % 2 == 0:
+            block_size += 1
+        block_size = max(3, block_size)
+
+        # 局部均值（高斯加权）
+        mean = cv2.GaussianBlur(gray_img.astype(np.float32),
+                                (block_size, block_size), 0)
+        # 局部标准差
+        mean_sq = cv2.GaussianBlur(
+            (gray_img.astype(np.float32) ** 2),
+            (block_size, block_size), 0
+        )
+        std = np.sqrt(np.maximum(mean_sq - mean ** 2, 0))
+
+        # Sauvola阈值
+        threshold = mean * (1.0 + k * (std / R - 1.0))
+        threshold = np.clip(threshold, 0, 255)
+
+        return gray_img.astype(np.float32) < threshold
+    else:
+        # gaussian - OpenCV自带的高斯加权自适应阈值
+        if block_size % 2 == 0:
+            block_size += 1
+        block_size = max(3, block_size)
+        bw = cv2.adaptiveThreshold(
+            gray_img, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+            cv2.THRESH_BINARY, block_size, C
+        )
+        return bw < 128
+
+
+# ========== 颜色量化工具 ==========
+
+def _kmeans_quantize(img_array, n_colors=16):
+    """
+    使用K-means聚类进行颜色量化（LAB颜色空间，效果更好）
+
+    参数:
+        img_array: RGB图像数组 (h, w, 3) uint8
+        n_colors: 目标颜色数量
+
+    返回: (palette, labels)
+        palette: 调色板数组 (n_colors, 3) uint8 RGB
+        labels: 每个像素的颜色索引 (h, w) int
+    """
+    import cv2
+    import numpy as np
+
+    h, w = img_array.shape[:2]
+
+    # 转换到LAB颜色空间（更符合人眼感知）
+    img_lab = cv2.cvtColor(img_array, cv2.COLOR_RGB2LAB).astype(np.float32)
+    pixels = img_lab.reshape(-1, 3)
+
+    # K-means聚类
+    criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 20, 0.5)
+    _, labels, palette_lab = cv2.kmeans(
+        pixels, n_colors, None, criteria, 5, cv2.KMEANS_PP_CENTERS
+    )
+
+    # 将LAB调色板转换回RGB
+    palette_lab_uint8 = palette_lab.astype(np.uint8).reshape(1, -1, 3)
+    palette_rgb = cv2.cvtColor(palette_lab_uint8, cv2.COLOR_LAB2RGB).reshape(-1, 3)
+
+    labels = labels.reshape(h, w)
+
+    return palette_rgb, labels
+
+
+def _merge_similar_colors(palette, labels, threshold=20):
+    """
+    合并距离相近的颜色，减少对象数量
+
+    参数:
+        palette: 调色板数组 (n, 3) uint8
+        labels: 标签图 (h, w) int
+        threshold: 颜色距离阈值（LAB空间的欧氏距离）
+
+    返回: (new_palette, new_labels, merge_map)
+    """
+    import cv2
+    import numpy as np
+
+    n = len(palette)
+    if n <= 1:
+        return palette, labels, {i: i for i in range(n)}
+
+    # 转换到LAB空间计算距离
+    palette_lab = cv2.cvtColor(
+        palette.reshape(1, -1, 3).astype(np.uint8),
+        cv2.COLOR_RGB2LAB
+    ).reshape(-1, 3).astype(np.float32)
+
+    # 合并映射：旧索引 -> 新索引
+    merge_map = {}
+    new_palette_list = []
+    new_indices = []
+
+    for i in range(n):
+        # 查找是否已有相似颜色
+        found = -1
+        for j, new_color in enumerate(new_palette_list):
+            dist = np.linalg.norm(palette_lab[i] - new_color)
+            if dist < threshold:
+                found = j
+                break
+
+        if found >= 0:
+            merge_map[i] = found
+        else:
+            merge_map[i] = len(new_palette_list)
+            new_palette_list.append(palette_lab[i])
+            new_indices.append(i)
+
+    # 构建新调色板（RGB）
+    new_palette = palette[new_indices].copy()
+
+    # 重建标签
+    new_labels = np.zeros_like(labels)
+    for old_idx, new_idx in merge_map.items():
+        new_labels[labels == old_idx] = new_idx
+
+    return new_palette, new_labels, merge_map
 
 
 # ========== 图片彩色矢量化 ==========
@@ -722,20 +1094,67 @@ def _median_cut_quantize(img_array, n_colors=16):
     return palette, labels
 
 
-def _quantize_colors(img_array, n_colors=16):
+def _quantize_colors(img_array, n_colors=16, method='median_cut'):
     """
-    颜色量化（优先使用中位切分法，效果更好）
+    颜色量化
+
+    参数:
+        method: 'median_cut' - 中位切分法（快）
+                'kmeans' - K-means聚类（效果更好，LAB空间）
     返回: (quantized_img, palette, labels)
     """
     import numpy as np
 
     h, w = img_array.shape[:2]
 
-    # 使用中位切分法
-    palette, labels = _median_cut_quantize(img_array, n_colors=n_colors)
+    if method == 'kmeans':
+        palette, labels = _kmeans_quantize(img_array, n_colors=n_colors)
+    else:
+        # 使用中位切分法
+        palette, labels = _median_cut_quantize(img_array, n_colors=n_colors)
+
     quantized_img = palette[labels]
 
     return quantized_img, palette, labels
+
+
+def _smooth_mask_edge(bw_mask, close_kernel_size=3, gaussian_sigma=0.8):
+    """
+    对二值掩码做边缘平滑：形态学闭运算 + 高斯平滑后重新二值化
+    用于改善每层二值图的矢量化质量
+
+    参数:
+        bw_mask: bool数组 (h, w)
+        close_kernel_size: 形态学闭运算核大小
+        gaussian_sigma: 高斯平滑sigma
+
+    返回: 平滑后的bool数组
+    """
+    import cv2
+    import numpy as np
+
+    mask_uint8 = bw_mask.astype(np.uint8) * 255
+
+    # 形态学闭运算：填补小空洞
+    if close_kernel_size > 1:
+        kernel = cv2.getStructuringElement(
+            cv2.MORPH_ELLIPSE, (close_kernel_size, close_kernel_size)
+        )
+        mask_closed = cv2.morphologyEx(mask_uint8, cv2.MORPH_CLOSE, kernel)
+    else:
+        mask_closed = mask_uint8
+
+    # 高斯平滑 + 重新二值化，让边缘更圆润
+    if gaussian_sigma > 0:
+        ksize = max(3, int(gaussian_sigma * 3) * 2 + 1)
+        if ksize % 2 == 0:
+            ksize += 1
+        blurred = cv2.GaussianBlur(mask_closed, (ksize, ksize), gaussian_sigma)
+        _, result = cv2.threshold(blurred, 127, 255, cv2.THRESH_BINARY)
+    else:
+        result = mask_closed
+
+    return result > 128
 
 
 def _vectorize_mask(bw_mask, turdsize=2, alphamax=1.0):
@@ -804,6 +1223,10 @@ def _parse_image_file_color(img_path, turdsize=2, n_colors=32, alphamax=1.0,
                             sample_colors_from_original=True,
                             method='contour', contour_step=3, contour_min_area=50,
                             scale=0.5, smooth_level=1, dilate_size=2,
+                            quantize_method='median_cut',
+                            merge_colors=False, merge_color_threshold=20,
+                            edge_smooth=False,
+                            preprocess_options=None,
                             progress_cb=None):
     """
     将彩色图片矢量化为带颜色的贝塞尔路径
@@ -817,6 +1240,11 @@ def _parse_image_file_color(img_path, turdsize=2, n_colors=32, alphamax=1.0,
         scale: 图片处理缩放比例（越大越精细但越慢）
         smooth_level: 颜色平滑等级 0=无 1=轻微 2=中等 3=强
         dilate_size: 区域膨胀大小（像素），消除色块间缝隙
+        quantize_method: 颜色量化方法 'median_cut' / 'kmeans'
+        merge_colors: 是否合并相近颜色（减少对象数）
+        merge_color_threshold: 颜色合并阈值（LAB空间距离）
+        edge_smooth: 是否对每层二值图做边缘平滑（形态学闭+高斯）
+        preprocess_options: 预处理选项字典
         progress_cb: 进度回调函数(msg, percent)
 
     返回: (子路径列表, 颜色列表, 边界框)
@@ -830,6 +1258,7 @@ def _parse_image_file_color(img_path, turdsize=2, n_colors=32, alphamax=1.0,
             alphamax=alphamax,
             smooth_level=smooth_level,
             dilate_size=dilate_size,
+            preprocess_options=preprocess_options,
             progress_cb=progress_cb
         )
     else:
@@ -838,21 +1267,35 @@ def _parse_image_file_color(img_path, turdsize=2, n_colors=32, alphamax=1.0,
             turdsize=turdsize,
             n_colors=n_colors,
             alphamax=alphamax,
-            sample_colors_from_original=sample_colors_from_original
+            sample_colors_from_original=sample_colors_from_original,
+            quantize_method=quantize_method,
+            merge_colors=merge_colors,
+            merge_color_threshold=merge_color_threshold,
+            edge_smooth=edge_smooth,
+            preprocess_options=preprocess_options,
         )
 
 
 def _parse_image_file_quantize_color(img_path, turdsize=2, n_colors=32, alphamax=1.0,
-                                      sample_colors_from_original=True):
+                                      sample_colors_from_original=True,
+                                      quantize_method='median_cut',
+                                      merge_colors=False, merge_color_threshold=20,
+                                      edge_smooth=False,
+                                      preprocess_options=None):
     """
     颜色量化法彩色矢量化
-    使用中位切分颜色量化 + 连通区域分析 + 分区域potrace矢量化
+    使用颜色量化 + 连通区域分析 + 分区域potrace矢量化
     每个区域用贝塞尔曲线形成封闭区间，填充图片原本的颜色
 
     参数:
         sample_colors_from_original: 从原图采样每个区域的平均颜色（True）
                                      还是使用量化调色板颜色（False）
                                      True时颜色种类远多于n_colors
+        quantize_method: 颜色量化方法 'median_cut' / 'kmeans'
+        merge_colors: 是否合并相近颜色（减少对象数）
+        merge_color_threshold: 颜色合并阈值（LAB空间距离）
+        edge_smooth: 是否对每层二值图做边缘平滑
+        preprocess_options: 预处理选项字典
 
     返回: (子路径列表, 颜色列表, 边界框)
     """
@@ -878,8 +1321,24 @@ def _parse_image_file_quantize_color(img_path, turdsize=2, n_colors=32, alphamax
         vec_arr = orig_arr
         scale_v = 1.0
 
+    # 图像预处理（仅对用于分割的vec_arr）
+    if preprocess_options:
+        vec_bgr = cv2.cvtColor(vec_arr, cv2.COLOR_RGB2BGR)
+        vec_bgr = _preprocess_image(vec_bgr, preprocess_options)
+        if vec_bgr.dtype != np.uint8:
+            vec_bgr = np.clip(vec_bgr, 0, 255).astype(np.uint8)
+        vec_arr = cv2.cvtColor(vec_bgr, cv2.COLOR_BGR2RGB)
+
     # 颜色量化（用于区域分割）
-    quantized_img, palette, labels = _quantize_colors(vec_arr, n_colors=n_colors)
+    quantized_img, palette, labels = _quantize_colors(
+        vec_arr, n_colors=n_colors, method=quantize_method
+    )
+
+    # 颜色合并（可选）
+    if merge_colors and len(palette) > 1:
+        palette, labels, _ = _merge_similar_colors(
+            palette, labels, threshold=merge_color_threshold
+        )
 
     # 对每个调色板颜色进行连通区域分析
     # 这样同一种调色板颜色的不同区域会被分开，每个区域可以有自己的平均颜色
@@ -935,6 +1394,12 @@ def _parse_image_file_quantize_color(img_path, turdsize=2, n_colors=32, alphamax
     all_colors = []
 
     for region_mask, area, color_hex in all_regions:
+        # 边缘平滑（可选）
+        if edge_smooth:
+            region_mask = _smooth_mask_edge(
+                region_mask, close_kernel_size=3, gaussian_sigma=0.8
+            )
+
         # 矢量化该区域
         subpaths = _vectorize_mask(region_mask, turdsize=turdsize, alphamax=alphamax)
 
@@ -945,7 +1410,8 @@ def _parse_image_file_quantize_color(img_path, turdsize=2, n_colors=32, alphamax
 
     if not all_subpaths:
         # 如果彩色矢量化失败，回退到黑白矢量化
-        return _parse_image_file(img_path, threshold=128, turdsize=turdsize, alphamax=alphamax)
+        return _parse_image_file(img_path, threshold=128, turdsize=turdsize, alphamax=alphamax,
+                                 preprocess_options=preprocess_options)
 
     # 计算边界框
     all_x = [x for sp in all_subpaths for x, y in sp]
@@ -958,6 +1424,7 @@ def _parse_image_file_quantize_color(img_path, turdsize=2, n_colors=32, alphamax
 def _parse_image_file_contour_color(img_path, min_area=50, step=3,
                                     scale=0.5, alphamax=1.0,
                                     smooth_level=1, dilate_size=2,
+                                    preprocess_options=None,
                                     progress_cb=None):
     """
     彩色矢量化方法（原色填充）- 高精度版
@@ -972,6 +1439,7 @@ def _parse_image_file_contour_color(img_path, min_area=50, step=3,
         alphamax: potrace的alphamax参数（越小曲线越锐利）
         smooth_level: 颜色平滑等级 0=无 1=轻微 2=中等 3=强
         dilate_size: 区域膨胀大小（像素），用于消除色块间缝隙，0=不膨胀
+        preprocess_options: 预处理选项字典
         progress_cb: 进度回调函数(msg, percent)
 
     返回: (子路径列表, 颜色列表, 边界框)
@@ -989,6 +1457,12 @@ def _parse_image_file_contour_color(img_path, min_area=50, step=3,
     if img is None:
         pil_img = Image.open(img_path).convert('RGB')
         img = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
+
+    # 图像预处理（可选）
+    if preprocess_options:
+        img = _preprocess_image(img, preprocess_options)
+        if img.dtype != np.uint8:
+            img = np.clip(img, 0, 255).astype(np.uint8)
 
     img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
     orig_h, orig_w = img_rgb.shape[:2]
@@ -1232,31 +1706,58 @@ def _parse_image_file_contour_color(img_path, min_area=50, step=3,
 
 # ========== 图片矢量化（黑白）==========
 
-def _parse_image_file(img_path, threshold=128, turdsize=2, alphamax=1.0):
+def _parse_image_file(img_path, threshold=128, turdsize=2, alphamax=1.0,
+                      preprocess_options=None, adaptive_binarize=False,
+                      adaptive_method='sauvola'):
     """
     将图片矢量化为贝塞尔路径
     返回: (子路径列表, 颜色列表, 边界框)
     颜色: 黑色填充 '#000000'
+
+    参数:
+        preprocess_options: 预处理选项字典（None表示不做预处理）
+            - super_resolution: bool, 超分辨率增强
+            - contrast_enhance: bool, 对比度增强
+            - denoise: bool, 保边去噪
+            - edge_sharpen: bool, 边缘锐化
+        adaptive_binarize: bool, 是否使用自适应二值化
+        adaptive_method: 'sauvola' / 'gaussian' / 'otsu'
     """
     from PIL import Image
     import numpy as np
+    import cv2
     import potrace
 
     # 读取图片
-    img = Image.open(img_path).convert('L')
+    pil_img = Image.open(img_path).convert('L')
 
     # 如果图片太大，限制一下尺寸加快处理
     max_dim = 1000
-    w, h = img.size
+    w, h = pil_img.size
     if max(w, h) > max_dim:
         scale = max_dim / max(w, h)
         new_w = int(w * scale)
         new_h = int(h * scale)
-        img = img.resize((new_w, new_h), Image.LANCZOS)
+        pil_img = pil_img.resize((new_w, new_h), Image.LANCZOS)
+
+    # 转换为OpenCV格式的灰度图
+    gray = np.array(pil_img)
+
+    # 图像预处理
+    if preprocess_options:
+        gray = _preprocess_image(gray, preprocess_options)
+        # 确保处理后还是uint8
+        if gray.dtype != np.uint8:
+            gray = np.clip(gray, 0, 255).astype(np.uint8)
 
     # 二值化
-    arr = np.array(img)
-    bw = arr < threshold  # True = 黑色(前景)
+    if adaptive_binarize:
+        # 自适应二值化（Sauvola风格等）
+        bw = _adaptive_binarize(gray, method=adaptive_method,
+                                block_size=35, C=10)
+    else:
+        # 固定阈值二值化（保持原行为）
+        bw = gray < threshold  # True = 黑色(前景)
 
     # potrace 矢量化（取反，因为potrace矢量化的是值为0的区域）
     bmp = potrace.Bitmap(~bw)
@@ -1333,6 +1834,12 @@ def parse_input_file(file_path, img_threshold=128, img_turdsize=2,
                      img_color_method='contour',
                      img_contour_step=5, img_contour_min_area=100,
                      img_scale=0.5, img_smooth_level=1, img_dilate_size=2,
+                     img_adaptive_binarize=False,
+                     img_preprocess_super_res=False,
+                     img_preprocess_contrast=False,
+                     img_preprocess_denoise=False,
+                     img_preprocess_sharpen=False,
+                     img_quantize_method='median_cut',
                      progress_cb=None):
     """
     统一解析输入文件（SVG/图片）
@@ -1342,6 +1849,18 @@ def parse_input_file(file_path, img_threshold=128, img_turdsize=2,
     """
     extra_info = {}
     ext = os.path.splitext(file_path)[1].lower()
+
+    # 构建预处理选项字典（只有至少一个为True时才传入）
+    preprocess_options = None
+    if (img_preprocess_super_res or img_preprocess_contrast
+            or img_preprocess_denoise or img_preprocess_sharpen):
+        preprocess_options = {
+            'super_resolution': img_preprocess_super_res,
+            'contrast_enhance': img_preprocess_contrast,
+            'denoise': img_preprocess_denoise,
+            'edge_sharpen': img_preprocess_sharpen,
+        }
+
     if ext in SVG_EXTENSIONS:
         subpaths, colors, bbox, is_stroke, stroke_widths = _parse_svg_file(file_path)
         extra_info['is_stroke'] = is_stroke
@@ -1358,12 +1877,16 @@ def parse_input_file(file_path, img_threshold=128, img_turdsize=2,
                 scale=img_scale,
                 smooth_level=img_smooth_level,
                 dilate_size=img_dilate_size,
+                quantize_method=img_quantize_method,
+                preprocess_options=preprocess_options,
                 progress_cb=progress_cb
             )
         else:
             # 黑白矢量化模式
             subpaths, colors, bbox = _parse_image_file(
-                file_path, threshold=img_threshold, turdsize=img_turdsize
+                file_path, threshold=img_threshold, turdsize=img_turdsize,
+                preprocess_options=preprocess_options,
+                adaptive_binarize=img_adaptive_binarize,
             )
         extra_info['is_stroke'] = [False] * len(subpaths)
         extra_info['stroke_widths'] = [1.0] * len(subpaths)
@@ -1385,11 +1908,15 @@ def parse_input_file(file_path, img_threshold=128, img_turdsize=2,
                         contour_min_area=img_contour_min_area,
                         smooth_level=img_smooth_level,
                         dilate_size=img_dilate_size,
+                        quantize_method=img_quantize_method,
+                        preprocess_options=preprocess_options,
                         progress_cb=progress_cb
                     )
                 else:
                     subpaths, colors, bbox = _parse_image_file(
-                        file_path, threshold=img_threshold, turdsize=img_turdsize
+                        file_path, threshold=img_threshold, turdsize=img_turdsize,
+                        preprocess_options=preprocess_options,
+                        adaptive_binarize=img_adaptive_binarize,
                     )
                 extra_info['is_stroke'] = [False] * len(subpaths)
                 extra_info['stroke_widths'] = [1.0] * len(subpaths)
@@ -1632,6 +2159,12 @@ def convert_to_wsd(input_path, wsd_path, color_mode='rainbow',
                    img_color_method='contour',
                    img_contour_step=5, img_contour_min_area=100,
                    img_scale=0.5, img_smooth_level=1, img_dilate_size=2,
+                   img_adaptive_binarize=False,
+                   img_preprocess_super_res=False,
+                   img_preprocess_contrast=False,
+                   img_preprocess_denoise=False,
+                   img_preprocess_sharpen=False,
+                   img_quantize_method='median_cut',
                    progress_cb=None):
     """
     将SVG或图片转换为WSD
@@ -1654,6 +2187,12 @@ def convert_to_wsd(input_path, wsd_path, color_mode='rainbow',
         img_contour_min_area: 等高线法的最小区域面积
         img_scale: 图片处理缩放比例（越大越精细但越慢）
         img_smooth_level: 颜色平滑等级 0=无 1=轻微 2=中等 3=强
+        img_adaptive_binarize: 是否使用自适应二值化
+        img_preprocess_super_res: 超分辨率增强
+        img_preprocess_contrast: 对比度增强(CLAHE)
+        img_preprocess_denoise: 保边去噪(双边滤波)
+        img_preprocess_sharpen: 边缘锐化(USM)
+        img_quantize_method: 调色板量化方法 'median_cut' / 'kmeans'
         progress_cb: 进度回调函数(msg, percent)
     """
 
@@ -1680,6 +2219,12 @@ def convert_to_wsd(input_path, wsd_path, color_mode='rainbow',
         img_scale=img_scale,
         img_smooth_level=img_smooth_level,
         img_dilate_size=img_dilate_size,
+        img_adaptive_binarize=img_adaptive_binarize,
+        img_preprocess_super_res=img_preprocess_super_res,
+        img_preprocess_contrast=img_preprocess_contrast,
+        img_preprocess_denoise=img_preprocess_denoise,
+        img_preprocess_sharpen=img_preprocess_sharpen,
+        img_quantize_method=img_quantize_method,
         progress_cb=progress_cb
     )
     is_stroke_list = extra_info.get('is_stroke', [False] * len(all_subpaths))
@@ -2038,6 +2583,12 @@ def convert_to_wsd_multi(input_files, output_path, color_mode='rainbow',
                          img_color_method='contour',
                          img_contour_step=5, img_contour_min_area=100,
                          img_scale=0.5, img_smooth_level=1, img_dilate_size=2,
+                         img_adaptive_binarize=False,
+                         img_preprocess_super_res=False,
+                         img_preprocess_contrast=False,
+                         img_preprocess_denoise=False,
+                         img_preprocess_sharpen=False,
+                         img_quantize_method='median_cut',
                          progress_cb=None):
     """
     将多个输入文件合并到同一个WSD的不同画布
@@ -2088,6 +2639,12 @@ def convert_to_wsd_multi(input_files, output_path, color_mode='rainbow',
             img_scale=img_scale,
             img_smooth_level=img_smooth_level,
             img_dilate_size=img_dilate_size,
+            img_adaptive_binarize=img_adaptive_binarize,
+            img_preprocess_super_res=img_preprocess_super_res,
+            img_preprocess_contrast=img_preprocess_contrast,
+            img_preprocess_denoise=img_preprocess_denoise,
+            img_preprocess_sharpen=img_preprocess_sharpen,
+            img_quantize_method=img_quantize_method,
             progress_cb=None  # 多文件时外层统一控制进度
         )
 
