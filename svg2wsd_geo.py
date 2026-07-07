@@ -6424,6 +6424,7 @@ def convert_geo_to_wsd(input_path, wsd_path,
                        circle_param2=120,
                        mode='auto',
                        max_colors=8,
+                       label_guided=True,
                        detect_symmetry=True,
                        symmetry_threshold=0.7,
                        show_symmetry_axes=False,
@@ -6471,6 +6472,9 @@ def convert_geo_to_wsd(input_path, wsd_path,
         auto_label_min_confidence: 自动标注最低置信度阈值（默认0.35）
         enhanced_detection: 是否启用增强检测（默认True）
             包含：霍夫弧检测、椭圆检测、虚线识别、同心圆检测等
+        label_guided: 是否启用标注引导的几何识别（默认True）
+            利用识别到的字母标注位置辅助判断几何形状，
+            包括修正端点位置、重新判断直线vs圆弧、三点定圆等
     """
     import traceback
 
@@ -6533,6 +6537,40 @@ def convert_geo_to_wsd(input_path, wsd_path,
             import traceback
             traceback.print_exc()
             letter_recognition_result = None
+
+    # 步骤1.3：标注引导的几何形状精化（如果启用）
+    label_guided_info = {}
+    if label_guided and letter_recognition_result and auto_label:
+        try:
+            from wsd_label_guided_geo import refine_shapes_with_labels
+
+            merged_anns = letter_recognition_result.get('merged_annotations', [])
+            if merged_anns:
+                original_count = len(shapes)
+                shapes = _step("标注引导形状精化", lambda: refine_shapes_with_labels(
+                    shapes,
+                    merged_anns,
+                    skeleton=None,
+                    img_color=img_color_for_letters,
+                    min_confidence=auto_label_min_confidence,
+                ))
+                refined_count = len(shapes)
+                # 统计被精化的形状数
+                refined_num = sum(1 for s in shapes if s.get('_refined_by_label'))
+                label_guided_info = {
+                    'refined_shapes': refined_num,
+                    'original_count': original_count,
+                    'final_count': refined_count,
+                }
+                if progress_cb:
+                    progress_cb(
+                        f"标注引导精化: {refined_num} 个形状被优化", 24
+                    )
+        except Exception as e:
+            print(f"标注引导几何识别失败: {e}")
+            import traceback
+            traceback.print_exc()
+            label_guided_info = {'error': str(e)}
 
     # 步骤1.5：形状矫正（直角、对称性）
     if symmetry_correction or right_angle_correction:
@@ -6802,6 +6840,7 @@ def convert_geo_to_wsd(input_path, wsd_path,
         'size': len(wsd_data),
         'symmetries': symmetry_stats,  # 对称类型统计
         'text_annotations': text_annotations_info,  # 文字标注信息
+        'label_guided': label_guided_info,  # 标注引导精化信息
     }
 
 
