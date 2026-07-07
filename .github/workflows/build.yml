@@ -35,16 +35,42 @@ jobs:
 
       - name: Create release zip
         run: |
-          Compress-Archive -Path dist\* -DestinationPath svg2wsd-windows.zip
+          $commit = $env:GITHUB_SHA.Substring(0, 7)
+          $zipName = "svg2wsd-windows-$commit.zip"
+          Compress-Archive -Path dist\* -DestinationPath $zipName
+          echo "ZIP_NAME=$zipName" >> $env:GITHUB_ENV
+
+      - name: Upload artifact (备用)
+        uses: actions/upload-artifact@v4
+        with:
+          name: svg2wsd-windows
+          path: ${{ env.ZIP_NAME }}
 
       - name: Upload to Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: continuous
-          name: Latest Build
+          name: 最新构建
           body: |
-            Auto-built from latest commit on main branch.
-            Commit: ${{ github.sha }}
+            ## svg2wsd 最新自动构建
+            
+            提交: `${{ github.sha }}`
+            
+            ### 下载加速（国内用户）
+            
+            在下载链接前加上镜像地址即可加速：
+            
+            ```
+            https://ghproxy.com/原始下载链接
+            ```
+            
+            或使用：
+            ```
+            https://mirror.ghproxy.com/原始下载链接
+            ```
+            
+            例：
+            `https://ghproxy.com/https://github.com/famoustao/svg2wsd/releases/download/continuous/${{ env.ZIP_NAME }}`
           prerelease: true
-          files: svg2wsd-windows.zip
+          files: ${{ env.ZIP_NAME }}
           fail_on_unmatched_files: true
