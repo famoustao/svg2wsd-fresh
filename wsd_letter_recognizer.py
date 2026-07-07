@@ -836,38 +836,399 @@ def detect_text_candidates_from_image(img_color, min_area=20, max_area_ratio=0.1
     return candidates
 
 
-# ========== 完整识别流水线 ==========
+# ========== OCR 文字识别（可选依赖 pytesseract）==========
 
-def recognize_letters_from_image(img_color, shapes=None, img_size=None,
-                                 min_confidence=0.3, charset=None,
-                                 direct_detect=True):
-    """完整的字母识别流水线
+# 检测 pytesseract 是否可用
+_pytesseract_available = None
+
+def is_pytesseract_available():
+    """检查 pytesseract 是否可用
+
+    Returns:
+        bool: True 表示可用
+    """
+    global _pytesseract_available
+    if _pytesseract_available is not None:
+        return _pytesseract_available
+    try:
+        import pytesseract  # noqa: F401
+        # 简单测试一下 tesseract 是否可用
+        try:
+            pytesseract.get_tesseract_version()
+            _pytesseract_available = True
+        except Exception:
+            _pytesseract_available = False
+    except ImportError:
+        _pytesseract_available = False
+    return _pytesseract_available
+
+
+def recognize_text_with_ocr(img_color, min_confidence=0.2, lang='chi_sim+eng'):
+    """使用 Tesseract OCR 识别图像中的文字
 
     Args:
         img_color: 原始彩色图像 (BGR, numpy array)
-        shapes: 检测到的形状列表（可选，用于从形状中提取文字候选）
-        img_size: (w, h) 图像尺寸
-        min_confidence: 最低置信度
-        charset: 识别字符集
-        direct_detect: 是否直接从图像检测文字候选（默认True，推荐）
+        min_confidence: 最低置信度 (0~1)
+        lang: tesseract 语言包，默认 'chi_sim+eng'（中文简体+英文）
 
     Returns:
-        dict: 识别结果
+        list: 识别到的文字标注列表，每项为 dict:
+            {'text': str, 'bbox': (x,y,w,h), 'confidence': float,
+             'is_subscript': bool, 'is_superscript': bool}
+    """
+    if not is_pytesseract_available():
+        return []
+
+    if img_color is None or img_color.size == 0:
+        return []
+
+    try:
+        import pytesseract
+
+        h, w = img_color.shape[:2]
+
+        # 转为灰度
+        gray = cv2.cvtColor(img_color, cv2.COLOR_BGR2GRAY)
+
+        # 使用 Tesseract 识别，获取每个单词的详细信息
+        # --psm 6: 假设为单一的均匀块文本
+        # --psm 11: 稀疏文本，查找尽可能多的文本
+        try:
+            data = pytesseract.image_to_data(
+                gray,
+                lang=lang,
+                output_type=pytesseract.Output.DICT,
+                config='--psm 11 --oem 3'
+            )
+        except Exception:
+            # 如果 psm 11 失败，尝试 psm 6
+            try:
+                data = pytesseract.image_to_data(
+                    gray,
+                    lang=lang,
+                    output_type=pytesseract.Output.DICT,
+                    config='--psm 6 --oem 3'
+                )
+            except Exception:
+                return []
+
+        results = []
+        n_boxes = len(data['text'])
+
+        for i in range(n_boxes):
+            text = data['text'][i].strip()
+            if not text:
+                continue
+
+            # Tesseract 的置信度范围是 0~95（-1 表示无效）
+            conf = data['conf'][i]
+            if conf < 0:
+                continue
+            # 转换为 0~1 范围
+            confidence = conf / 100.0
+            if confidence < min_confidence:
+                continue
+
+            x = data['left'][i]
+            y = data['top'][i]
+            bw = data['width'][i]
+            bh = data['height'][i]
+
+            if bw <= 0 or bh <= 0:
+                continue
+
+            results.append({
+                'text': text,
+                'bbox': (x, y, bw, bh),
+                'confidence': confidence,
+                'is_subscript': False,
+                'is_superscript': False,
+            })
+
+        # 检测上下标（基于相对尺寸和位置）
+        results = _detect_ocr_subscript_superscript(results)
+
+        return results
+
+    except Exception as e:
+        print(f"OCR 识别失败: {e}")
+        return []
+
+
+def _detect_ocr_subscript_superscript(ocr_results):
+    """检测 OCR 结果中的上下标
+
+    Args:
+        ocr_results: OCR 识别结果列表
+
+    Returns:
+        list: 带有 is_subscript / is_superscript 标记的结果列表
+    """
+    if len(ocr_results) <= 1:
+        return ocr_results
+
+    # 按面积排序，找出主要文字尺寸
+    sorted_by_size = sorted(ocr_results, key=lambda r: r['bbox'][2] * r['bbox'][3], reverse=True)
+
+    # 主文字高度（取前几个较大文字的平均高度）
+    main_candidates = sorted_by_size[:max(1, len(sorted_by_size) // 3)]
+    if not main_candidates:
+        return ocr_results
+
+    main_h = sum(r['bbox'][3] for r in main_candidates) / len(main_candidates)
+    sub_h_threshold = main_h * 0.7
+
+    # 找出所有较小的文字
+    small_items = [r for r in ocr_results if r['bbox'][3] < sub_h_threshold]
+    large_items = [r for r in ocr_results if r['bbox'][3] >= sub_h_threshold]
+
+    if not small_items or not large_items:
+        return ocr_results
+
+    # 对每个小文字，判断是否是相邻大文字的下标或上标
+    used_small = set()
+
+    for large in large_items:
+        lx, ly, lw, lh = large['bbox']
+        l_right = lx + lw
+        l_mid_y = ly + lh / 2
+        l_bottom = ly + lh
+
+        best_sub = None
+        best_super = None
+        best_sub_dist = float('inf')
+        best_super_dist = float('inf')
+
+        for idx, small in enumerate(small_items):
+            if idx in used_small:
+                continue
+            sx, sy, sw, sh = small['bbox']
+            sc_x = sx + sw / 2
+            sc_y = sy + sh / 2
+
+            # 必须在大文字右侧附近
+            if sc_x < lx + lw * 0.3:
+                continue
+            if sc_x > l_right + lw * 3.0:
+                continue
+
+            dx = sc_x - l_right
+            dy = sc_y - l_mid_y
+            dist = math.sqrt(dx*dx + dy*dy)
+
+            # 下标：在基线以下
+            is_sub = sc_y > l_bottom - lh * 0.3
+            # 上标：在中线以上
+            is_super = sc_y < l_mid_y - lh * 0.15
+
+            if is_sub and dist < best_sub_dist:
+                best_sub = idx
+                best_sub_dist = dist
+            elif is_super and dist < best_super_dist:
+                best_super = idx
+                best_super_dist = dist
+
+        if best_sub is not None:
+            small_items[best_sub]['is_subscript'] = True
+            used_small.add(best_sub)
+        if best_super is not None:
+            small_items[best_super]['is_superscript'] = True
+            used_small.add(best_super)
+
+    return ocr_results
+
+
+def ocr_results_to_annotations(ocr_results):
+    """将 OCR 识别结果转换为与模板匹配一致的标注格式
+
+    Args:
+        ocr_results: OCR 结果列表
+
+    Returns:
+        list: 合并后的标注列表（与 detect_subscript_superscript 输出格式一致）
+    """
+    annotations = []
+
+    # 先分离主文字和上下标文字
+    main_items = [r for r in ocr_results if not r.get('is_subscript') and not r.get('is_superscript')]
+    sub_items = [r for r in ocr_results if r.get('is_subscript')]
+    super_items = [r for r in ocr_results if r.get('is_superscript')]
+
+    used_sub = set()
+    used_super = set()
+
+    for main in main_items:
+        mx, my, mw, mh = main['bbox']
+        m_right = mx + mw
+        m_mid_y = my + mh / 2
+        m_bottom = my + mh
+
+        # 找最近的下标
+        best_sub = None
+        best_sub_dist = float('inf')
+        for idx, sub in enumerate(sub_items):
+            if idx in used_sub:
+                continue
+            sx, sy, sw, sh = sub['bbox']
+            sc_x = sx + sw / 2
+            sc_y = sy + sh / 2
+            if sc_x < mx + mw * 0.3 or sc_x > m_right + mw * 3.0:
+                continue
+            dist = math.sqrt((sc_x - m_right)**2 + (sc_y - m_mid_y)**2)
+            if dist < best_sub_dist:
+                best_sub = idx
+                best_sub_dist = dist
+
+        # 找最近的上标
+        best_super = None
+        best_super_dist = float('inf')
+        for idx, super_r in enumerate(super_items):
+            if idx in used_super:
+                continue
+            sx, sy, sw, sh = super_r['bbox']
+            sc_x = sx + sw / 2
+            sc_y = sy + sh / 2
+            if sc_x < mx + mw * 0.3 or sc_x > m_right + mw * 3.0:
+                continue
+            dist = math.sqrt((sc_x - m_right)**2 + (sc_y - m_mid_y)**2)
+            if dist < best_super_dist:
+                best_super = idx
+                best_super_dist = dist
+
+        sub_text = sub_items[best_sub]['text'] if best_sub is not None else None
+        super_text = super_items[best_super]['text'] if best_super is not None else None
+
+        # 合并 bbox
+        merged_bbox = (mx, my, mw, mh)
+        if sub_text:
+            sx, sy, sw, sh = sub_items[best_sub]['bbox']
+            nx = min(mx, sx)
+            ny = min(my, sy)
+            nw = max(mx + mw, sx + sw) - nx
+            nh = max(my + mh, sy + sh) - ny
+            merged_bbox = (nx, ny, nw, nh)
+        if super_text:
+            sx, sy, sw, sh = super_items[best_super]['bbox']
+            nx = min(merged_bbox[0], sx)
+            ny = min(merged_bbox[1], sy)
+            nw = max(merged_bbox[0] + merged_bbox[2], sx + sw) - nx
+            nh = max(merged_bbox[1] + merged_bbox[3], sy + sh) - ny
+            merged_bbox = (nx, ny, nw, nh)
+
+        annotations.append({
+            'text': main['text'],
+            'full_text': main['text']
+                       + (f'_{sub_text}' if sub_text else '')
+                       + (f'^{super_text}' if super_text else ''),
+            'bbox': merged_bbox,
+            'main_char': main['text'],
+            'subscript': sub_text,
+            'superscript': super_text,
+            'confidence': main['confidence'],
+        })
+
+        if best_sub is not None:
+            used_sub.add(best_sub)
+        if best_super is not None:
+            used_super.add(best_super)
+
+    # 未使用的下标/上标作为独立标注
+    for idx, sub in enumerate(sub_items):
+        if idx not in used_sub:
+            annotations.append({
+                'text': sub['text'],
+                'full_text': sub['text'],
+                'bbox': sub['bbox'],
+                'main_char': sub['text'],
+                'subscript': None,
+                'superscript': None,
+                'confidence': sub['confidence'],
+            })
+
+    for idx, super_r in enumerate(super_items):
+        if idx not in used_super:
+            annotations.append({
+                'text': super_r['text'],
+                'full_text': super_r['text'],
+                'bbox': super_r['bbox'],
+                'main_char': super_r['text'],
+                'subscript': None,
+                'superscript': None,
+                'confidence': super_r['confidence'],
+            })
+
+    return annotations
+
+
+# ========== 统一识别接口 ==========
+
+def recognize_text_from_image(img_color, shapes=None, img_size=None,
+                              min_confidence=0.3, charset=None,
+                              direct_detect=True, label_type='letters',
+                              ocr_lang='chi_sim+eng'):
+    """统一的文字识别接口
+
+    根据 label_type 选择识别方式：
+    - 'letters': 仅使用模板匹配识别字母数字（速度快）
+    - 'all': 优先使用 OCR 识别全部文字（中文+英文+数字），
+             如果 OCR 不可用则降级为模板匹配
+
+    Args:
+        img_color: 原始彩色图像 (BGR, numpy array)
+        shapes: 检测到的形状列表（可选）
+        img_size: (w, h) 图像尺寸
+        min_confidence: 最低置信度
+        charset: 识别字符集（仅模板匹配使用）
+        direct_detect: 是否直接从图像检测文字候选（模板匹配用）
+        label_type: 'letters'（仅字母数字）或 'all'（全部文字）
+        ocr_lang: OCR 语言包（label_type='all' 时使用）
+
+    Returns:
+        dict: 识别结果，包含：
+            'text_candidates': 文字候选列表
+            'char_recognitions': 字符识别结果列表
+            'merged_annotations': 合并后的标注列表
+            'recognition_method': 使用的识别方法 ('template' 或 'ocr')
     """
     if img_color is None:
         return {
             'text_candidates': [],
             'char_recognitions': [],
             'merged_annotations': [],
+            'recognition_method': 'template',
         }
 
     h, w = img_color.shape[:2]
     if img_size is None:
         img_size = (w, h)
 
+    # 方式1：OCR 识别全部文字
+    if label_type == 'all' and is_pytesseract_available():
+        ocr_results = recognize_text_with_ocr(
+            img_color,
+            min_confidence=min_confidence,
+            lang=ocr_lang,
+        )
+        if ocr_results:
+            merged = ocr_results_to_annotations(ocr_results)
+            return {
+                'text_candidates': [
+                    {'bbox': r['bbox'], 'text': r['text']}
+                    for r in ocr_results
+                ],
+                'char_recognitions': [
+                    {'char': r['text'], 'confidence': r['confidence'],
+                     'bbox': r['bbox']}
+                    for r in ocr_results
+                ],
+                'merged_annotations': merged,
+                'recognition_method': 'ocr',
+            }
+        # OCR 没有结果时，降级到模板匹配
+
+    # 方式2：模板匹配识别字母数字
     char_images = []
 
-    # 方式1：直接从图像检测文字候选（更可靠）
     if direct_detect:
         text_candidates = detect_text_candidates_from_image(img_color)
         for tc in text_candidates:
@@ -877,7 +1238,6 @@ def recognize_letters_from_image(img_color, shapes=None, img_size=None,
                 'bbox': tc['bbox'],
             })
 
-    # 方式2：从形状列表中提取文字候选（备用）
     if not char_images and shapes:
         text_candidates_shapes = extract_text_candidates(shapes, img_size)
         if text_candidates_shapes:
@@ -889,9 +1249,9 @@ def recognize_letters_from_image(img_color, shapes=None, img_size=None,
             'text_candidates': [],
             'char_recognitions': [],
             'merged_annotations': [],
+            'recognition_method': 'template',
         }
 
-    # 识别
     recognizer = LetterRecognizer(charset=charset)
 
     char_recognitions = []
@@ -910,16 +1270,48 @@ def recognize_letters_from_image(img_color, shapes=None, img_size=None,
             'text_candidates': [],
             'char_recognitions': [],
             'merged_annotations': [],
+            'recognition_method': 'template',
         }
 
-    # 检测下标/上标并合并
     merged_annotations = detect_subscript_superscript(char_recognitions)
 
     return {
         'text_candidates': char_images,
         'char_recognitions': char_recognitions,
         'merged_annotations': merged_annotations,
+        'recognition_method': 'template',
     }
+
+
+# ========== 完整识别流水线（兼容旧接口）==========
+
+def recognize_letters_from_image(img_color, shapes=None, img_size=None,
+                                 min_confidence=0.3, charset=None,
+                                 direct_detect=True, label_type=None):
+    """完整的字母识别流水线（兼容旧接口）
+
+    内部调用 recognize_text_from_image，保持向后兼容。
+
+    Args:
+        img_color: 原始彩色图像 (BGR, numpy array)
+        shapes: 检测到的形状列表（可选，用于从形状中提取文字候选）
+        img_size: (w, h) 图像尺寸
+        min_confidence: 最低置信度
+        charset: 识别字符集
+        direct_detect: 是否直接从图像检测文字候选（默认True，推荐）
+        label_type: 可选，'letters' 或 'all'，None 时使用默认模板匹配
+
+    Returns:
+        dict: 识别结果
+    """
+    if label_type is None:
+        label_type = 'letters'
+
+    return recognize_text_from_image(
+        img_color, shapes=shapes, img_size=img_size,
+        min_confidence=min_confidence, charset=charset,
+        direct_detect=direct_detect, label_type=label_type,
+    )
 
 
 # ========== 自测 ==========

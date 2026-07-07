@@ -144,6 +144,11 @@ class Image2WSDApp:
         self.geo_symmetry_type = tk.StringVar(value='auto')
         self.geo_right_angle_correction = tk.BooleanVar(value=True)
 
+        # 几何模式文字标注变量
+        self.geo_auto_label = tk.BooleanVar(value=True)
+        self.geo_label_type = tk.StringVar(value='letters')  # 'letters' / 'all'
+        self.geo_auto_label_min_confidence = tk.DoubleVar(value=0.2)
+
         # 几何参数面板（放在几何选项卡内）
         geo_inner_frame = ttk.LabelFrame(self.geo_tab, text="几何转换参数")
         geo_inner_frame.pack(fill='x', padx=5, pady=5)
@@ -282,6 +287,78 @@ class Image2WSDApp:
         auto_row = ttk.Frame(self.geo_frame)
         auto_row.pack(fill='x', padx=8, pady=(4, 8))
         ttk.Button(auto_row, text="自动调节参数", command=self._auto_tune_geo_params).pack(fill='x')
+
+        # 几何模式文字标注面板
+        geo_text_frame = ttk.LabelFrame(self.geo_tab, text="文字标注")
+        geo_text_frame.pack(fill='x', padx=5, pady=5)
+
+        # 自动识别文字标注复选框
+        auto_label_row = ttk.Frame(geo_text_frame)
+        auto_label_row.pack(fill='x', padx=8, pady=(4, 2))
+        ttk.Checkbutton(auto_label_row, text="自动识别文字标注",
+                        variable=self.geo_auto_label,
+                        command=self._on_geo_param_change).pack(side='left')
+
+        # 标注类型下拉选择
+        label_type_row = ttk.Frame(geo_text_frame)
+        label_type_row.pack(fill='x', padx=8, pady=2)
+        ttk.Label(label_type_row, text="标注类型:", width=12).pack(side='left')
+        self.geo_label_type_combo = ttk.Combobox(
+            label_type_row,
+            textvariable=self.geo_label_type,
+            values=['仅字母数字', '全部文字（字母+中文+数字）'],
+            state='readonly',
+            width=22
+        )
+        self.geo_label_type_combo.pack(side='left')
+        self.geo_label_type_combo.bind(
+            '<<ComboboxSelected>>',
+            lambda e: self._on_geo_param_change()
+        )
+
+        # 最低置信度滑块
+        conf_row = ttk.Frame(geo_text_frame)
+        conf_row.pack(fill='x', padx=8, pady=2)
+        ttk.Label(conf_row, text="最低置信度:", width=12).pack(side='left')
+
+        def _conf_dec(*args):
+            cur = self.geo_auto_label_min_confidence.get()
+            new = max(0.1, cur - 0.05)
+            self.geo_auto_label_min_confidence.set(round(new, 2))
+            self._on_geo_param_change()
+
+        def _conf_inc(*args):
+            cur = self.geo_auto_label_min_confidence.get()
+            new = min(0.9, cur + 0.05)
+            self.geo_auto_label_min_confidence.set(round(new, 2))
+            self._on_geo_param_change()
+
+        ttk.Button(conf_row, text="-", width=2, command=_conf_dec).pack(side='left')
+        self.geo_conf_scale = ttk.Scale(
+            conf_row, from_=0.1, to=0.9, orient='horizontal',
+            variable=self.geo_auto_label_min_confidence,
+            command=lambda v: self._on_geo_param_change()
+        )
+        self.geo_conf_scale.pack(side='left', fill='x', expand=True, padx=3)
+        ttk.Button(conf_row, text="+", width=2, command=_conf_inc).pack(side='left')
+        self.geo_conf_val_label = ttk.Label(
+            conf_row, text=f"{self.geo_auto_label_min_confidence.get():.1f}", width=5
+        )
+        self.geo_conf_val_label.pack(side='left')
+
+        # 说明文字
+        geo_text_hint = ttk.Label(
+            geo_text_frame,
+            text="自动识别图片中的文字标注，自动定位到画布中",
+            foreground='gray', font=('Arial', 8)
+        )
+        geo_text_hint.pack(fill='x', padx=8, pady=(0, 5))
+
+        # 手动添加文字标注按钮（备选功能）
+        manual_label_row = ttk.Frame(geo_text_frame)
+        manual_label_row.pack(fill='x', padx=8, pady=(2, 5))
+        ttk.Button(manual_label_row, text="手动添加文字标注...",
+                   command=self._add_text_annotations).pack(fill='x')
 
         # 文件列表
         self.batch_frame = ttk.LabelFrame(left, text="文件列表 (支持批量)")
@@ -507,20 +584,6 @@ class Image2WSDApp:
                                           lambda e: self._schedule_img_update())
         # 默认隐藏调色板行
         self._n_colors_visible = False
-
-        # 文字标注功能
-        text_label_frame = ttk.LabelFrame(self.normal_tab, text="文字标注")
-        text_label_frame.pack(fill='x', padx=5, pady=5)
-
-        text_btn_row = ttk.Frame(text_label_frame)
-        text_btn_row.pack(fill='x', padx=8, pady=5)
-        ttk.Button(text_btn_row, text="添加文字标注到WSD",
-                   command=self._add_text_annotations).pack(fill='x')
-
-        text_hint = ttk.Label(text_label_frame,
-                              text="打开已有WSD文件，添加文字标注后另存",
-                              foreground='gray', font=('Arial', 8))
-        text_hint.pack(fill='x', padx=8, pady=(0, 5))
 
         # 输出模式
         out_frame = ttk.LabelFrame(left, text="输出模式")
@@ -1406,6 +1469,16 @@ class Image2WSDApp:
         else:  # 自动
             return -1
 
+    def _get_label_type_value(self):
+        """根据GUI下拉选择获取label_type参数值
+        返回: 'letters' 或 'all'
+        """
+        label_text = self.geo_label_type.get()
+        if '全部' in label_text:
+            return 'all'
+        else:
+            return 'letters'
+
     def _on_geo_param_change(self, *args):
         """几何参数变化时更新预览（带防抖）"""
         # 更新数值标签
@@ -1414,6 +1487,7 @@ class Image2WSDApp:
         self.mll_val_label.config(text=f"{int(self.geo_min_line_length.get())}px")
         self.lt_val_label.config(text=f"{int(self.geo_line_threshold.get())}")
         self.cs_val_label.config(text=f"{int(self.geo_circle_sensitivity.get())}")
+        self.geo_conf_val_label.config(text=f"{self.geo_auto_label_min_confidence.get():.1f}")
         if self.convert_mode.get() == 'geometric':
             self._schedule_geo_update()
 
@@ -1788,6 +1862,42 @@ class Image2WSDApp:
                         right_angle_correction=self.geo_right_angle_correction.get(),
                     )
 
+                    # 自动文字标注识别（如果启用）
+                    text_annotations_preview = []
+                    if self.geo_auto_label.get():
+                        try:
+                            import cv2
+                            import numpy as np
+                            from PIL import Image
+                            from wsd_letter_recognizer import recognize_text_from_image
+
+                            img_color = cv2.imread(self.current_file)
+                            if img_color is None:
+                                img_pil = Image.open(self.current_file).convert('RGB')
+                                img_color = np.array(img_pil)
+                                img_color = cv2.cvtColor(img_color, cv2.COLOR_RGB2BGR)
+
+                            if img_color is not None:
+                                h_img, w_img = img_color.shape[:2]
+                                rec_result = recognize_text_from_image(
+                                    img_color, shapes,
+                                    img_size=(w_img, h_img),
+                                    min_confidence=self.geo_auto_label_min_confidence.get(),
+                                    direct_detect=True,
+                                    label_type=self._get_label_type_value(),
+                                )
+                                merged_anns = rec_result.get('merged_annotations', [])
+                                for ann in merged_anns:
+                                    bx, by, bw, bh = ann['bbox']
+                                    text_annotations_preview.append({
+                                        'text': ann.get('full_text', ann.get('text', '')),
+                                        'x': bx + bw / 2,  # 中心点x
+                                        'y': by + bh / 2,  # 中心点y
+                                        'confidence': ann.get('confidence', 0.0),
+                                    })
+                        except Exception:
+                            text_annotations_preview = []
+
                     subpaths = [shape_to_polyline_points(s) for s in shapes]
                     # 判断是否为filled模式（形状带有color字段）
                     is_filled = shapes and 'color' in shapes[0]
@@ -1808,6 +1918,7 @@ class Image2WSDApp:
                         'is_geo_filled': is_filled,
                         'is_border': is_border_list,
                         'is_line_shape': is_line_list,
+                        'text_annotations': text_annotations_preview,
                     }
                     result = (subpaths, colors, bbox, 'geometric', extra_info)
                     shape_info = [(s['type'], s['area']) for s in shapes]
@@ -2179,6 +2290,37 @@ class Image2WSDApp:
                 flat = [coord for pt in pts for coord in pt]
                 canvas.create_line(flat, fill='#000000', width=1)
 
+        # 绘制文字标注（几何模式下的自动识别）
+        if is_geo:
+            text_anns = extra_info.get('text_annotations', [])
+            if text_anns:
+                for ann in text_anns:
+                    # 图像坐标 -> WSD坐标 -> 画布坐标
+                    img_x = ann['x']
+                    img_y = ann['y']
+                    wsd_x = int(img_x * sx + ox)
+                    wsd_y = int(img_y * sy + oy)
+                    canvas_x = wsd_x * dscale + dox
+                    canvas_y = wsd_y * dscale + doy
+
+                    # 用小方块标记位置
+                    marker_size = 5
+                    canvas.create_rectangle(
+                        canvas_x - marker_size, canvas_y - marker_size,
+                        canvas_x + marker_size, canvas_y + marker_size,
+                        fill='#ff4444', outline='#cc0000', width=1
+                    )
+                    # 在旁边显示文字
+                    text_label = ann.get('text', '')
+                    if text_label:
+                        canvas.create_text(
+                            canvas_x + marker_size + 2, canvas_y,
+                            text=text_label,
+                            fill='#cc0000',
+                            anchor='w',
+                            font=('Arial', 9, 'bold')
+                        )
+
         # 更新信息
         actual_w = int(sw * sx)
         actual_h = int(sh * abs(sy))
@@ -2186,6 +2328,9 @@ class Image2WSDApp:
             shape_types = set(t for t, _ in getattr(self, '_shape_info', []))
             info = f"形状: {len(subpaths)} 个 | 类型: {','.join(shape_types) if shape_types else '-'} | "
             info += f"WSD尺寸: {actual_w} × {actual_h} | 翻转: {'是' if flip else '否'}"
+            text_anns = extra_info.get('text_annotations', [])
+            if text_anns:
+                info += f" | 文字标注: {len(text_anns)} 个"
         else:
             info = f"路径: {len(subpaths)} | WSD尺寸: {actual_w} × {actual_h} | "
             info += f"翻转: {'是' if flip else '否'} | 类型: {ftype}"
@@ -2409,6 +2554,9 @@ class Image2WSDApp:
                         symmetry_correction=self.geo_symmetry_correction.get(),
                         symmetry_type=self.geo_symmetry_type.get(),
                         right_angle_correction=self.geo_right_angle_correction.get(),
+                        auto_label=self.geo_auto_label.get(),
+                        auto_label_min_confidence=self.geo_auto_label_min_confidence.get(),
+                        auto_label_type=self._get_label_type_value(),
                         num_circles=self._get_num_circles_param(),
                         progress_cb=self._update_progress,
                     )
@@ -2487,6 +2635,9 @@ class Image2WSDApp:
                         symmetry_correction=self.geo_symmetry_correction.get(),
                         symmetry_type=self.geo_symmetry_type.get(),
                         right_angle_correction=self.geo_right_angle_correction.get(),
+                        auto_label=self.geo_auto_label.get(),
+                        auto_label_min_confidence=self.geo_auto_label_min_confidence.get(),
+                        auto_label_type=self._get_label_type_value(),
                         num_circles=self._get_num_circles_param(),
                         progress_cb=None,
                     )

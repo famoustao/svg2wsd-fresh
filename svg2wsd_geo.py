@@ -6504,6 +6504,7 @@ def convert_geo_to_wsd(input_path, wsd_path,
                        right_angle_correction=True,
                        auto_label=True,
                        auto_label_min_confidence=0.2,
+                       auto_label_type='letters',
                        enhanced_detection=True,
                        num_circles=-1,
                        progress_cb=None):
@@ -6541,7 +6542,10 @@ def convert_geo_to_wsd(input_path, wsd_path,
         symmetry_correction: 是否启用对称性矫正（默认开启）
         right_angle_correction: 是否启用直角矫正（默认开启）
         auto_label: 是否自动识别字母标注（默认True）
-        auto_label_min_confidence: 自动标注最低置信度阈值（默认0.35）
+        auto_label_min_confidence: 自动标注最低置信度阈值（默认0.2）
+        auto_label_type: 自动标注类型
+            'letters': 仅字母数字（模板匹配，速度快）
+            'all': 全部文字（OCR，支持中文+英文+数字，需要pytesseract）
         enhanced_detection: 是否启用增强检测（默认True）
             包含：霍夫弧检测、椭圆检测、虚线识别、同心圆检测等
         label_guided: 是否启用标注引导的几何识别（默认True）
@@ -6585,7 +6589,7 @@ def convert_geo_to_wsd(input_path, wsd_path,
         try:
             import cv2
             from PIL import Image
-            from wsd_letter_recognizer import recognize_letters_from_image
+            from wsd_letter_recognizer import recognize_text_from_image
 
             # 读取原图（用于字母识别）
             img_color_for_letters = cv2.imread(input_path)
@@ -6596,17 +6600,20 @@ def convert_geo_to_wsd(input_path, wsd_path,
 
             if img_color_for_letters is not None:
                 h, w = img_color_for_letters.shape[:2]
-                letter_recognition_result = recognize_letters_from_image(
+                letter_recognition_result = recognize_text_from_image(
                     img_color_for_letters, shapes,
                     img_size=(w, h),
                     min_confidence=auto_label_min_confidence,
                     direct_detect=True,
+                    label_type=auto_label_type,
                 )
                 n_letters = len(letter_recognition_result.get('merged_annotations', []))
+                rec_method = letter_recognition_result.get('recognition_method', 'template')
+                method_name = 'OCR' if rec_method == 'ocr' else '模板匹配'
                 if progress_cb:
-                    progress_cb(f"识别到 {n_letters} 个字母标注", 22)
+                    progress_cb(f"识别到 {n_letters} 个文字标注（{method_name}）", 22)
         except Exception as e:
-            print(f"字母识别失败: {e}")
+            print(f"文字识别失败: {e}")
             import traceback
             traceback.print_exc()
             letter_recognition_result = None
@@ -6914,6 +6921,7 @@ def convert_geo_to_wsd(input_path, wsd_path,
         'symmetries': symmetry_stats,  # 对称类型统计
         'text_annotations': text_annotations_info,  # 文字标注信息
         'label_guided': label_guided_info,  # 标注引导精化信息
+        'recognition_method': letter_recognition_result.get('recognition_method', 'none') if letter_recognition_result else 'none',
     }
 
 
@@ -6944,6 +6952,11 @@ def convert_geo_to_wsd_multi(input_files, output_path, **kwargs):
     symmetry_correction = kwargs.get('symmetry_correction', True)
     symmetry_type = kwargs.get('symmetry_type', 'auto')
     right_angle_correction = kwargs.get('right_angle_correction', True)
+    auto_label = kwargs.get('auto_label', True)
+    auto_label_min_confidence = kwargs.get('auto_label_min_confidence', 0.2)
+    auto_label_type = kwargs.get('auto_label_type', 'letters')
+    label_guided = kwargs.get('label_guided', True)
+    enhanced_detection = kwargs.get('enhanced_detection', True)
 
     all_shapes_data = []
     total_files = len(input_files)
@@ -7098,6 +7111,65 @@ def convert_geo_to_wsd_multi(input_files, output_path, **kwargs):
             paths.append(path)
 
     wsd_data = build_wsd(paths)
+
+    # 自动文字标注（合并到整体WSD中）
+    if auto_label:
+        try:
+            import cv2
+            from PIL import Image
+            from wsd_letter_recognizer import (
+                recognize_text_from_image,
+                associate_letters_to_geometry,
+                annotations_to_wsd_config,
+            )
+            from wsd_mixed_build import merge_geo_and_text
+
+            all_wsd_anns = []
+            # 对每个输入文件做文字识别
+            for in_file in input_files:
+                try:
+                    img_color = cv2.imread(in_file)
+                    if img_color is None:
+                        img_pil = Image.open(in_file).convert('RGB')
+                        img_color = np.array(img_pil)
+                        img_color = cv2.cvtColor(img_color, cv2.COLOR_RGB2BGR)
+                    if img_color is None:
+                        continue
+                    h_img, w_img = img_color.shape[:2]
+                    rec_result = recognize_text_from_image(
+                        img_color,
+                        img_size=(w_img, h_img),
+                        min_confidence=auto_label_min_confidence,
+                        direct_detect=True,
+                        label_type=auto_label_type,
+                    )
+                    merged_anns = rec_result.get('merged_annotations', [])
+                    if merged_anns:
+                        # 使用图像自身的缩放因子转换坐标
+                        # 这里使用一个近似的缩放：假设图像内容填满画布
+                        canvas_range = CANVAS_MAX - CANVAS_MIN - 2 * MARGIN
+                        fit_scale = min(canvas_range / w_img, canvas_range / h_img) * 0.9
+                        sx = sy = fit_scale
+                        ox = CANVAS_MIN + (CANVAS_MAX - CANVAS_MIN - w_img * sx) / 2
+                        oy = CANVAS_MIN + (CANVAS_MAX - CANVAS_MIN - h_img * sy) / 2
+                        if flip_v:
+                            sy = -sy
+                            oy = CANVAS_MIN + (CANVAS_MAX - CANVAS_MIN + h_img * abs(sy)) / 2
+                        wsd_anns = annotations_to_wsd_config(
+                            merged_anns, sx=sx, sy=sy, ox=ox, oy=oy
+                        )
+                        all_wsd_anns.extend(wsd_anns)
+                except Exception:
+                    continue
+
+            if all_wsd_anns:
+                wsd_data = merge_geo_and_text(wsd_data, all_wsd_anns)
+                if progress_cb:
+                    progress_cb(f"已添加 {len(all_wsd_anns)} 个文字标注", 95)
+        except Exception as e:
+            print(f"多文件自动文字标注失败: {e}")
+            import traceback
+            traceback.print_exc()
 
     with open(output_path, 'wb') as f:
         f.write(wsd_data)
