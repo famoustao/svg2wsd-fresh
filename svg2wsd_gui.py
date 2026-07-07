@@ -440,6 +440,20 @@ class Image2WSDApp:
         # 默认隐藏调色板行
         self._n_colors_visible = False
 
+        # 文字标注功能
+        text_label_frame = ttk.LabelFrame(self.normal_tab, text="文字标注")
+        text_label_frame.pack(fill='x', padx=5, pady=5)
+
+        text_btn_row = ttk.Frame(text_label_frame)
+        text_btn_row.pack(fill='x', padx=8, pady=5)
+        ttk.Button(text_btn_row, text="添加文字标注到WSD",
+                   command=self._add_text_annotations).pack(fill='x')
+
+        text_hint = ttk.Label(text_label_frame,
+                              text="打开已有WSD文件，添加文字标注后另存",
+                              foreground='gray', font=('Arial', 8))
+        text_hint.pack(fill='x', padx=8, pady=(0, 5))
+
         # 输出模式
         out_frame = ttk.LabelFrame(left, text="输出模式")
         out_frame.pack(fill='x', padx=5, pady=5)
@@ -1827,6 +1841,166 @@ class Image2WSDApp:
         self.status.config(text=msg)
         self.progress['value'] = pct
         self.root.update_idletasks()
+
+    def _add_text_annotations(self):
+        """添加文字标注到WSD文件"""
+        from wsd_text import build_wsd_with_annotations
+        import tkinter.simpledialog as simpledialog
+        import tkinter.scrolledtext as scrolledtext
+
+        # 创建标注编辑对话框
+        dlg = tk.Toplevel(self.root)
+        dlg.title("文字标注")
+        dlg.geometry("500x400")
+        dlg.transient(self.root)
+        dlg.grab_set()
+
+        # WSD文件选择
+        file_frame = ttk.Frame(dlg)
+        file_frame.pack(fill='x', padx=10, pady=5)
+        ttk.Label(file_frame, text="WSD文件:").pack(side='left')
+        wsd_path_var = tk.StringVar()
+        wsd_entry = ttk.Entry(file_frame, textvariable=wsd_path_var)
+        wsd_entry.pack(side='left', fill='x', expand=True, padx=5)
+
+        def _browse_wsd():
+            f = filedialog.askopenfilename(
+                title="选择WSD文件",
+                filetypes=[("WSD文件", "*.wsd"), ("所有文件", "*.*")]
+            )
+            if f:
+                wsd_path_var.set(f)
+
+        ttk.Button(file_frame, text="浏览...", command=_browse_wsd).pack(side='left')
+
+        # 标注列表
+        list_frame = ttk.LabelFrame(dlg, text="标注列表")
+        list_frame.pack(fill='both', expand=True, padx=10, pady=5)
+
+        # 列表框
+        listbox = tk.Listbox(list_frame, height=8)
+        listbox.pack(side='left', fill='both', expand=True, padx=(5, 0), pady=5)
+        scrollbar = ttk.Scrollbar(list_frame, orient='vertical', command=listbox.yview)
+        scrollbar.pack(side='right', fill='y', pady=5)
+        listbox.config(yscrollcommand=scrollbar.set)
+
+        # 存储标注数据
+        annotations = []
+
+        def _refresh_list():
+            listbox.delete(0, tk.END)
+            for i, ann in enumerate(annotations):
+                prefix = ""
+                if ann.get('superscript'):
+                    prefix = "[上标]"
+                elif ann.get('subscript'):
+                    prefix = "[下标]"
+                listbox.insert(tk.END, f"{i+1}. {prefix}{ann['text']}")
+
+        # 编辑区
+        edit_frame = ttk.LabelFrame(dlg, text="编辑标注")
+        edit_frame.pack(fill='x', padx=10, pady=5)
+
+        # 文字输入
+        text_row = ttk.Frame(edit_frame)
+        text_row.pack(fill='x', padx=5, pady=2)
+        ttk.Label(text_row, text="文字:", width=8).pack(side='left')
+        text_var = tk.StringVar()
+        ttk.Entry(text_row, textvariable=text_var).pack(side='left', fill='x', expand=True, padx=5)
+
+        # 上下标选项
+        style_row = ttk.Frame(edit_frame)
+        style_row.pack(fill='x', padx=5, pady=2)
+        ttk.Label(style_row, text="样式:", width=8).pack(side='left')
+        style_var = tk.StringVar(value='normal')
+        ttk.Radiobutton(style_row, text="普通", variable=style_var, value='normal').pack(side='left')
+        ttk.Radiobutton(style_row, text="上标", variable=style_var, value='superscript').pack(side='left')
+        ttk.Radiobutton(style_row, text="下标", variable=style_var, value='subscript').pack(side='left')
+
+        # 按钮区
+        btn_row = ttk.Frame(edit_frame)
+        btn_row.pack(fill='x', padx=5, pady=5)
+
+        def _add_annotation():
+            text = text_var.get().strip()
+            if not text:
+                messagebox.showwarning("提示", "请输入文字", parent=dlg)
+                return
+            ann = {'text': text}
+            if style_var.get() == 'superscript':
+                ann['superscript'] = True
+            elif style_var.get() == 'subscript':
+                ann['subscript'] = True
+            annotations.append(ann)
+            _refresh_list()
+            text_var.set('')
+            style_var.set('normal')
+
+        def _delete_annotation():
+            sel = listbox.curselection()
+            if sel:
+                idx = sel[0]
+                del annotations[idx]
+                _refresh_list()
+
+        def _move_up():
+            sel = listbox.curselection()
+            if sel and sel[0] > 0:
+                idx = sel[0]
+                annotations[idx], annotations[idx-1] = annotations[idx-1], annotations[idx]
+                _refresh_list()
+                listbox.selection_set(idx-1)
+
+        def _move_down():
+            sel = listbox.curselection()
+            if sel and sel[0] < len(annotations) - 1:
+                idx = sel[0]
+                annotations[idx], annotations[idx+1] = annotations[idx+1], annotations[idx]
+                _refresh_list()
+                listbox.selection_set(idx+1)
+
+        ttk.Button(btn_row, text="添加", command=_add_annotation).pack(side='left', padx=2)
+        ttk.Button(btn_row, text="删除", command=_delete_annotation).pack(side='left', padx=2)
+        ttk.Button(btn_row, text="上移", command=_move_up).pack(side='left', padx=2)
+        ttk.Button(btn_row, text="下移", command=_move_down).pack(side='left', padx=2)
+
+        # 底部按钮
+        bottom_row = ttk.Frame(dlg)
+        bottom_row.pack(fill='x', padx=10, pady=10)
+
+        def _do_generate():
+            wsd_path = wsd_path_var.get().strip()
+            if not wsd_path or not os.path.exists(wsd_path):
+                messagebox.showwarning("提示", "请选择有效的WSD文件", parent=dlg)
+                return
+            if not annotations:
+                messagebox.showwarning("提示", "请至少添加一个标注", parent=dlg)
+                return
+
+            # 选择输出文件
+            out_path = filedialog.asksaveasfilename(
+                title="保存为",
+                defaultextension=".wsd",
+                filetypes=[("WSD文件", "*.wsd"), ("所有文件", "*.*")],
+                initialfile=os.path.splitext(os.path.basename(wsd_path))[0] + "_标注.wsd"
+            )
+            if not out_path:
+                return
+
+            try:
+                wsd_data = build_wsd_with_annotations(
+                    annotations,
+                    output_path=out_path,
+                    template_wsd=wsd_path,
+                    auto_position=True
+                )
+                messagebox.showinfo("成功", f"已生成: {out_path}\n共 {len(annotations)} 个标注", parent=dlg)
+                dlg.destroy()
+            except Exception as e:
+                messagebox.showerror("错误", f"生成失败: {e}", parent=dlg)
+
+        ttk.Button(bottom_row, text="生成WSD", command=_do_generate).pack(side='right', padx=5)
+        ttk.Button(bottom_row, text="取消", command=dlg.destroy).pack(side='right')
 
     def _convert(self):
         if not self.input_files:
