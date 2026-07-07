@@ -31,6 +31,7 @@ jobs:
       - name: Copy template
         run: |
           xcopy /E /I template dist\template
+          xcopy /E /I wsd_label_samples dist\wsd_label_samples
 
       - name: Create release zip
         run: |
