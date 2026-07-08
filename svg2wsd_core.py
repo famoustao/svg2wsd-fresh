@@ -135,99 +135,113 @@ class SVGPathParser:
         self.current_pos = end
 
     def _do_line(self, rel):
-        pair = self._read_pair()
-        if pair is None: return
-        x, y = pair
-        end = self._abs(x, y) if rel else (x, y)
-        self._add_line(end)
+        # SVG规范：L命令后可跟多组坐标，隐式重复L
+        while self._has_more() and not self._is_cmd():
+            pair = self._read_pair()
+            if pair is None: break
+            x, y = pair
+            end = self._abs(x, y) if rel else (x, y)
+            self._add_line(end)
 
     def _do_hline(self, rel):
-        x = self._read_number()
-        if x is None: return
-        if rel: x += self.current_pos[0]
-        self._add_line((x, self.current_pos[1]))
+        # SVG规范：H命令后可跟多个坐标，隐式重复H
+        while self._has_more() and not self._is_cmd():
+            x = self._read_number()
+            if x is None: break
+            if rel: x += self.current_pos[0]
+            self._add_line((x, self.current_pos[1]))
 
     def _do_vline(self, rel):
-        y = self._read_number()
-        if y is None: return
-        if rel: y += self.current_pos[1]
-        self._add_line((self.current_pos[0], y))
+        # SVG规范：V命令后可跟多个坐标，隐式重复V
+        while self._has_more() and not self._is_cmd():
+            y = self._read_number()
+            if y is None: break
+            if rel: y += self.current_pos[1]
+            self._add_line((self.current_pos[0], y))
 
     def _do_cubic(self, rel):
-        nums = self._read_n(6)
-        if nums is None: return
-        if rel:
-            c1 = self._abs(nums[0], nums[1])
-            c2 = self._abs(nums[2], nums[3])
-            end = self._abs(nums[4], nums[5])
-        else:
-            c1 = (nums[0], nums[1])
-            c2 = (nums[2], nums[3])
-            end = (nums[4], nums[5])
-        self.current_subpath.append(c1)
-        self.current_subpath.append(c2)
-        self.current_subpath.append(end)
-        self.last_ctrl = c2
-        self.current_pos = end
+        # SVG规范：C命令后可跟多组坐标，隐式重复C（每组6个参数）
+        while self._has_more() and not self._is_cmd():
+            nums = self._read_n(6)
+            if nums is None: break
+            if rel:
+                c1 = self._abs(nums[0], nums[1])
+                c2 = self._abs(nums[2], nums[3])
+                end = self._abs(nums[4], nums[5])
+            else:
+                c1 = (nums[0], nums[1])
+                c2 = (nums[2], nums[3])
+                end = (nums[4], nums[5])
+            self.current_subpath.append(c1)
+            self.current_subpath.append(c2)
+            self.current_subpath.append(end)
+            self.last_ctrl = c2
+            self.current_pos = end
 
     def _do_smooth_cubic(self, rel):
-        nums = self._read_n(4)
-        if nums is None: return
-        if self.last_ctrl is not None:
-            c1 = (2*self.current_pos[0] - self.last_ctrl[0],
-                   2*self.current_pos[1] - self.last_ctrl[1])
-        else:
-            c1 = self.current_pos
-        if rel:
-            c2 = self._abs(nums[0], nums[1])
-            end = self._abs(nums[2], nums[3])
-        else:
-            c2 = (nums[0], nums[1])
-            end = (nums[2], nums[3])
-        self.current_subpath.append(c1)
-        self.current_subpath.append(c2)
-        self.current_subpath.append(end)
-        self.last_ctrl = c2
-        self.current_pos = end
+        # SVG规范：S命令后可跟多组坐标，隐式重复S（每组4个参数）
+        while self._has_more() and not self._is_cmd():
+            nums = self._read_n(4)
+            if nums is None: break
+            if self.last_ctrl is not None:
+                c1 = (2*self.current_pos[0] - self.last_ctrl[0],
+                       2*self.current_pos[1] - self.last_ctrl[1])
+            else:
+                c1 = self.current_pos
+            if rel:
+                c2 = self._abs(nums[0], nums[1])
+                end = self._abs(nums[2], nums[3])
+            else:
+                c2 = (nums[0], nums[1])
+                end = (nums[2], nums[3])
+            self.current_subpath.append(c1)
+            self.current_subpath.append(c2)
+            self.current_subpath.append(end)
+            self.last_ctrl = c2
+            self.current_pos = end
 
     def _do_quad(self, rel):
-        nums = self._read_n(4)
-        if nums is None: return
-        if rel:
-            q1 = self._abs(nums[0], nums[1])
-            end = self._abs(nums[2], nums[3])
-        else:
-            q1 = (nums[0], nums[1])
-            end = (nums[2], nums[3])
-        c1 = (self.current_pos[0] + 2/3*(q1[0]-self.current_pos[0]),
-               self.current_pos[1] + 2/3*(q1[1]-self.current_pos[1]))
-        c2 = (end[0] + 2/3*(q1[0]-end[0]),
-               end[1] + 2/3*(q1[1]-end[1]))
-        self.current_subpath.append(c1)
-        self.current_subpath.append(c2)
-        self.current_subpath.append(end)
-        self.last_ctrl = q1
-        self.current_pos = end
+        # SVG规范：Q命令后可跟多组坐标，隐式重复Q（每组4个参数）
+        while self._has_more() and not self._is_cmd():
+            nums = self._read_n(4)
+            if nums is None: break
+            if rel:
+                q1 = self._abs(nums[0], nums[1])
+                end = self._abs(nums[2], nums[3])
+            else:
+                q1 = (nums[0], nums[1])
+                end = (nums[2], nums[3])
+            c1 = (self.current_pos[0] + 2/3*(q1[0]-self.current_pos[0]),
+                   self.current_pos[1] + 2/3*(q1[1]-self.current_pos[1]))
+            c2 = (end[0] + 2/3*(q1[0]-end[0]),
+                   end[1] + 2/3*(q1[1]-end[1]))
+            self.current_subpath.append(c1)
+            self.current_subpath.append(c2)
+            self.current_subpath.append(end)
+            self.last_ctrl = q1
+            self.current_pos = end
 
     def _do_smooth_quad(self, rel):
-        nums = self._read_n(2)
-        if nums is None: return
-        if self.last_ctrl is not None:
-            q1 = (2*self.current_pos[0] - self.last_ctrl[0],
-                   2*self.current_pos[1] - self.last_ctrl[1])
-        else:
-            q1 = self.current_pos
-        if rel: end = self._abs(nums[0], nums[1])
-        else: end = (nums[0], nums[1])
-        c1 = (self.current_pos[0] + 2/3*(q1[0]-self.current_pos[0]),
-               self.current_pos[1] + 2/3*(q1[1]-self.current_pos[1]))
-        c2 = (end[0] + 2/3*(q1[0]-end[0]),
-               end[1] + 2/3*(q1[1]-end[1]))
-        self.current_subpath.append(c1)
-        self.current_subpath.append(c2)
-        self.current_subpath.append(end)
-        self.last_ctrl = q1
-        self.current_pos = end
+        # SVG规范：T命令后可跟多组坐标，隐式重复T（每组2个参数）
+        while self._has_more() and not self._is_cmd():
+            nums = self._read_n(2)
+            if nums is None: break
+            if self.last_ctrl is not None:
+                q1 = (2*self.current_pos[0] - self.last_ctrl[0],
+                       2*self.current_pos[1] - self.last_ctrl[1])
+            else:
+                q1 = self.current_pos
+            if rel: end = self._abs(nums[0], nums[1])
+            else: end = (nums[0], nums[1])
+            c1 = (self.current_pos[0] + 2/3*(q1[0]-self.current_pos[0]),
+                   self.current_pos[1] + 2/3*(q1[1]-self.current_pos[1]))
+            c2 = (end[0] + 2/3*(q1[0]-end[0]),
+                   end[1] + 2/3*(q1[1]-end[1]))
+            self.current_subpath.append(c1)
+            self.current_subpath.append(c2)
+            self.current_subpath.append(end)
+            self.last_ctrl = q1
+            self.current_pos = end
 
     def _do_close(self):
         if self.current_pos != self.start_pos:
@@ -712,7 +726,9 @@ def _parse_svg_file(svg_path):
     all_colors = []
     all_is_stroke = []    # True=描边路径, False=填充路径
     all_stroke_widths = []
-    for d, fill, stroke, stroke_width, transform in paths:
+    path_group_ids = []   # 每个子路径所属的SVG path组ID（同一path的子路径属于同一组，构成复合路径/孔洞）
+
+    for path_idx, (d, fill, stroke, stroke_width, transform) in enumerate(paths):
         parser = SVGPathParser(d)
         subpaths = parser.parse()
         for sp in subpaths:
@@ -727,6 +743,7 @@ def _parse_svg_file(svg_path):
                     nx, ny = x, y
                 tsp.append((nx, ny))
             all_subpaths.append(tsp)
+            path_group_ids.append(path_idx)
             # 优先使用fill颜色（填充路径），如果fill=none则用stroke颜色（描边路径）
             if fill != 'none':
                 all_colors.append(fill)
@@ -750,7 +767,7 @@ def _parse_svg_file(svg_path):
     bbox = (min(all_x), min(all_y), max(all_x), max(all_y))
 
     # 保存描边信息到全局（供convert_to_wsd使用）
-    return all_subpaths, all_colors, bbox, all_is_stroke, all_stroke_widths
+    return all_subpaths, all_colors, bbox, all_is_stroke, all_stroke_widths, path_group_ids
 
 
 # ========== 图像预处理增强 ==========
@@ -1862,9 +1879,10 @@ def parse_input_file(file_path, img_threshold=128, img_turdsize=2,
         }
 
     if ext in SVG_EXTENSIONS:
-        subpaths, colors, bbox, is_stroke, stroke_widths = _parse_svg_file(file_path)
+        subpaths, colors, bbox, is_stroke, stroke_widths, path_group_ids = _parse_svg_file(file_path)
         extra_info['is_stroke'] = is_stroke
         extra_info['stroke_widths'] = stroke_widths
+        extra_info['path_group_ids'] = path_group_ids
         return subpaths, colors, bbox, 'svg', extra_info
     elif ext in IMAGE_EXTENSIONS:
         if img_color:
@@ -1894,9 +1912,10 @@ def parse_input_file(file_path, img_threshold=128, img_turdsize=2,
     else:
         # 尝试当作SVG处理
         try:
-            subpaths, colors, bbox, is_stroke, stroke_widths = _parse_svg_file(file_path)
+            subpaths, colors, bbox, is_stroke, stroke_widths, path_group_ids = _parse_svg_file(file_path)
             extra_info['is_stroke'] = is_stroke
             extra_info['stroke_widths'] = stroke_widths
+            extra_info['path_group_ids'] = path_group_ids
             return subpaths, colors, bbox, 'svg', extra_info
         except:
             try:
@@ -2149,6 +2168,75 @@ def build_native_bezier_stroke(points, bgr_color, linewidth=DEFAULT_LINEWIDTH):
     return path_bytes
 
 
+def build_native_bezier_compound(subpaths_points, bgr_color, linewidth=DEFAULT_FILL_LW,
+                                  is_stroke_only=False, outline_color=None,
+                                  outline_linewidth=None):
+    """
+    构建复合贝塞尔路径（多个子路径在同一个WSD path对象中，支持孔洞效果）
+
+    Args:
+        subpaths_points: 子路径点列表，每个子路径是 [p0, c1, c2, p3, ...] 格式
+        bgr_color: 填充颜色或描边颜色 (BGR 3字节)
+        linewidth: 线宽
+        is_stroke_only: 是否仅描边（无填充）
+        outline_color: 轮廓颜色 (BGR 3字节)，None=无轮廓
+        outline_linewidth: 轮廓线宽
+
+    Returns:
+        bytes: WSD path记录
+    """
+    from wsd_gt_build import make_bezier_seg, make_path
+
+    all_seglists = []
+    for points in subpaths_points:
+        n = len(points)
+        if n < 4:
+            continue
+        segs = []
+        # 第一段: p0, c1, c2, p3
+        segs.append(make_bezier_seg(points[0], points[1], points[2], points[3]))
+        # 后续段以上一段终点为起点
+        i = 4
+        while i + 2 < n:
+            segs.append(make_bezier_seg(points[i-1], points[i], points[i+1], points[i+2]))
+            i += 3
+        all_seglists.append(segs)
+
+    if not all_seglists:
+        return b''
+
+    if is_stroke_only:
+        # 纯描边模式
+        line_color_bgra = bgr_color + bytes([0xff])
+        path_bytes = make_path(
+            all_seglists,
+            line_color_bgra,
+            linewidth,
+            fill_color_bgra=None,
+        )
+        return path_bytes
+    else:
+        # 填充模式
+        line_color_bgra = bgr_color + bytes([0xff])
+        fill_color_bgr = bgr_color
+
+        # 轮廓颜色：如果指定了outline_color则用轮廓色，否则用填充色
+        if outline_color is not None:
+            line_color_bgra = outline_color + bytes([0xff])
+            lw = outline_linewidth if outline_linewidth else linewidth
+        else:
+            lw = linewidth
+
+        path_bytes = make_path(
+            all_seglists,
+            line_color_bgra,
+            lw,
+            fill_color_bgra=fill_color_bgr,
+            fill_alpha=0xff
+        )
+        return path_bytes
+
+
 # ========== 主转换函数 ==========
 
 def convert_to_wsd(input_path, wsd_path, color_mode='rainbow',
@@ -2309,159 +2397,243 @@ def convert_to_wsd(input_path, wsd_path, color_mode='rainbow',
     num_objects = 0
     black_idx = bytes([0x01, 0xff, 0x00, 0x00])
 
-    total = len(all_subpaths)
-    for i, sp in enumerate(all_subpaths):
-        if len(sp) < 2:
-            continue
-        wsd_sp = [(int(x*sx+ox), int(y*sy+oy)) for x, y in sp]
+    # 检查是否有path分组信息（SVG复合路径）
+    path_group_ids = extra_info.get('path_group_ids', None)
+    use_compound = (file_type == 'svg' and path_group_ids is not None)
 
-        # 检查形状类型
-        shape_type = 'bezier'
-        shape_data = {}
-        is_stroke_only = False  # 是否是纯描边路径
-        if i < len(is_stroke_list) and is_stroke_list[i]:
-            # SVG描边路径（fill=none但有stroke）
-            is_stroke_only = True
+    if use_compound:
+        # SVG模式：按path组构建复合路径（同一SVG path的子路径合并为一个WSD path，支持孔洞）
+        # 先建立分组
+        groups = {}
+        for i, gid in enumerate(path_group_ids):
+            if gid not in groups:
+                groups[gid] = []
+            groups[gid].append(i)
 
-        # 纯描边形状：用描边方式构建，颜色用形状自身颜色
-        if is_stroke_only:
-            stroke_color = fill_colors[i]  # 颜色存在 fill_colors 里
-            if stroke_color is None:
-                # 无色模式下，描边用黑色
-                stroke_color = bytes([0x00, 0x00, 0x00])
-            # 计算描边线宽：SVG描边使用stroke-width * 缩放，否则使用默认linewidth
+        total = len(groups)
+        group_idx = 0
+        for gid, indices in groups.items():
+            group_idx += 1
+            # 获取组内所有子路径
+            group_sps = [all_subpaths[i] for i in indices]
+            # 所有子路径应该有相同的颜色和描边属性（来自同一SVG path）
+            ref_i = indices[0]
+            is_stroke_only = (ref_i < len(is_stroke_list) and is_stroke_list[ref_i])
+            color = fill_colors[ref_i] if ref_i < len(fill_colors) else None
+
+            # 转换所有子路径到WSD坐标
+            wsd_sps = []
+            valid_indices = []
+            for idx in indices:
+                sp = all_subpaths[idx]
+                if len(sp) < 2:
+                    continue
+                wsd_sp = [(int(x*sx+ox), int(y*sy+oy)) for x, y in sp]
+                wsd_sps.append(wsd_sp)
+                valid_indices.append(idx)
+
+            if not wsd_sps:
+                continue
+
+            # 计算描边线宽
             sw = linewidth
-            if i < len(stroke_widths):
-                # SVG stroke-width 转换为 WSD 单位（假设SVG单位为px，1px ≈ 0.265mm ≈ 106 WSD单位）
-                # 这里用缩放因子做近似
-                sw = max(20, int(stroke_widths[i] * abs(sx) * 100))
-            if shape_type == 'circle':
-                cx = int(shape_data['cx'] * sx + ox)
-                cy = int(shape_data['cy'] * sy + oy)
-                r = shape_data['r'] * abs(sx)
-                records_data += build_native_circle_stroke(
-                    cx, cy, r, stroke_color, sw
-                )
-            elif shape_type == 'rect':
-                x1 = int(shape_data['x1'] * sx + ox)
-                y1 = int(shape_data['y1'] * sy + oy)
-                x2 = int(shape_data['x2'] * sx + ox)
-                y2 = int(shape_data['y2'] * sy + oy)
-                records_data += build_native_rect_stroke(
-                    x1, y1, x2, y2, stroke_color, sw
-                )
-            elif shape_type == 'polygon':
-                from wsd_gt_build import make_line_seg, make_path
-                verts = [wsd_sp[j] for j in range(0, len(wsd_sp), 3)]
-                if verts[0] != verts[-1]:
-                    verts = verts + [verts[0]]
-                seg = make_line_seg(verts)
-                line_color_bgra = stroke_color + bytes([0xff])
-                records_data += make_path([[seg]], line_color_bgra, sw, fill_color_bgra=None)
-            elif shape_type == 'polyline':
-                from wsd_gt_build import make_line_seg, make_path
-                verts = [wsd_sp[j] for j in range(0, len(wsd_sp), 3)]
-                seg = make_line_seg(verts)
-                line_color_bgra = stroke_color + bytes([0xff])
-                records_data += make_path([[seg]], line_color_bgra, sw, fill_color_bgra=None)
-            elif shape_type == 'arc':
-                # 正圆弧描边：使用WSD原生圆弧格式
-                from wsd_gt_build import make_arc_native_path
-                cx = int(shape_data['cx'] * sx + ox)
-                cy = int(shape_data['cy'] * sy + oy)
-                r = shape_data['r'] * abs(sx)
-                start_angle = math.radians(shape_data['start_angle'])
-                end_angle = math.radians(shape_data['end_angle'])
-                line_color_bgra = stroke_color + bytes([0xff])
-                records_data += make_arc_native_path(
-                    cx, cy, r, start_angle, end_angle,
-                    line_color_bgra, sw
-                )
-            else:
-                records_data += build_native_bezier_stroke(
-                    wsd_sp, stroke_color, sw
-                )
-            num_objects += 1
-            # outline 模式下纯描边不需要再画轮廓
-            continue
+            if is_stroke_only and ref_i < len(stroke_widths):
+                sw = max(20, int(stroke_widths[ref_i] * abs(sx) * 100))
 
-        # 填充形状（\fill）
-        if fill_colors[i] is not None:
-            if shape_type == 'circle':
-                cx = int(shape_data['cx'] * sx + ox)
-                cy = int(shape_data['cy'] * sy + oy)
-                r = shape_data['r'] * abs(sx)
-                records_data += build_native_circle_fill(cx, cy, r, fill_colors[i])
-            elif shape_type == 'rect':
-                x1 = int(shape_data['x1'] * sx + ox)
-                y1 = int(shape_data['y1'] * sy + oy)
-                x2 = int(shape_data['x2'] * sx + ox)
-                y2 = int(shape_data['y2'] * sy + oy)
-                records_data += build_native_rect_fill(x1, y1, x2, y2, fill_colors[i])
-            elif shape_type == 'polygon':
-                verts = [wsd_sp[j] for j in range(0, len(wsd_sp), 3)]
-                records_data += build_native_polygon_fill(verts, fill_colors[i])
-            elif shape_type == 'polyline':
-                records_data += build_native_bezier_fill(wsd_sp, fill_colors[i])
-            elif shape_type == 'arc':
-                # 圆弧填充（扇形）：用贝塞尔近似
-                records_data += build_native_bezier_fill(wsd_sp, fill_colors[i])
+            if is_stroke_only:
+                # 纯描边复合路径
+                stroke_color = color if color is not None else bytes([0x00, 0x00, 0x00])
+                records_data += build_native_bezier_compound(
+                    wsd_sps, stroke_color, sw,
+                    is_stroke_only=True
+                )
+                num_objects += 1
             else:
-                records_data += build_native_bezier_fill(wsd_sp, fill_colors[i])
-            num_objects += 1
+                # 填充复合路径（带可选轮廓）
+                if color is not None:
+                    if outline:
+                        # 有轮廓：填充+黑色轮廓
+                        bgr_black = bytes([0x00, 0x00, 0x00])
+                        records_data += build_native_bezier_compound(
+                            wsd_sps, color, linewidth,
+                            is_stroke_only=False,
+                            outline_color=bgr_black,
+                            outline_linewidth=linewidth
+                        )
+                    else:
+                        # 无轮廓：仅填充
+                        records_data += build_native_bezier_compound(
+                            wsd_sps, color, linewidth,
+                            is_stroke_only=False
+                        )
+                    num_objects += 1
+                elif outline:
+                    # 无填充仅轮廓
+                    bgr_black = bytes([0x00, 0x00, 0x00])
+                    records_data += build_native_bezier_compound(
+                        wsd_sps, bgr_black, linewidth,
+                        is_stroke_only=True
+                    )
+                    num_objects += 1
 
-        # 轮廓：填充形状加轮廓
-        if outline and fill_colors[i] is not None:
-            bgr_black = bytes([0x00, 0x00, 0x00])
-            if shape_type == 'circle':
-                cx = int(shape_data['cx'] * sx + ox)
-                cy = int(shape_data['cy'] * sy + oy)
-                r = shape_data['r'] * abs(sx)
-                records_data += build_native_circle_stroke(
-                    cx, cy, r, bgr_black, linewidth
-                )
-            elif shape_type == 'rect':
-                x1 = int(shape_data['x1'] * sx + ox)
-                y1 = int(shape_data['y1'] * sy + oy)
-                x2 = int(shape_data['x2'] * sx + ox)
-                y2 = int(shape_data['y2'] * sy + oy)
-                records_data += build_native_rect_stroke(
-                    x1, y1, x2, y2, bgr_black, linewidth
-                )
-            elif shape_type == 'polygon':
-                from wsd_gt_build import make_line_seg, make_path
-                verts = [wsd_sp[j] for j in range(0, len(wsd_sp), 3)]
-                if verts[0] != verts[-1]:
-                    verts = verts + [verts[0]]
-                seg = make_line_seg(verts)
-                line_color_bgra = bgr_black + bytes([0xff])
-                records_data += make_path([[seg]], line_color_bgra, linewidth, fill_color_bgra=None)
-            elif shape_type == 'polyline':
-                from wsd_gt_build import make_line_seg, make_path
-                verts = [wsd_sp[j] for j in range(0, len(wsd_sp), 3)]
-                seg = make_line_seg(verts)
-                line_color_bgra = bgr_black + bytes([0xff])
-                records_data += make_path([[seg]], line_color_bgra, linewidth, fill_color_bgra=None)
-            elif shape_type == 'arc':
-                from wsd_gt_build import make_arc_native_path
-                cx = int(shape_data['cx'] * sx + ox)
-                cy = int(shape_data['cy'] * sy + oy)
-                r = shape_data['r'] * abs(sx)
-                start_angle = math.radians(shape_data['start_angle'])
-                end_angle = math.radians(shape_data['end_angle'])
-                line_color_bgra = bgr_black + bytes([0xff])
-                records_data += make_arc_native_path(
-                    cx, cy, r, start_angle, end_angle,
-                    line_color_bgra, linewidth
-                )
-            else:
-                records_data += build_native_bezier_stroke(
-                    wsd_sp, bgr_black, linewidth
-                )
-            num_objects += 1
-        if progress_cb and i % 10 == 0:
-            pct = 55 + int(35 * i / total)
-            progress_cb(f"处理中... {i+1}/{total}", pct)
+            if progress_cb and group_idx % 10 == 0:
+                pct = 55 + int(35 * group_idx / total)
+                progress_cb(f"处理中... {group_idx}/{total}", pct)
+    else:
+        # 原有逻辑：逐个子路径处理（图片矢量化/几何模式）
+        total = len(all_subpaths)
+        for i, sp in enumerate(all_subpaths):
+            if len(sp) < 2:
+                continue
+            wsd_sp = [(int(x*sx+ox), int(y*sy+oy)) for x, y in sp]
+
+            # 检查形状类型
+            shape_type = 'bezier'
+            shape_data = {}
+            is_stroke_only = False  # 是否是纯描边路径
+            if i < len(is_stroke_list) and is_stroke_list[i]:
+                # SVG描边路径（fill=none但有stroke）
+                is_stroke_only = True
+
+            # 纯描边形状：用描边方式构建，颜色用形状自身颜色
+            if is_stroke_only:
+                stroke_color = fill_colors[i]  # 颜色存在 fill_colors 里
+                if stroke_color is None:
+                    # 无色模式下，描边用黑色
+                    stroke_color = bytes([0x00, 0x00, 0x00])
+                # 计算描边线宽：SVG描边使用stroke-width * 缩放，否则使用默认linewidth
+                sw = linewidth
+                if i < len(stroke_widths):
+                    # SVG stroke-width 转换为 WSD 单位（假设SVG单位为px，1px ≈ 0.265mm ≈ 106 WSD单位）
+                    # 这里用缩放因子做近似
+                    sw = max(20, int(stroke_widths[i] * abs(sx) * 100))
+                if shape_type == 'circle':
+                    cx = int(shape_data['cx'] * sx + ox)
+                    cy = int(shape_data['cy'] * sy + oy)
+                    r = shape_data['r'] * abs(sx)
+                    records_data += build_native_circle_stroke(
+                        cx, cy, r, stroke_color, sw
+                    )
+                elif shape_type == 'rect':
+                    x1 = int(shape_data['x1'] * sx + ox)
+                    y1 = int(shape_data['y1'] * sy + oy)
+                    x2 = int(shape_data['x2'] * sx + ox)
+                    y2 = int(shape_data['y2'] * sy + oy)
+                    records_data += build_native_rect_stroke(
+                        x1, y1, x2, y2, stroke_color, sw
+                    )
+                elif shape_type == 'polygon':
+                    from wsd_gt_build import make_line_seg, make_path
+                    verts = [wsd_sp[j] for j in range(0, len(wsd_sp), 3)]
+                    if verts[0] != verts[-1]:
+                        verts = verts + [verts[0]]
+                    seg = make_line_seg(verts)
+                    line_color_bgra = stroke_color + bytes([0xff])
+                    records_data += make_path([[seg]], line_color_bgra, sw, fill_color_bgra=None)
+                elif shape_type == 'polyline':
+                    from wsd_gt_build import make_line_seg, make_path
+                    verts = [wsd_sp[j] for j in range(0, len(wsd_sp), 3)]
+                    seg = make_line_seg(verts)
+                    line_color_bgra = stroke_color + bytes([0xff])
+                    records_data += make_path([[seg]], line_color_bgra, sw, fill_color_bgra=None)
+                elif shape_type == 'arc':
+                    # 正圆弧描边：使用WSD原生圆弧格式
+                    from wsd_gt_build import make_arc_native_path
+                    cx = int(shape_data['cx'] * sx + ox)
+                    cy = int(shape_data['cy'] * sy + oy)
+                    r = shape_data['r'] * abs(sx)
+                    start_angle = math.radians(shape_data['start_angle'])
+                    end_angle = math.radians(shape_data['end_angle'])
+                    line_color_bgra = stroke_color + bytes([0xff])
+                    records_data += make_arc_native_path(
+                        cx, cy, r, start_angle, end_angle,
+                        line_color_bgra, sw
+                    )
+                else:
+                    records_data += build_native_bezier_stroke(
+                        wsd_sp, stroke_color, sw
+                    )
+                num_objects += 1
+                # outline 模式下纯描边不需要再画轮廓
+                continue
+
+            # 填充形状（\fill）
+            if fill_colors[i] is not None:
+                if shape_type == 'circle':
+                    cx = int(shape_data['cx'] * sx + ox)
+                    cy = int(shape_data['cy'] * sy + oy)
+                    r = shape_data['r'] * abs(sx)
+                    records_data += build_native_circle_fill(cx, cy, r, fill_colors[i])
+                elif shape_type == 'rect':
+                    x1 = int(shape_data['x1'] * sx + ox)
+                    y1 = int(shape_data['y1'] * sy + oy)
+                    x2 = int(shape_data['x2'] * sx + ox)
+                    y2 = int(shape_data['y2'] * sy + oy)
+                    records_data += build_native_rect_fill(x1, y1, x2, y2, fill_colors[i])
+                elif shape_type == 'polygon':
+                    verts = [wsd_sp[j] for j in range(0, len(wsd_sp), 3)]
+                    records_data += build_native_polygon_fill(verts, fill_colors[i])
+                elif shape_type == 'polyline':
+                    records_data += build_native_bezier_fill(wsd_sp, fill_colors[i])
+                elif shape_type == 'arc':
+                    # 圆弧填充（扇形）：用贝塞尔近似
+                    records_data += build_native_bezier_fill(wsd_sp, fill_colors[i])
+                else:
+                    records_data += build_native_bezier_fill(wsd_sp, fill_colors[i])
+                num_objects += 1
+
+            # 轮廓：填充形状加轮廓
+            if outline and fill_colors[i] is not None:
+                bgr_black = bytes([0x00, 0x00, 0x00])
+                if shape_type == 'circle':
+                    cx = int(shape_data['cx'] * sx + ox)
+                    cy = int(shape_data['cy'] * sy + oy)
+                    r = shape_data['r'] * abs(sx)
+                    records_data += build_native_circle_stroke(
+                        cx, cy, r, bgr_black, linewidth
+                    )
+                elif shape_type == 'rect':
+                    x1 = int(shape_data['x1'] * sx + ox)
+                    y1 = int(shape_data['y1'] * sy + oy)
+                    x2 = int(shape_data['x2'] * sx + ox)
+                    y2 = int(shape_data['y2'] * sy + oy)
+                    records_data += build_native_rect_stroke(
+                        x1, y1, x2, y2, bgr_black, linewidth
+                    )
+                elif shape_type == 'polygon':
+                    from wsd_gt_build import make_line_seg, make_path
+                    verts = [wsd_sp[j] for j in range(0, len(wsd_sp), 3)]
+                    if verts[0] != verts[-1]:
+                        verts = verts + [verts[0]]
+                    seg = make_line_seg(verts)
+                    line_color_bgra = bgr_black + bytes([0xff])
+                    records_data += make_path([[seg]], line_color_bgra, linewidth, fill_color_bgra=None)
+                elif shape_type == 'polyline':
+                    from wsd_gt_build import make_line_seg, make_path
+                    verts = [wsd_sp[j] for j in range(0, len(wsd_sp), 3)]
+                    seg = make_line_seg(verts)
+                    line_color_bgra = bgr_black + bytes([0xff])
+                    records_data += make_path([[seg]], line_color_bgra, linewidth, fill_color_bgra=None)
+                elif shape_type == 'arc':
+                    from wsd_gt_build import make_arc_native_path
+                    cx = int(shape_data['cx'] * sx + ox)
+                    cy = int(shape_data['cy'] * sy + oy)
+                    r = shape_data['r'] * abs(sx)
+                    start_angle = math.radians(shape_data['start_angle'])
+                    end_angle = math.radians(shape_data['end_angle'])
+                    line_color_bgra = bgr_black + bytes([0xff])
+                    records_data += make_arc_native_path(
+                        cx, cy, r, start_angle, end_angle,
+                        line_color_bgra, linewidth
+                    )
+                else:
+                    records_data += build_native_bezier_stroke(
+                        wsd_sp, bgr_black, linewidth
+                    )
+                num_objects += 1
+            if progress_cb and i % 10 == 0:
+                pct = 55 + int(35 * i / total)
+                progress_cb(f"处理中... {i+1}/{total}", pct)
 
     if progress_cb: progress_cb("组装文件...", 92)
 
