@@ -54,13 +54,16 @@ TAIL_EXT_SIZE = 138        # 尾部扩展数据大小（01 ff之后）
 FLAG_SUPERSCRIPT = 0x0001  # +0x1a 低字节
 FLAG_SUBSCRIPT = 0x0100    # +0x1a 高字节
 
-# 坐标对齐值（坐标必须是256的倍数，否则文件无法打开）
-COORD_ALIGNMENT = 256
+# 坐标对齐值（无对齐要求，直接使用原始坐标）
+COORD_ALIGNMENT = 1
+# 坐标在记录中的偏移（u16小端，嵌入在4字节字段的中间）
+COORD_X_OFFSET = 0x0d  # X坐标（u16 LE）
+COORD_Y_OFFSET = 0x11  # Y坐标（u16 LE）
 
 
 def align_coord(val):
-    """将坐标值对齐到256的倍数（向下取整）"""
-    return (int(val) >> 8) << 8
+    """坐标值直接使用，无需对齐（坐标为u16格式）"""
+    return int(val)
 
 
 def _load_template(filename):
@@ -167,11 +170,11 @@ def build_text_record(text, superscript=False, subscript=False,
         if orig_end < 0:
             orig_end = TEXT_OFFSET + 2  # 假设1字符
 
-        # 设置坐标（自动对齐到256字节边界）
+        # 设置坐标（u16小端，嵌入在4字节字段的中间位置）
         if x_pos is not None:
-            struct.pack_into('<i', rec, 0x0c, align_coord(x_pos))
+            struct.pack_into('<H', rec, COORD_X_OFFSET, int(x_pos))
         if y_pos is not None:
-            struct.pack_into('<i', rec, 0x10, align_coord(y_pos))
+            struct.pack_into('<H', rec, COORD_Y_OFFSET, int(y_pos))
 
         # 设置上下标标志 (+0x1a)
         flags = 0
@@ -216,11 +219,11 @@ def build_text_record(text, superscript=False, subscript=False,
         # 简单型记录: 52字节
         rec = bytearray(template_simple[:SIMPLE_REC_SIZE])
 
-        # 设置坐标（自动对齐到256字节边界）
+        # 设置坐标（u16小端，嵌入在4字节字段的中间位置）
         if x_pos is not None:
-            struct.pack_into('<i', rec, 0x0c, align_coord(x_pos))
+            struct.pack_into('<H', rec, COORD_X_OFFSET, int(x_pos))
         if y_pos is not None:
-            struct.pack_into('<i', rec, 0x10, align_coord(y_pos))
+            struct.pack_into('<H', rec, COORD_Y_OFFSET, int(y_pos))
 
         # 设置上下标标志
         flags = 0
@@ -280,11 +283,11 @@ def build_wsd_with_annotations(text_annotations, output_path=None,
     # 提取模板记录
     simple_rec, ext_rec = _extract_records(template_data)
 
-    # 获取模板的两个基准坐标
-    base_x1 = struct.unpack_from('<i', simple_rec, 0x0c)[0]
-    base_y1 = struct.unpack_from('<i', simple_rec, 0x10)[0]
-    base_x2 = struct.unpack_from('<i', ext_rec, 0x0c)[0]
-    base_y2 = struct.unpack_from('<i', ext_rec, 0x10)[0]
+    # 获取模板的两个基准坐标（u16格式）
+    base_x1 = struct.unpack_from('<H', simple_rec, COORD_X_OFFSET)[0]
+    base_y1 = struct.unpack_from('<H', simple_rec, COORD_Y_OFFSET)[0]
+    base_x2 = struct.unpack_from('<H', ext_rec, COORD_X_OFFSET)[0]
+    base_y2 = struct.unpack_from('<H', ext_rec, COORD_Y_OFFSET)[0]
 
     n = len(text_annotations)
     records = []

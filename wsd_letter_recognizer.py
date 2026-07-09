@@ -616,54 +616,334 @@ def detect_subscript_superscript(char_results):
 # ========== 字母-几何关联 ==========
 
 def associate_letters_to_geometry(letter_annotations, shapes):
-    """将字母标注与最近的几何元素关联
-
+    """将字母标注与最近的几何元素关联（改进版）
+    
+    提取所有几何关键点（顶点、圆心、端点），
+    每个字母找最近的关键点。
+    
     Args:
         letter_annotations: 字母标注列表
         shapes: 几何形状列表
-
+    
     Returns:
         更新后的标注列表
     """
     if not letter_annotations or not shapes:
         return letter_annotations
-
-    shape_keypoints = []
-    for i, s in enumerate(shapes):
-        pts = s.get('points', [])
-        if pts:
-            for p in pts:
-                shape_keypoints.append((i, p))
-        bbox = s.get('bbox')
-        if bbox:
-            x, y, w, h = bbox
-            shape_keypoints.append((i, (x + w/2, y + h/2)))
-
+    
+    # 提取所有几何关键点
+    keypoints = []  # [(x, y, shape_index, point_type, point_index)]
+    
+    for shape_idx, s in enumerate(shapes):
+        stype = s.get('type', '')
+        
+        # 跳过明显是文字的形状
+        if s.get('_is_text_candidate', False):
+            continue
+        
+        if stype == 'circle':
+            # 圆心
+            cx, cy = s.get('center', (0, 0))
+            keypoints.append((cx, cy, shape_idx, 'center', 0))
+        
+        elif stype in ('polygon', 'polyline', 'triangle', 'rectangle', 'line'):
+            points = s.get('points', [])
+            for pt_idx, p in enumerate(points):
+                keypoints.append((p[0], p[1], shape_idx, 'vertex', pt_idx))
+        
+        elif stype == 'arc':
+            # 圆弧端点和中点
+            points = s.get('points', [])
+            for pt_idx, p in enumerate(points):
+                keypoints.append((p[0], p[1], shape_idx, 'endpoint', pt_idx))
+    
+    if not keypoints:
+        return letter_annotations
+    
+    # 为每个字母找最近的关键点
     for ann in letter_annotations:
-        bx, by, bw, bh = ann['bbox']
-        lc_x = bx + bw / 2
-        lc_y = by + bh / 2
-
+        # 获取字母中心坐标
+        if 'cx' in ann and 'cy' in ann:
+            lc_x, lc_y = ann['cx'], ann['cy']
+        elif 'bbox' in ann:
+            bx, by, bw, bh = ann['bbox']
+            lc_x = bx + bw / 2
+            lc_y = by + bh / 2
+        elif 'x' in ann and 'w' in ann:
+            lc_x = ann['x'] + ann['w'] / 2
+            lc_y = ann['y'] + ann['h'] / 2
+        else:
+            continue
+        
         min_dist = float('inf')
-        nearest_idx = -1
-
-        for shape_idx, (vx, vy) in shape_keypoints:
-            dist = math.sqrt((lc_x - vx)**2 + (lc_y - vy)**2)
+        nearest_kp = None
+        
+        for kp in keypoints:
+            kx, ky, sidx, ptype, pidx = kp
+            dist = math.sqrt((lc_x - kx)**2 + (lc_y - ky)**2)
             if dist < min_dist:
                 min_dist = dist
-                nearest_idx = shape_idx
+                nearest_kp = kp
+        
+        if nearest_kp:
+            kx, ky, sidx, ptype, pidx = nearest_kp
+            ann['associated_shape_idx'] = sidx
+            ann['associated_point_type'] = ptype
+            ann['associated_point_index'] = pidx
+            ann['distance_to_geom'] = min_dist
+            ann['annotation_pos'] = (kx, ky)  # 使用几何点的坐标
+            ann['_keypoint_x'] = kx
+            ann['_keypoint_y'] = ky
+    
+    return letter_annotations
 
-        ann['associated_shape_idx'] = nearest_idx
-        ann['distance_to_geom'] = min_dist
-        ann['annotation_pos'] = (lc_x, lc_y)
 
+def optimize_annotation_positions(letter_annotations, shapes, img_size=None):
+    """优化标注位置：基于几何形状计算最佳偏移位置
+    
+    对于多边形顶点：沿角平分线方向向外偏移
+    对于圆心：沿字母原始位置方向偏移
+    对于线段端点：沿垂直于线段方向向外偏移
+    
+    Args:
+        letter_annotations: 已关联几何元素的标注列表
+        shapes: 几何形状列表
+        img_size: (w, h) 图像尺寸（可选）
+    
+    Returns:
+        更新后的标注列表，annotation_pos 被优化
+    """
+    if not letter_annotations or not shapes:
+        return letter_annotations
+    
+    # 计算典型字母大小（用于确定偏移距离）
+    letter_sizes = []
+    for ann in letter_annotations:
+        bbox = ann.get('bbox')
+        if bbox:
+            letter_sizes.append(max(bbox[2], bbox[3]))
+        elif 'w' in ann and 'h' in ann:
+            letter_sizes.append(max(ann['w'], ann['h']))
+    
+    # 默认偏移距离：字母大小的 0.8 倍
+    default_offset = max(letter_sizes) * 0.8 if letter_sizes else 20
+    
+    # 计算所有几何形状的整体质心（用于判断"外侧"方向）
+    all_points = []
+    for s in shapes:
+        stype = s.get('type', '')
+        if stype in ('polygon', 'polyline', 'triangle', 'rectangle', 'line'):
+            pts = s.get('points', [])
+            all_points.extend(pts)
+        elif stype == 'circle':
+            cx, cy = s.get('center', (0, 0))
+            all_points.append((cx, cy))
+    
+    global_centroid = None
+    if all_points:
+        gcx = sum(p[0] for p in all_points) / len(all_points)
+        gcy = sum(p[1] for p in all_points) / len(all_points)
+        global_centroid = (gcx, gcy)
+    
+    for ann in letter_annotations:
+        sidx = ann.get('associated_shape_idx')
+        ptype = ann.get('associated_point_type')
+        pidx = ann.get('associated_point_index')
+        
+        if sidx is None or sidx >= len(shapes):
+            continue
+        
+        shape = shapes[sidx]
+        stype = shape.get('type', '')
+        
+        # 获取字母原始中心位置（用于确定方向）
+        if 'cx' in ann and 'cy' in ann:
+            orig_cx, orig_cy = ann['cx'], ann['cy']
+        elif 'bbox' in ann:
+            bx, by, bw, bh = ann['bbox']
+            orig_cx = bx + bw / 2
+            orig_cy = by + bh / 2
+        else:
+            continue
+        
+        # 获取几何点坐标
+        kp_x = ann.get('_keypoint_x', ann.get('annotation_pos', (0, 0))[0])
+        kp_y = ann.get('_keypoint_y', ann.get('annotation_pos', (0, 0))[1] if isinstance(ann.get('annotation_pos'), tuple) else 0)
+        if isinstance(ann.get('annotation_pos'), tuple):
+            kp_x, kp_y = ann['annotation_pos']
+        
+        offset_dir_x = 0
+        offset_dir_y = 0
+        offset_dist = default_offset
+        
+        if stype in ('polygon', 'triangle', 'rectangle') and ptype == 'vertex':
+            # 多边形顶点：计算角平分线方向
+            points = shape.get('points', [])
+            if len(points) >= 3 and pidx is not None and pidx < len(points):
+                n = len(points)
+                # 前后两个相邻顶点
+                prev_idx = (pidx - 1) % n
+                next_idx = (pidx + 1) % n
+                prev_p = points[prev_idx]
+                curr_p = points[pidx]
+                next_p = points[next_idx]
+                
+                # 计算两条边的方向向量（从顶点指向外侧）
+                v1_x = prev_p[0] - curr_p[0]
+                v1_y = prev_p[1] - curr_p[1]
+                v2_x = next_p[0] - curr_p[0]
+                v2_y = next_p[1] - curr_p[1]
+                
+                # 归一化
+                len1 = math.sqrt(v1_x**2 + v1_y**2)
+                len2 = math.sqrt(v2_x**2 + v2_y**2)
+                if len1 > 0 and len2 > 0:
+                    v1_x /= len1
+                    v1_y /= len1
+                    v2_x /= len2
+                    v2_y /= len2
+                
+                # 角平分线方向（两个边向量的和）
+                bisect_x = v1_x + v2_x
+                bisect_y = v1_y + v2_y
+                
+                # 判断角平分线是指向多边形内部还是外部
+                # 方法：计算多边形质心，看平分线方向是否背离质心
+                if len(points) >= 3:
+                    cx_poly = sum(p[0] for p in points) / len(points)
+                    cy_poly = sum(p[1] for p in points) / len(points)
+                    
+                    # 从顶点指向质心的向量
+                    to_center_x = cx_poly - curr_p[0]
+                    to_center_y = cy_poly - curr_p[1]
+                    
+                    # 如果平分线与指向中心的向量同向（点积>0），说明指向内部
+                    dot = bisect_x * to_center_x + bisect_y * to_center_y
+                    if dot > 0:
+                        # 反向（指向外部）
+                        bisect_x = -bisect_x
+                        bisect_y = -bisect_y
+                
+                bisect_len = math.sqrt(bisect_x**2 + bisect_y**2)
+                if bisect_len > 0.01:
+                    offset_dir_x = bisect_x / bisect_len
+                    offset_dir_y = bisect_y / bisect_len
+                else:
+                    # 退而求其次：用字母原始位置方向
+                    offset_dir_x = orig_cx - kp_x
+                    offset_dir_y = orig_cy - kp_y
+                    od_len = math.sqrt(offset_dir_x**2 + offset_dir_y**2)
+                    if od_len > 0:
+                        offset_dir_x /= od_len
+                        offset_dir_y /= od_len
+        
+        elif stype == 'circle' and ptype == 'center':
+            # 圆心：沿字母原始位置方向偏移
+            offset_dir_x = orig_cx - kp_x
+            offset_dir_y = orig_cy - kp_y
+            od_len = math.sqrt(offset_dir_x**2 + offset_dir_y**2)
+            if od_len > 0:
+                offset_dir_x /= od_len
+                offset_dir_y /= od_len
+            else:
+                offset_dir_x = 1.0
+                offset_dir_y = 0.0
+            
+            # 圆心的偏移距离稍大（圆的半径 + 字母大小）
+            radius = shape.get('radius', 0)
+            offset_dist = radius + default_offset * 0.5
+        
+        elif stype in ('line', 'polyline', 'arc') and ptype in ('vertex', 'endpoint'):
+            # 线段端点：使用字母原始位置方向作为标注方向
+            # 
+            # 核心思路：OCR识别出的字母位置就是原图中的标注位置，
+            # 这是最准确的方向参考。我们只需要：
+            # 1. 确保锚点在端点上
+            # 2. 文字在字母原始位置所在的那一侧
+            # 3. 距离适当（字母大小的0.8倍）
+            
+            # 方向：从端点指向字母原始位置
+            dir_dx = orig_cx - kp_x
+            dir_dy = orig_cy - kp_y
+            dir_len = math.sqrt(dir_dx**2 + dir_dy**2)
+            
+            if dir_len > 1:
+                offset_dir_x = dir_dx / dir_len
+                offset_dir_y = dir_dy / dir_len
+            else:
+                # 字母太接近端点，默认右上方
+                offset_dir_x = 0.707
+                offset_dir_y = -0.707
+            
+            # 对于中间折点（多段线的内部顶点），用角平分线优化
+            points = shape.get('points', [])
+            if len(points) >= 3 and pidx is not None and 0 < pidx < len(points) - 1:
+                # 中间折点：用角平分线
+                prev_idx = pidx - 1
+                next_idx = pidx + 1
+                prev_p = points[prev_idx]
+                curr_p = points[pidx]
+                next_p = points[next_idx]
+                
+                v1_x = prev_p[0] - curr_p[0]
+                v1_y = prev_p[1] - curr_p[1]
+                v2_x = next_p[0] - curr_p[0]
+                v2_y = next_p[1] - curr_p[1]
+                
+                len1 = math.sqrt(v1_x**2 + v1_y**2)
+                len2 = math.sqrt(v2_x**2 + v2_y**2)
+                if len1 > 0 and len2 > 0:
+                    v1_x /= len1
+                    v1_y /= len1
+                    v2_x /= len2
+                    v2_y /= len2
+                
+                bisect_x = v1_x + v2_x
+                bisect_y = v1_y + v2_y
+                bisect_len = math.sqrt(bisect_x**2 + bisect_y**2)
+                if bisect_len > 0.01:
+                    bisect_dir_x = bisect_x / bisect_len
+                    bisect_dir_y = bisect_y / bisect_len
+                    
+                    # 用字母原始位置确定朝哪一侧
+                    dot = bisect_dir_x * offset_dir_x + bisect_dir_y * offset_dir_y
+                    if dot < 0:
+                        bisect_dir_x = -bisect_dir_x
+                        bisect_dir_y = -bisect_dir_y
+                    
+                    # 角平分线方向和字母原始方向混合（角平分线权重更高）
+                    offset_dir_x = 0.7 * bisect_dir_x + 0.3 * offset_dir_x
+                    offset_dir_y = 0.7 * bisect_dir_y + 0.3 * offset_dir_y
+                    od_len = math.sqrt(offset_dir_x**2 + offset_dir_y**2)
+                    if od_len > 0:
+                        offset_dir_x /= od_len
+                        offset_dir_y /= od_len
+        else:
+            # 其他情况：保持原位置
+            continue
+        
+        # 计算最终标注位置
+        new_x = kp_x + offset_dir_x * offset_dist
+        new_y = kp_y + offset_dir_y * offset_dist
+        
+        # 更新标注位置
+        ann['annotation_pos'] = (new_x, new_y)
+        ann['_optimized_pos'] = True
+        ann['_offset_dir'] = (offset_dir_x, offset_dir_y)
+        ann['_offset_dist'] = offset_dist
+    
     return letter_annotations
 
 
 # ========== 生成WSD标注配置 ==========
 
 def annotations_to_wsd_config(letter_annotations, sx=1.0, sy=1.0, ox=0.0, oy=0.0):
-    """将字母标注转换为 wsd_text.py 的配置格式
+    """将字母标注转换为WSD标注配置格式
+
+    主字母和下标/上标合并到同一条记录中（与样本格式一致）。
+
+    使用EE原生的关联标注模式（type=4 自由比例），文字在以关联点为中心的
+    800x800 正方形内定位，支持任意方向的精确标注。
 
     Args:
         letter_annotations: 关联后的字母标注列表
@@ -671,59 +951,173 @@ def annotations_to_wsd_config(letter_annotations, sx=1.0, sy=1.0, ox=0.0, oy=0.0
         ox, oy: 偏移量
 
     Returns:
-        list: build_wsd_with_annotations 所需的标注列表
+        list: wsd_sample_builder 所需的标注列表
     """
     wsd_annotations = []
 
     for ann in letter_annotations:
-        pos = ann.get('annotation_pos')
-        if pos:
-            lc_x, lc_y = pos
-        else:
+        # 获取关联点位置（顶点、圆心等）
+        kp_x = ann.get('_keypoint_x')
+        kp_y = ann.get('_keypoint_y')
+        
+        # 获取字母原始中心位置（用于确定方向）
+        if 'cx' in ann and 'cy' in ann:
+            orig_cx, orig_cy = ann['cx'], ann['cy']
+        elif 'bbox' in ann:
             bx, by, bw, bh = ann['bbox']
-            lc_x = bx + bw / 2
-            lc_y = by + bh / 2
+            orig_cx = bx + bw / 2
+            orig_cy = by + bh / 2
+        else:
+            orig_cx, orig_cy = None, None
+        
+        # 如果没有关联点，使用原始位置
+        if kp_x is None or kp_y is None:
+            if orig_cx is not None:
+                kp_x, kp_y = orig_cx, orig_cy
+            else:
+                continue
+        
+        # 先把关联点转换为WSD坐标
+        kp_wsd_x = int(kp_x * sx + ox)
+        kp_wsd_y = int(kp_y * sy + oy)
+        
+        # 估算文字尺寸（WSD单位）
+        # 根据校准测试和样本分析，单字母约宽200，高200
+        # EE关联标注的800x800正方形中，文字约占1/4大小
+        CHAR_W = 200
+        CHAR_H = 200
+        
+        # 默认标注距离（WSD单位）：关联点到文字边缘的距离
+        # 对应样本中type=5的f1=600
+        DEFAULT_DISTANCE = 600
+        
+        # 确定标注方向
+        # 优先使用优化后的方向（来自optimize_annotation_positions）
+        offset_dir = ann.get('_offset_dir')
+        if offset_dir and offset_dir != (0, 0):
+            dir_x, dir_y = offset_dir
+        elif orig_cx is not None and orig_cy is not None:
+            # 使用字母原始位置相对于关联点的方向
+            dx = orig_cx - kp_x
+            dy = orig_cy - kp_y
+            dist = math.sqrt(dx * dx + dy * dy)
+            if dist > 1:
+                dir_x = dx / dist
+                dir_y = dy / dist
+            else:
+                # 默认右上方
+                dir_x = 0.707
+                dir_y = -0.707
+        else:
+            # 默认右上方
+            dir_x = 0.707
+            dir_y = -0.707
+        
+        # 计算标注距离（WSD单位）
+        # 如果有优化后的距离（像素单位），乘以平均缩放因子
+        offset_dist_px = ann.get('_offset_dist')
+        if offset_dist_px is not None:
+            # 像素 -> WSD单位：平均缩放因子
+            avg_scale = (abs(sx) + abs(sy)) / 2
+            if avg_scale > 0:
+                distance = offset_dist_px * avg_scale
+            else:
+                distance = DEFAULT_DISTANCE
+        else:
+            distance = DEFAULT_DISTANCE
+        
+        # ===== 关联标注模式（默认）：type=4 自由比例，支持任意方向 =====
+        # 使用EE原生的关联标注模式，锚点为关联点(keypoint)
+        # f1, f2 为 0~1 的对齐比例，控制文字相对于锚点的位置
+        # 根据校准测试验证：
+        #   f1=0 → 右对齐（文字右边缘在锚点x，文字在左侧）
+        #   f1=0.5 → 水平居中
+        #   f1=1 → 左对齐（文字左边缘在锚点x，文字在右侧）
+        #   f2=0 → 底对齐（文字底部在锚点y，文字在上方）
+        #   f2=0.5 → 垂直居中
+        #   f2=1 → 顶对齐（文字顶部在锚点y，文字在下方）
+        #
+        # 我们想要：文字矩形沿方向(dir_x, dir_y)，
+        #   从关联点到文字边缘的距离 = distance
+        #
+        # 设文字中心在方向射线上，距离关联点 distance + r
+        # 其中 r 是沿方向从文字中心到边缘的距离
+        # r = min(w/(2*|dx|), h/(2*|dy|))
+        #
+        # 文字中心 C = (kp_x + dx*(distance+r), kp_y + dy*(distance+r))
+        # 
+        # f1 和 f2 由文字中心位置反推：
+        # 中心x = kp_x + (2*f1 - 1) * w/2
+        # → f1 = 0.5 + (cx - kp_x) / w = 0.5 + dx * (distance+r) / w
+        # 同理 f2 = 0.5 + dy * (distance+r) / h
+        
+        hw = CHAR_W / 2  # 半宽
+        hh = CHAR_H / 2  # 半高
+        
+        # 沿方向从文字中心到边缘的距离 r
+        abs_dx = abs(dir_x) if abs(dir_x) > 0.001 else 0.001
+        abs_dy = abs(dir_y) if abs(dir_y) > 0.001 else 0.001
+        r_center_to_edge = min(hw / abs_dx, hh / abs_dy)
+        
+        # 文字中心到锚点的距离
+        center_dist = distance + r_center_to_edge
+        
+        # 计算 f1, f2
+        f1_ratio = 0.5 + dir_x * center_dist / CHAR_W
+        f2_ratio = 0.5 + dir_y * center_dist / CHAR_H
+        
+        # 限制在 0~1 范围内
+        f1_ratio = max(0.0, min(1.0, f1_ratio))
+        f2_ratio = max(0.0, min(1.0, f2_ratio))
+        
+        # 使用 type=4, b1d=0x54（自由比例模式）
+        wsd_x = kp_wsd_x
+        wsd_y = kp_wsd_y
+        use_associated = True
+        assoc_type = 4
+        assoc_f1 = f1_ratio
+        assoc_f2 = f2_ratio
+        assoc_b1d = 0x54
 
-        wsd_x = int(lc_x * sx + ox)
-        wsd_y = int(lc_y * sy + oy)
+        # 获取主字母
+        main_char = ann.get('main_char', '')
+        if not main_char:
+            # 从text中提取第一个字符
+            text = ann.get('text', '')
+            if text:
+                main_char = text[0]
 
-        main_char = ann.get('main_char', ann['text'])
+        if not main_char:
+            continue
 
-        # 主字母
+        # 构建完整文字（含上下标）
+        full_text = main_char
+        has_sup = False
+        has_sub = False
+
+        sub_text = ann.get('subscript', '') or ann.get('subscript_char', '')
+        sup_text = ann.get('superscript', '') or ann.get('superscript_char', '')
+
+        if sub_text:
+            full_text += sub_text
+            has_sub = True
+        if sup_text:
+            full_text += sup_text
+            has_sup = True
+
         wsd_annotations.append({
-            'text': main_char,
-            'superscript': False,
-            'subscript': False,
+            'text': full_text,
+            'superscript': has_sup,
+            'subscript': has_sub,
             'x': wsd_x,
             'y': wsd_y,
+            'margin_mm': 2.0,  # 默认边距
+            'associated_mode': use_associated,
+            'assoc_type': assoc_type,
+            'assoc_f1': assoc_f1,
+            'assoc_f2': assoc_f2,
+            'assoc_b1d': assoc_b1d,
         })
-
-        bbox_w_px = ann['bbox'][2]
-        bbox_h_px = ann['bbox'][3]
-
-        # 下标
-        if ann.get('subscript'):
-            sub_x = wsd_x + int(bbox_w_px * sx * 0.7)
-            sub_y = wsd_y + int(bbox_h_px * sy * 0.25)
-            wsd_annotations.append({
-                'text': ann['subscript'],
-                'superscript': False,
-                'subscript': True,
-                'x': sub_x,
-                'y': sub_y,
-            })
-
-        # 上标
-        if ann.get('superscript'):
-            super_x = wsd_x + int(bbox_w_px * sx * 0.7)
-            super_y = wsd_y - int(bbox_h_px * sy * 0.25)
-            wsd_annotations.append({
-                'text': ann['superscript'],
-                'superscript': True,
-                'subscript': False,
-                'x': super_x,
-                'y': super_y,
-            })
 
     return wsd_annotations
 
@@ -1389,3 +1783,564 @@ if __name__ == '__main__':
         print(f"     {m['full_text']} (主:{m['main_char']}, 下标:{m['subscript']}, 上标:{m['superscript']})")
 
     print("\n自测完成")
+
+
+# ========== 改进版几何图标注识别 ==========
+
+def recognize_geo_annotations(img_color, min_confidence=0.3):
+    """改进版几何图标注识别（专门优化）
+    
+    针对几何图字母标注的特点进行优化：
+    1. 只识别大写字母和数字（几何图常见标注）
+    2. 放大图片提高识别率
+    3. 基于形状特征的二次校验
+    4. 检测下标（小字符，位置偏右下）
+    
+    Args:
+        img_color: 原始彩色图像 (BGR, numpy array)
+        min_confidence: 最低置信度
+    
+    Returns:
+        dict: 识别结果，包含：
+            'letters': 字母候选列表
+            'merged_annotations': 合并上下标后的标注列表
+            'recognition_method': 识别方法
+    """
+    if img_color is None:
+        return {'letters': [], 'merged_annotations': [], 'recognition_method': 'none'}
+    
+    h, w = img_color.shape[:2]
+    
+    # 转为灰度
+    gray = cv2.cvtColor(img_color, cv2.COLOR_BGR2GRAY)
+    
+    # 放大图片（提高小字母识别率）
+    scale = 2.0
+    gray_big = cv2.resize(gray, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
+    
+    letters = []
+    
+    # 尝试OCR识别
+    try:
+        import pytesseract
+        
+        # 白名单：只允许大写字母和数字
+        whitelist = '-c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'
+        
+        # 使用稀疏文本模式
+        data = pytesseract.image_to_data(
+            gray_big,
+            lang='eng',
+            output_type=pytesseract.Output.DICT,
+            config=f'--psm 11 --oem 3 {whitelist}'
+        )
+        
+        n = len(data['text'])
+        for i in range(n):
+            text = data['text'][i].strip()
+            if not text:
+                continue
+            conf = int(data['conf'][i]) / 100.0
+            if conf < min_confidence:
+                continue
+            
+            # 坐标转换回原图
+            x = int(data['left'][i] / scale)
+            y = int(data['top'][i] / scale)
+            cw = int(data['width'][i] / scale)
+            ch = int(data['height'][i] / scale)
+            
+            # 过滤掉太大的（可能是图形）
+            if cw > w * 0.15 or ch > h * 0.15:
+                continue
+            
+            # 分离多字符的情况：拆分成单个字符
+            if len(text) > 1:
+                # 计算每个字符的宽度
+                char_w = cw / len(text)
+                for j, char in enumerate(text):
+                    char_x = x + int(j * char_w)
+                    letters.append({
+                        'char': char,
+                        'confidence': conf,
+                        'x': char_x,
+                        'y': y,
+                        'w': int(char_w),
+                        'h': ch,
+                        'cx': char_x + char_w / 2,
+                        'cy': y + ch / 2,
+                        'bbox': (char_x, y, int(char_w), ch),
+                    })
+            else:
+                letters.append({
+                    'char': text,
+                    'confidence': conf,
+                    'x': x,
+                    'y': y,
+                    'w': cw,
+                    'h': ch,
+                    'cx': x + cw / 2,
+                    'cy': y + ch / 2,
+                    'bbox': (x, y, cw, ch),
+                })
+    
+    except ImportError:
+        pass
+    
+    if not letters:
+        return {'letters': [], 'merged_annotations': [], 'recognition_method': 'none'}
+    
+    # 基于形状特征的二次校验（B vs F, O vs E 等）
+    letters = _verify_letters_by_shape(gray, letters)
+    
+    # 去重（重叠的只保留置信度高的）
+    letters = _deduplicate_letters(letters)
+    
+    # 检测上下标并合并
+    merged = _merge_subscript_superscript_v2(letters)
+    
+    return {
+        'letters': letters,
+        'merged_annotations': merged,
+        'recognition_method': 'ocr_enhanced',
+    }
+
+
+def _verify_letters_by_shape(gray_img, letters):
+    """基于形状特征对字母识别结果进行二次校验
+    
+    主要修正常见混淆：
+    - B vs F, E
+    - O vs E, C
+    - 1 vs l, I
+    
+    Args:
+        gray_img: 灰度图像
+        letters: 字母候选列表
+    
+    Returns:
+        list: 校验后的字母列表
+    """
+    h, w = gray_img.shape[:2]
+    result = []
+    
+    for letter in letters:
+        char = letter['char']
+        x, y, lw, lh = letter['x'], letter['y'], letter['w'], letter['h']
+        
+        # 裁剪字母区域，放大后分析
+        padding = 5
+        x1 = max(0, x - padding)
+        y1 = max(0, y - padding)
+        x2 = min(w, x + lw + padding)
+        y2 = min(h, y + lh + padding)
+        
+        roi = gray_img[y1:y2, x1:x2]
+        if roi.size == 0:
+            result.append(letter)
+            continue
+        
+        # 放大4倍
+        roi_big = cv2.resize(roi, None, fx=4, fy=4, interpolation=cv2.INTER_CUBIC)
+        
+        # OTSU二值化（反色：文字为白色）
+        _, binary = cv2.threshold(roi_big, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+        
+        bh, bw = binary.shape
+        
+        # 计算顶部、中部、底部的水平投影长度
+        h_proj = np.sum(binary, axis=1) > 0
+        # 找有效行范围
+        rows = np.where(h_proj)[0]
+        if len(rows) == 0:
+            result.append(letter)
+            continue
+        
+        top_row, bottom_row = rows[0], rows[-1]
+        total_h = bottom_row - top_row + 1
+        
+        # 找有效列范围
+        v_proj = np.sum(binary, axis=0) > 0
+        cols = np.where(v_proj)[0]
+        if len(cols) == 0:
+            result.append(letter)
+            continue
+        total_w = cols[-1] - cols[0] + 1
+        
+        # 基于字符有效区域计算密度（避免padding影响）
+        char_roi = binary[top_row:bottom_row+1, cols[0]:cols[-1]+1]
+        ch, cw = char_roi.shape
+        
+        # 计算左右两半的像素密度
+        left_half = char_roi[:, :cw//2]
+        right_half = char_roi[:, cw//2:]
+        left_density = np.sum(left_half > 0) / max(1, ch * cw // 2)
+        right_density = np.sum(right_half > 0) / max(1, ch * cw // 2)
+        
+        # 分三部分：上1/3, 中1/3, 下1/3
+        top_end = top_row + total_h // 3
+        mid_end = top_row + 2 * total_h // 3
+        
+        # 计算每部分的最大宽度
+        def max_width_in_range(start, end):
+            max_w = 0
+            for r in range(start, min(end, bh)):
+                cols = np.where(binary[r] > 0)[0]
+                if len(cols) > 0:
+                    w = cols[-1] - cols[0] + 1
+                    max_w = max(max_w, w)
+            return max_w
+        
+        top_width = max_width_in_range(top_row, top_end)
+        mid_width = max_width_in_range(top_end, mid_end)
+        bottom_width = max_width_in_range(mid_end, bottom_row)
+        
+        # 高宽比
+        aspect = total_h / max(1, total_w)
+        
+        # 圆度（面积/周长²）
+        contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if contours:
+            cnt = max(contours, key=cv2.contourArea)
+            area = cv2.contourArea(cnt)
+            perimeter = cv2.arcLength(cnt, True)
+            circularity = 4 * np.pi * area / max(1, perimeter * perimeter)
+        else:
+            circularity = 0
+        
+        # 左右边缘直线度检测（区分D和O的关键特征）
+        # D的左侧是垂直直线，O的左右两侧都是圆弧
+        left_edge_x = []  # 每行最左侧像素的x坐标
+        right_edge_x = []  # 每行最右侧像素的x坐标
+        for r in range(top_row, bottom_row + 1):
+            row_pixels = np.where(binary[r] > 0)[0]
+            if len(row_pixels) > 0:
+                left_edge_x.append(row_pixels[0])
+                right_edge_x.append(row_pixels[-1])
+        
+        def calc_straightness(edge_list, char_width):
+            """计算边缘直线度：标准差/宽度，越小越直"""
+            if len(edge_list) < 5:
+                return 1.0
+            return np.std(edge_list) / max(1, char_width)
+        
+        left_straightness = calc_straightness(left_edge_x, total_w)
+        right_straightness = calc_straightness(right_edge_x, total_w)
+        
+        # 根据特征修正
+        new_char = char
+        
+        # B vs P vs R vs F vs E:
+        # 关键区分特征：
+        #   B: 2个孔洞，左右对称，底部宽
+        #   P: 1个孔洞，底部窄（底/顶比小），右下空白
+        #   R: 1个孔洞，底部宽，右下有尾巴（右下密度高）
+        #   F: 0个孔洞，底部窄，右侧密度低
+        #   E: 0个孔洞，底部宽，右侧密度低（三横）
+        if char in ('F', 'E', 'B', 'P', 'R'):
+            lr_ratio = min(left_density, right_density) / max(left_density, right_density)
+            tb_ratio = bottom_width / max(1, top_width)
+            
+            # 计算孔洞数
+            contours_all, hierarchy = cv2.findContours(binary, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE)
+            hole_count = 0
+            if hierarchy is not None:
+                for i in range(len(contours_all)):
+                    if hierarchy[0][i][3] != -1:
+                        hole_count += 1
+            
+            # 计算右下角1/4区域密度（区分R和P/B）
+            if ch > 0 and cw > 0:
+                qh = ch // 4
+                qw = cw // 4
+                bottom_right_quarter = char_roi[-qh:, -qw:]
+                brq_density = np.sum(bottom_right_quarter > 0) / max(1, bottom_right_quarter.size)
+            else:
+                brq_density = 0
+            
+            # 优先级1: F - 无孔洞，底部窄，右侧密度最低
+            if hole_count == 0 and tb_ratio < 0.5 and right_density < left_density * 0.5:
+                new_char = 'F'
+            # 优先级2: E - 无孔洞，底部宽，右侧密度低（三横结构）
+            elif hole_count == 0 and tb_ratio > 0.7 and right_density < left_density * 0.7:
+                new_char = 'E'
+            # 优先级3: B - 2个孔洞，左右对称，底部宽
+            elif hole_count >= 2 and lr_ratio > 0.7 and tb_ratio > 0.7:
+                new_char = 'B'
+            # 优先级4: P - 1个孔洞，底部很窄，右下空白
+            elif hole_count == 1 and tb_ratio < 0.5 and brq_density < 0.1:
+                new_char = 'P'
+            # 优先级5: R - 1个孔洞，底部宽，右下有尾巴（密度高）
+            elif hole_count == 1 and tb_ratio > 0.7 and brq_density > 0.3:
+                new_char = 'R'
+            # 优先级6: B - 1个孔洞但左右对称（可能是粗体B只检测到1个洞）
+            elif hole_count >= 1 and lr_ratio > 0.7 and tb_ratio > 0.7 and mid_width >= top_width * 0.8:
+                new_char = 'B'
+        
+        # O vs C vs 0 vs D vs Q vs G:
+        # 关键区分特征：
+        #   D: 左侧非常直(left_straightness小)，左右不对称，高宽比大
+        #   O: 左右都不直，高度对称，圆度高
+        #   0: 左右都不直，对称但偏高瘦
+        #   C: 右边开口，右侧密度低，圆度低
+        #   Q: 底部有尾巴，底部宽度比顶部小，左侧不直
+        #   G: 底部有一横，右下侧有突出
+        if char in ('O', 'C', '0', 'D', 'Q', 'G'):
+            lr_ratio = min(left_density, right_density) / max(left_density, right_density)
+            tb_ratio = bottom_width / max(1, top_width)
+            
+            # 优先级1: C - 右边开口（圆度低，右侧密度低，中部细上下粗）
+            # C的典型特征：中间宽度远小于顶部/底部宽度
+            mid_top_ratio = mid_width / max(1, top_width)
+            if circularity < 0.3 and (right_density < left_density * 0.75 or mid_top_ratio < 0.5):
+                new_char = 'C'
+            # 优先级2: D - 左侧非常直（最关键特征），且左右不对称
+            elif left_straightness < 0.04 and lr_ratio < 0.9:
+                new_char = 'D'
+            # 优先级3: Q - 底部有尾巴（底部宽度明显小于顶部，且右下突出）
+            elif tb_ratio < 0.92 and right_density > left_density:
+                new_char = 'Q'
+            # 优先级4: G - 底部有一横（圆度低但左右密度相近，底部有突出）
+            elif circularity < 0.3 and lr_ratio > 0.9 and bottom_width >= top_width:
+                new_char = 'G'
+            # 优先级5: 0 - 偏高瘦但左右对称（数字0）
+            elif aspect > 1.3 and lr_ratio > 0.9 and left_straightness > 0.05:
+                new_char = '0'
+            # 优先级6: O - 高圆度，左右对称，两侧都不直
+            elif circularity > 0.5 and lr_ratio > 0.85 and left_straightness > 0.05:
+                new_char = 'O'
+        
+        # 1 vs l vs I vs i:
+        # 1是细高的，宽度很小
+        if char in ('1', 'l', 'I', 'i', '|', '!'):
+            if aspect > 2.0 and total_w < total_h * 0.4:
+                new_char = '1'
+            elif aspect > 2.0:
+                new_char = 'I'
+        
+        # 更新字符
+        if new_char != char:
+            letter = dict(letter)
+            letter['char'] = new_char
+            letter['original_char'] = char
+            # 稍微降低置信度（因为是修正后的）
+            letter['confidence'] = letter['confidence'] * 0.9
+        
+        result.append(letter)
+    
+    return result
+
+
+def _count_runs(arr):
+    """计算数组中连续True段的数量"""
+    count = 0
+    in_run = False
+    for v in arr:
+        if v and not in_run:
+            count += 1
+            in_run = True
+        elif not v:
+            in_run = False
+    return count
+
+
+def _deduplicate_letters(letters):
+    """去重：重叠的字母只保留置信度高的"""
+    if not letters:
+        return letters
+    
+    # 按置信度排序（高的在前）
+    sorted_letters = sorted(letters, key=lambda l: l['confidence'], reverse=True)
+    
+    result = []
+    used = set()
+    
+    for i, letter in enumerate(sorted_letters):
+        if i in used:
+            continue
+        
+        cx, cy = letter['cx'], letter['cy']
+        lw, lh = letter['w'], letter['h']
+        
+        # 检查与已保留的是否重叠太多
+        overlap = False
+        for kept in result:
+            kcx, kcy = kept['cx'], kept['cy']
+            dist = math.sqrt((cx - kcx)**2 + (cy - kcy)**2)
+            # 中心距离小于较小宽度的一半，认为重叠
+            if dist < min(lw, kept['w']) * 0.6:
+                overlap = True
+                break
+        
+        if not overlap:
+            result.append(letter)
+    
+    # 按位置排序（从上到下，从左到右）
+    result.sort(key=lambda l: (l['cy'], l['cx']))
+    
+    return result
+
+
+def _merge_subscript_superscript_v2(letters):
+    """检测并合并上下标（改进版）
+    
+    几何图中标注格式：
+    - 主字母：大写字母，正常大小
+    - 下标：数字或小写字母，大小约为主字母的0.5-0.7倍，位置偏右下
+    
+    Args:
+        letters: 字母列表
+    
+    Returns:
+        list: 合并后的标注列表，每个元素包含：
+            - text: 完整文字（如"C1"）
+            - main_char: 主字母
+            - subscript: 下标文字
+            - superscript: 上标文字
+            - x, y: 主字母坐标
+            - bbox: 边界框
+            - confidence: 置信度
+            - is_subscript: 是否有下标
+            - is_superscript: 是否有上标
+    """
+    if not letters:
+        return []
+    
+    # 计算平均高度（用于判断下标）
+    heights = [l['h'] for l in letters]
+    if not heights:
+        avg_h = 30
+    else:
+        avg_h = sum(heights) / len(heights)
+    
+    # 分离主字母和可能的下标
+    # 主字母：高度 >= 平均高度的0.7倍
+    main_letters = []
+    small_chars = []
+    
+    for letter in letters:
+        if letter['h'] >= avg_h * 0.7:
+            main_letters.append(letter)
+        else:
+            small_chars.append(letter)
+    
+    # 为每个主字母找下标
+    used_small = set()
+    result = []
+    
+    for main in main_letters:
+        mx, my = main['cx'], main['cy']
+        mw, mh = main['w'], main['h']
+        m_right = main['x'] + mw
+        m_bottom = main['y'] + mh
+        
+        sub_text = ''
+        super_text = ''
+        sub_conf = 1.0
+        super_conf = 1.0
+        
+        # 找下标：在主字母右下方，高度较小
+        best_sub = None
+        best_sub_score = float('inf')
+        
+        for idx, small in enumerate(small_chars):
+            if idx in used_small:
+                continue
+            
+            sx, sy = small['cx'], small['cy']
+            sw, sh = small['w'], small['h']
+            
+            # 位置检查：x在主字母右侧附近
+            if sx < m_right - mw * 0.3:
+                continue
+            if sx > m_right + mw * 2.0:
+                continue
+            
+            # 下标：y在主字母中下部以下
+            if sy < my:
+                continue
+            if sy > m_bottom + mh * 0.5:
+                continue
+            
+            # 大小检查：高度是主字母的0.4-0.8倍
+            ratio = sh / mh
+            if ratio < 0.3 or ratio > 0.85:
+                continue
+            
+            # 评分：距离越近越好
+            dist = math.sqrt((sx - m_right)**2 + (sy - (my + mh * 0.3))**2)
+            score = dist
+            
+            if score < best_sub_score:
+                best_sub_score = score
+                best_sub = idx
+        
+        if best_sub is not None:
+            sub_text = small_chars[best_sub]['char']
+            sub_conf = small_chars[best_sub]['confidence']
+            used_small.add(best_sub)
+        
+        # 构建标注
+        full_text = main['char']
+        if sub_text:
+            full_text += sub_text
+        if super_text:
+            full_text += '^' + super_text
+        
+        # 边界框
+        x = main['x']
+        y = main['y']
+        bw = mw
+        bh = mh
+        if sub_text:
+            small = small_chars[best_sub]
+            bw = small['x'] + small['w'] - x
+            bh = max(bh, small['y'] + small['h'] - y)
+        
+        result.append({
+            'text': full_text,
+            'main_char': main['char'],
+            'subscript': sub_text,
+            'superscript': super_text,
+            'x': x,
+            'y': y,
+            'w': bw,
+            'h': bh,
+            'cx': main['cx'],
+            'cy': main['cy'],
+            'bbox': (x, y, bw, bh),
+            'confidence': main['confidence'] * 0.9 + sub_conf * 0.1,
+            'is_subscript': bool(sub_text),
+            'is_superscript': bool(super_text),
+            'subscript_char': sub_text,
+            'superscript_char': super_text,
+        })
+    
+    # 把没有被合并的小字符也加入结果（可能是独立的标注）
+    for idx, small in enumerate(small_chars):
+        if idx not in used_small:
+            # 如果高度接近主字母（可能是识别误差）
+            if small['h'] >= avg_h * 0.5:
+                result.append({
+                    'text': small['char'],
+                    'main_char': small['char'],
+                    'subscript': '',
+                    'superscript': '',
+                    'x': small['x'],
+                    'y': small['y'],
+                    'w': small['w'],
+                    'h': small['h'],
+                    'cx': small['cx'],
+                    'cy': small['cy'],
+                    'bbox': small['bbox'],
+                    'confidence': small['confidence'],
+                    'is_subscript': False,
+                    'is_superscript': False,
+                    'subscript_char': '',
+                    'superscript_char': '',
+                })
+    
+    # 按位置排序
+    result.sort(key=lambda a: (a['cy'], a['cx']))
+    
+    return result

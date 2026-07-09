@@ -798,10 +798,70 @@ def detect_polygon_from_labels(skeleton, label_points,
 # 功能8：标注点与形状关联
 # ============================================================
 
-def associate_labels_to_shape_endpoints(label_points, shapes, max_dist_factor=2.0):
-    """将标注点关联到形状的端点
+def _is_label_outside_shape(label_pos, shape, endpoint_idx):
+    """判断标注点是否在形状的外侧（相对于端点）
+    
+    对于多边形/三角形等闭合形状，标注应该在形状外部。
+    原理：从端点指向标注点的向量，应该与从端点指向形状中心的向量方向相反。
+    
+    Args:
+        label_pos: 标注点位置 (x, y)
+        shape: 形状字典
+        endpoint_idx: 端点索引
+    
+    Returns:
+        bool: True 表示在外侧（合理），False 表示在内侧（不合理）
+    """
+    shape_type = shape.get('type')
+    pts = shape.get('points', [])
+    
+    if shape_type in ('rectangle', 'triangle', 'polygon', 'star'):
+        if not pts or endpoint_idx < 0 or endpoint_idx >= len(pts):
+            return True
+        
+        # 计算形状中心（质心）
+        cx = sum(p[0] for p in pts) / len(pts)
+        cy = sum(p[1] for p in pts) / len(pts)
+        
+        # 端点位置
+        ep = pts[endpoint_idx]
+        
+        # 从端点指向中心的向量
+        to_center_x = cx - ep[0]
+        to_center_y = cy - ep[1]
+        
+        # 从端点指向标注的向量
+        to_label_x = label_pos[0] - ep[0]
+        to_label_y = label_pos[1] - ep[1]
+        
+        # 点积：正 = 同向（标注在内侧），负 = 反向（标注在外侧）
+        dot = to_center_x * to_label_x + to_center_y * to_label_y
+        
+        # 标注在外侧更好（点积 < 0），但如果距离很近也可以接受
+        return dot < 0
+    
+    elif shape_type == 'circle':
+        center = shape.get('center', (0, 0))
+        radius = shape.get('radius', 0)
+        if not center or radius <= 0:
+            return True
+        
+        # 对于圆心标注，标注应该在圆外
+        dist_to_center = math.hypot(label_pos[0] - center[0], label_pos[1] - center[1])
+        return dist_to_center > radius * 0.5  # 在圆外或边缘
+    
+    # 其他形状默认都可以
+    return True
+
+
+def associate_labels_to_shape_endpoints(label_points, shapes, max_dist_factor=2.5):
+    """将标注点关联到形状的端点（增强版）
 
     计算标注点到各形状端点的距离，距离最近的形状端点与标注点关联。
+    增强：
+    1. 优先选择标注在形状外侧的端点（更符合几何图标注习惯）
+    2. 避免多个标注关联到同一个端点（一对一匹配）
+    3. 对圆的标注特殊处理（圆心标注 vs 圆周标注）
 
     Args:
         label_points: 标注点列表
@@ -820,22 +880,22 @@ def associate_labels_to_shape_endpoints(label_points, shapes, max_dist_factor=2.
     max_dist = avg_size * max_dist_factor
 
     # 收集所有形状的端点
-    shape_endpoints = []  # [(shape_idx, endpoint_idx, (x, y))]
+    shape_endpoints = []  # [(shape_idx, endpoint_idx, (x, y), endpoint_type)]
     for si, shape in enumerate(shapes):
         shape_type = shape.get('type')
         pts = shape.get('points', [])
 
         if shape_type in ('line', 'polyline', 'dashed_line'):
             if pts:
-                shape_endpoints.append((si, 0, pts[0]))
-                shape_endpoints.append((si, len(pts) - 1, pts[-1]))
+                shape_endpoints.append((si, 0, pts[0], 'endpoint'))
+                shape_endpoints.append((si, len(pts) - 1, pts[-1], 'endpoint'))
         elif shape_type in ('rectangle', 'triangle', 'polygon', 'star'):
             for pi, pt in enumerate(pts):
-                shape_endpoints.append((si, pi, pt))
+                shape_endpoints.append((si, pi, pt, 'vertex'))
         elif shape_type in ('circle', 'ellipse'):
             center = shape.get('center')
             if center:
-                shape_endpoints.append((si, -1, center))
+                shape_endpoints.append((si, -1, center, 'center'))
         elif shape_type == 'arc':
             center = shape.get('center')
             radius = shape.get('radius', 0)
@@ -846,30 +906,86 @@ def associate_labels_to_shape_endpoints(label_points, shapes, max_dist_factor=2.
                       center[1] + radius * math.sin(sa))
                 p2 = (center[0] + radius * math.cos(ea),
                       center[1] + radius * math.sin(ea))
-                shape_endpoints.append((si, 0, p1))
-                shape_endpoints.append((si, 1, p2))
+                shape_endpoints.append((si, 0, p1, 'endpoint'))
+                shape_endpoints.append((si, 1, p2, 'endpoint'))
 
-    for lp in label_points:
+    if not shape_endpoints:
+        for lp in label_points:
+            lp['associated_shape_idx'] = -1
+            lp['associated_endpoint'] = -1
+        return label_points
+
+    # 构建所有可能的（标注，端点）对，带评分
+    candidates = []  # [(score, label_idx, endpoint_idx_in_list)]
+    
+    for li, lp in enumerate(label_points):
         lx, ly = lp['pos']
-        min_dist = float('inf')
-        best_shape = -1
-        best_endpoint = -1
-
-        for si, ei, (ex, ey) in shape_endpoints:
+        label_type = lp.get('type', 'vertex')
+        
+        for ei, (si, ep_idx, (ex, ey), ep_type) in enumerate(shape_endpoints):
             dist = math.hypot(lx - ex, ly - ey)
-            if dist < min_dist:
-                min_dist = dist
-                best_shape = si
-                best_endpoint = ei
+            if dist > max_dist * 1.5:  # 扩大搜索范围，后面用评分筛选
+                continue
+            
+            # 基础评分：距离越小越好
+            score = dist
+            
+            # 类型匹配加分（减分 = 更好）
+            # 顶点标注优先匹配顶点
+            if label_type == 'vertex' and ep_type == 'vertex':
+                score *= 0.7  # 类型匹配，评分降低30%
+            # 圆心标注（如O）优先匹配圆心
+            label_text = lp.get('label', '')
+            if label_text.upper() == 'O' and ep_type == 'center':
+                score *= 0.5  # 很可能是圆心标注
+            
+            # 位置合理性：标注应该在形状外侧
+            shape = shapes[si]
+            is_outside = _is_label_outside_shape(lp['pos'], shape, ep_idx)
+            if is_outside:
+                score *= 0.8  # 外侧更合理，评分降低20%
+            else:
+                score *= 1.5  # 内侧不合理，评分升高
+            
+            candidates.append((score, li, ei))
 
-        if min_dist < max_dist:
-            lp['associated_shape_idx'] = best_shape
-            lp['associated_endpoint'] = best_endpoint
-            lp['distance_to_endpoint'] = min_dist
+    # 按评分排序
+    candidates.sort(key=lambda x: x[0])
+
+    # 贪心匹配：每个端点最多一个标注，每个标注最多一个端点
+    used_labels = set()
+    used_endpoints = set()
+    
+    label_assignments = {}  # label_idx -> (shape_idx, endpoint_idx)
+    
+    for score, li, ei in candidates:
+        if li in used_labels:
+            continue
+        if ei in used_endpoints:
+            continue
+        
+        si, ep_idx, ep_pos, ep_type = shape_endpoints[ei]
+        dist = math.hypot(label_points[li]['pos'][0] - ep_pos[0],
+                         label_points[li]['pos'][1] - ep_pos[1])
+        
+        if dist > max_dist:
+            continue
+        
+        used_labels.add(li)
+        used_endpoints.add(ei)
+        label_assignments[li] = (si, ep_idx, dist)
+
+    # 应用关联结果
+    for li, lp in enumerate(label_points):
+        if li in label_assignments:
+            si, ep_idx, dist = label_assignments[li]
+            lp['associated_shape_idx'] = si
+            lp['associated_endpoint'] = ep_idx
+            lp['distance_to_endpoint'] = dist
         else:
             lp['associated_shape_idx'] = -1
             lp['associated_endpoint'] = -1
-            lp['distance_to_endpoint'] = min_dist
+            lp['distance_to_endpoint'] = float('inf')
 
     return label_points
 
@@ -972,9 +1088,15 @@ def _skeletonize_fast(binary):
 
 
 def _refine_endpoints_with_labels(shapes, label_points):
-    """用标注点位置修正形状端点
+    """用标注点位置修正形状端点（增强版）
 
-    对于关联到形状端点的标注点，用标注点的位置微调端点位置。
+    标注点在端点旁边，而不是正好在端点上。
+    增强：
+    1. 不直接用标注点位置替换端点（标注在端点旁边，有偏移）
+    2. 标注点主要用于确认"这个端点存在"并辅助定位
+    3. 对于有多个标注的多边形，验证顶点数量是否匹配
+    4. 微调端点位置（沿标注点到端点的方向，向线条方向微调）
+    
     直接在 shapes 列表上修改。
     """
     # 按形状分组标注点
@@ -993,46 +1115,106 @@ def _refine_endpoints_with_labels(shapes, label_points):
 
         if not pts:
             continue
+        
+        # 标记形状已被标注引导精化
+        shape['_refined_by_label'] = True
 
         if shape_type in ('line', 'polyline', 'dashed_line'):
-            # 修正端点
+            # 对于线段：标注点确认端点存在，但端点位置保持从图像提取的结果
+            # 只做微小调整（如果标注点很近，可能是检测误差）
             new_pts = list(pts)
             for lp in labels:
                 ep = lp.get('associated_endpoint', -1)
-                if ep == 0 and len(new_pts) > 0:
-                    new_pts[0] = lp['pos']
-                elif ep == len(new_pts) - 1 and len(new_pts) > 0:
-                    new_pts[-1] = lp['pos']
-                elif ep >= 0 and ep < len(new_pts):
-                    new_pts[ep] = lp['pos']
+                dist = lp.get('distance_to_endpoint', 999)
+                
+                # 只有当距离很近时才微调（可能是检测误差）
+                if dist < 5:
+                    if ep == 0 and len(new_pts) > 0:
+                        # 微小移动，不直接替换
+                        orig = new_pts[0]
+                        new_pts[0] = (
+                            orig[0] * 0.7 + lp['pos'][0] * 0.3,
+                            orig[1] * 0.7 + lp['pos'][1] * 0.3
+                        )
+                    elif ep == len(new_pts) - 1 and len(new_pts) > 0:
+                        orig = new_pts[-1]
+                        new_pts[-1] = (
+                            orig[0] * 0.7 + lp['pos'][0] * 0.3,
+                            orig[1] * 0.7 + lp['pos'][1] * 0.3
+                        )
+                # 距离较远的标注只是确认端点存在，不修改位置
+            
             shape['points'] = new_pts
 
         elif shape_type in ('rectangle', 'triangle', 'polygon', 'star'):
-            # 修正顶点
+            # 多边形：标注点确认顶点存在
+            # 如果标注数量等于顶点数量，说明这是一个完整标注的多边形
+            n_verts = len(pts)
+            n_labels = len(labels)
+            
             new_pts = list(pts)
             for lp in labels:
                 ep = lp.get('associated_endpoint', -1)
-                if ep >= 0 and ep < len(new_pts):
-                    new_pts[ep] = lp['pos']
+                if ep < 0 or ep >= len(new_pts):
+                    continue
+                
+                dist = lp.get('distance_to_endpoint', 999)
+                
+                # 距离很近时微调（可能是检测误差）
+                if dist < 8:
+                    orig = new_pts[ep]
+                    # 加权平均：原图检测结果权重更高
+                    new_pts[ep] = (
+                        orig[0] * 0.6 + lp['pos'][0] * 0.4,
+                        orig[1] * 0.6 + lp['pos'][1] * 0.4
+                    )
+                # 标注主要起确认作用，位置以图像检测为准
+            
+            # 如果所有顶点都有标注，标记为高置信度多边形
+            if n_labels >= n_verts:
+                shape['_label_confirmed'] = True
+            
             shape['points'] = new_pts
 
         elif shape_type == 'arc':
-            # 修正圆弧端点
+            # 圆弧：标注点确认端点存在
             center = shape.get('center')
             radius = shape.get('radius', 0)
             if not center or radius <= 0:
                 continue
             cx, cy = center
+            
             for lp in labels:
                 ep = lp.get('associated_endpoint', -1)
-                if ep == 0:
-                    # 更新起始角
+                dist = lp.get('distance_to_endpoint', 999)
+                
+                if dist < 10:
+                    # 距离近时微调角度
                     angle = math.atan2(lp['pos'][1] - cy, lp['pos'][0] - cx)
-                    shape['start_angle'] = angle
-                elif ep == 1:
-                    # 更新终止角
-                    angle = math.atan2(lp['pos'][1] - cy, lp['pos'][0] - cx)
-                    shape['end_angle'] = angle
+                    if ep == 0:
+                        shape['start_angle'] = angle
+                    elif ep == 1:
+                        shape['end_angle'] = angle
+        
+        elif shape_type in ('circle', 'ellipse'):
+            # 圆：圆心标注（如O）确认圆心位置
+            center = shape.get('center')
+            if not center:
+                continue
+            
+            # 找圆心标注（O）
+            for lp in labels:
+                label_text = lp.get('label', '').upper()
+                if label_text == 'O' or lp.get('associated_endpoint') == -1:
+                    # 圆心标注：微调圆心位置
+                    dist = lp.get('distance_to_endpoint', 999)
+                    if dist < radius * 0.5:  # 标注在圆心附近
+                        cx, cy = center
+                        shape['center'] = (
+                            cx * 0.5 + lp['pos'][0] * 0.5,
+                            cy * 0.5 + lp['pos'][1] * 0.5
+                        )
+                    break
 
 
 def _refine_line_vs_arc(shapes, label_points, skeleton):
@@ -1325,3 +1507,925 @@ if __name__ == '__main__':
         print("   三点定圆检测失败")
 
     print("\n自测完成")
+
+
+# ============================================================
+# 功能10：标注驱动的几何验证系统
+# ============================================================
+"""
+标注驱动几何验证（Label-Driven Geometry Verification）
+
+核心思想：
+  标注点是"已知正确"的参考点，用这些点来推断和验证几何元素。
+  只保留验证通过的几何形状，大大提高识别准确率。
+
+流程：
+  1. 从标注点生成候选几何元素：
+     - 每对标注点 → 候选直线段
+     - O标注 + 其他点 → 候选圆（O为圆心）
+     - 三个标注点 → 候选圆弧/三角形
+  2. 在图像（骨架/二值图）中验证每个候选元素：
+     - 沿路径采样，检查线条像素覆盖率
+     - 计算直线拟合残差 vs 圆弧拟合残差
+  3. 将验证通过的候选元素与原始检测形状匹配
+  4. 最终只输出验证通过的几何元素
+"""
+
+
+def generate_candidate_lines_from_labels(label_points, max_dist_factor=8.0):
+    """从标注点生成候选直线段
+    
+    每对标注点之间可能有一条直线。
+    过滤掉距离过远的点对（不太可能有连线）。
+    
+    Args:
+        label_points: 标注点列表
+        max_dist_factor: 最大距离因子（乘以平均标注间距）
+    
+    Returns:
+        list: 候选直线列表，每项: {'p1': (x,y), 'p2': (x,y), 
+                                      'label1': str, 'label2': str}
+    """
+    if len(label_points) < 2:
+        return []
+    
+    candidates = []
+    n = len(label_points)
+    
+    # 计算平均标注尺寸和典型间距
+    sizes = [max(lp['bbox'][2], lp['bbox'][3]) for lp in label_points]
+    avg_size = sum(sizes) / len(sizes) if sizes else 20
+    
+    # 计算所有点对的距离，找典型间距
+    all_dists = []
+    for i in range(n):
+        for j in range(i + 1, n):
+            d = math.hypot(label_points[i]['pos'][0] - label_points[j]['pos'][0],
+                          label_points[i]['pos'][1] - label_points[j]['pos'][1])
+            all_dists.append(d)
+    
+    if not all_dists:
+        return []
+    
+    all_dists.sort()
+    # 用中位数作为典型间距
+    median_dist = all_dists[len(all_dists) // 2]
+    max_dist = median_dist * max_dist_factor
+    
+    # 生成候选直线
+    for i in range(n):
+        for j in range(i + 1, n):
+            p1 = label_points[i]['pos']
+            p2 = label_points[j]['pos']
+            d = math.hypot(p1[0] - p2[0], p1[1] - p2[1])
+            
+            if d > max_dist:
+                continue
+            
+            if d < avg_size * 2:  # 太近的跳过（可能是上下标）
+                continue
+            
+            candidates.append({
+                'p1': p1,
+                'p2': p2,
+                'label1': label_points[i].get('label', ''),
+                'label2': label_points[j].get('label', ''),
+                'length': d,
+            })
+    
+    return candidates
+
+
+def verify_line_in_image(skeleton, p1, p2, line_width=5, min_coverage=0.4,
+                          search_normal=4):
+    """验证图像中两点之间是否存在直线
+    
+    沿两点连线方向采样，检查垂直方向附近是否有骨架像素。
+    增强：自动搜索实际直线位置（允许标注点在直线外侧偏移）。
+    
+    Args:
+        skeleton: 二值骨架图像
+        p1, p2: 线段两端点 (x, y)（标注点位置，可能在直线外侧）
+        line_width: 搜索宽度（像素）
+        min_coverage: 最小覆盖率阈值 (0~1)
+        search_normal: 垂直方向搜索范围（像素，向两侧各搜索多少像素）
+    
+    Returns:
+        dict: {
+            'exists': bool,       # 直线是否存在
+            'coverage': float,    # 像素覆盖率
+            'avg_deviation': float, # 平均偏移距离
+            'points_on_line': int,  # 命中的采样点数
+            'total_points': int,    # 总采样点数
+            'best_offset': float,   # 最佳垂直偏移（标注线距离原始连线的偏移量
+        }
+    """
+    if skeleton is None:
+        return {'exists': False, 'coverage': 0, 'avg_deviation': 999,
+                'points_on_line': 0, 'total_points': 0, 'best_offset': 0}
+    
+    h, w = skeleton.shape[:2]
+    x1, y1 = p1
+    x2, y2 = p2
+    
+    length = math.hypot(x2 - x1, y2 - y1)
+    if length < 5:
+        return {'exists': False, 'coverage': 0, 'avg_deviation': 999,
+                'points_on_line': 0, 'total_points': 0, 'best_offset': 0}
+    
+    # 步长：1像素
+    step = 1.0
+    n_steps = max(int(length / step), 2)
+    
+    dx = (x2 - x1) / n_steps
+    dy = (y2 - y1) / n_steps
+    
+    # 法向量
+    len_v = math.sqrt(dx**2 + dy**2)
+    if len_v < 1e-6:
+        return {'exists': False, 'coverage': 0, 'avg_deviation': 999,
+                'points_on_line': 0, 'total_points': 0, 'best_offset': 0}
+    nx = -dy / len_v
+    ny = dx / len_v
+    
+    # 对不同的垂直偏移量计算覆盖率，找最佳匹配
+    best_coverage = 0
+    best_offset = 0
+    best_dev = 999
+    
+    for offset in range(-search_normal, search_normal + 1):
+        hits = 0
+        total = 0
+        deviations = []
+        
+        for i in range(n_steps + 1):
+            # 偏移后的直线上的点
+            cx = x1 + i * dx + nx * offset
+            cy = y1 + i * dy + ny * offset
+            
+            # 在垂直方向搜索最近的骨架像素
+            min_dist = None
+            for s in range(-line_width, line_width + 1):
+                sx = int(cx + nx * s + 0.5)
+                sy = int(cy + ny * s + 0.5)
+                if 0 <= sx < w and 0 <= sy < h:
+                    if skeleton[sy, sx] > 0:
+                        d = abs(s)
+                        if min_dist is None or d < min_dist:
+                            min_dist = d
+            
+            total += 1
+            if min_dist is not None:
+                hits += 1
+                deviations.append(min_dist)
+        
+        coverage = hits / max(1, total)
+        avg_dev = sum(deviations) / max(1, len(deviations)) if deviations else 999
+        
+        if coverage > best_coverage:
+            best_coverage = coverage
+            best_offset = offset
+            best_dev = avg_dev
+    
+    exists = best_coverage >= min_coverage
+    
+    return {
+        'exists': exists,
+        'coverage': best_coverage,
+        'avg_deviation': best_dev,
+        'points_on_line': int(best_coverage * (n_steps + 1)),
+        'total_points': n_steps + 1,
+        'best_offset': best_offset,
+    }
+
+
+def generate_candidate_circles_from_labels(label_points):
+    """从标注点生成候选圆
+    
+    如果有'O'标注（圆心标注），则O+其他每个点构成一个候选圆。
+    如果没有O标注，尝试用三点定圆。
+    
+    Args:
+        label_points: 标注点列表
+    
+    Returns:
+        list: 候选圆列表，每项: {
+            'center': (cx, cy),
+            'radius': r,
+            'center_label': str,
+            'point_labels': [str, ...],
+            'method': 'O_label' | 'three_point'
+        }
+    """
+    candidates = []
+    
+    # 找圆心标注（O）
+    o_labels = [lp for lp in label_points 
+                if lp.get('label', '').upper() == 'O']
+    
+    if o_labels:
+        center_pt = o_labels[0]['pos']
+        center_label = o_labels[0].get('label', 'O')
+        
+        # O + 每个其他点 → 候选圆
+        for lp in label_points:
+            if lp.get('label', '').upper() == 'O':
+                continue
+            r = math.hypot(lp['pos'][0] - center_pt[0], 
+                          lp['pos'][1] - center_pt[1])
+            if r > 10:  # 半径不能太小
+                candidates.append({
+                    'center': center_pt,
+                    'radius': r,
+                    'center_label': center_label,
+                    'point_labels': [lp.get('label', '')],
+                    'method': 'O_label',
+                })
+    
+    # 如果候选太少，尝试三点定圆（从非O标注中选）
+    if len(candidates) < 1:
+        non_o = [lp for lp in label_points 
+                 if lp.get('label', '').upper() != 'O']
+        if len(non_o) >= 3:
+            # 取前三个点尝试定圆
+            p1 = non_o[0]['pos']
+            p2 = non_o[1]['pos']
+            p3 = non_o[2]['pos']
+            
+            circle = _circle_from_three_points(p1, p2, p3)
+            if circle and circle['radius'] > 10:
+                candidates.append({
+                    'center': circle['center'],
+                    'radius': circle['radius'],
+                    'center_label': '',
+                    'point_labels': [non_o[i].get('label', '') for i in range(3)],
+                    'method': 'three_point',
+                })
+    
+    return candidates
+
+
+def _circle_from_three_points(p1, p2, p3):
+    """三点定圆
+    
+    Returns:
+        dict: {'center': (cx, cy), 'radius': r} 或 None
+    """
+    x1, y1 = p1
+    x2, y2 = p2
+    x3, y3 = p3
+    
+    # 计算垂直平分线交点
+    d = 2 * (x1 * (y2 - y3) + x2 * (y3 - y1) + x3 * (y1 - y2))
+    if abs(d) < 1e-6:
+        return None
+    
+    ux = ((x1**2 + y1**2) * (y2 - y3) + 
+          (x2**2 + y2**2) * (y3 - y1) + 
+          (x3**2 + y3**2) * (y1 - y2)) / d
+    uy = ((x1**2 + y1**2) * (x3 - x2) + 
+          (x2**2 + y2**2) * (x1 - x3) + 
+          (x3**2 + y3**2) * (x2 - x1)) / d
+    
+    r = math.sqrt((x1 - ux)**2 + (y1 - uy)**2)
+    
+    return {'center': (ux, uy), 'radius': r}
+
+
+def verify_circle_in_image(skeleton, center, radius, arc_width=5, min_coverage=0.35,
+                           sample_step=2.0, center_search_radius=8):
+    """验证图像中是否存在圆（增强版）
+    
+    沿圆周采样，检查附近是否有骨架像素。
+    增强：自动微调圆心位置（允许标注点在圆心旁边）。
+    
+    Args:
+        skeleton: 二值骨架图像
+        center: 初始圆心 (cx, cy)（来自标注，可能有偏移）
+        radius: 初始半径
+        arc_width: 搜索宽度（像素，径向）
+        min_coverage: 最小覆盖率
+        sample_step: 采样步长（像素，沿圆周）
+        center_search_radius: 圆心搜索范围（像素，向各方向搜索多少）
+    
+    Returns:
+        dict: {
+            'exists': bool,
+            'coverage': float,
+            'avg_deviation': float,
+            'samples': int,
+            'hits': int,
+            'best_center': (cx, cy),  # 最佳圆心位置
+            'best_radius': float,     # 最佳半径
+        }
+    """
+    if skeleton is None or radius <= 0:
+        return {'exists': False, 'coverage': 0, 'avg_deviation': 999,
+                'samples': 0, 'hits': 0, 'best_center': center, 'best_radius': radius}
+    
+    h, w = skeleton.shape[:2]
+    cx0, cy0 = center
+    
+    # 检查初始圆心是否在图像内
+    if cx0 < 0 or cx0 >= w or cy0 < 0 or cy0 >= h:
+        return {'exists': False, 'coverage': 0, 'avg_deviation': 999,
+                'samples': 0, 'hits': 0, 'best_center': center, 'best_radius': radius}
+    
+    best_coverage = 0
+    best_center = center
+    best_radius = radius
+    best_dev = 999
+    
+    # 在初始圆心周围搜索最佳圆心位置
+    search_range = range(-center_search_radius, center_search_radius + 1, 2)
+    
+    for dx in search_range:
+        for dy in search_range:
+            cx = cx0 + dx
+            cy = cy0 + dy
+            
+            # 搜索圆心的同时也搜索一下半径微调
+            for r_adj in (-3, 0, 3):
+                r = radius + r_adj
+                if r < 5:
+                    continue
+                
+                # 计算圆周覆盖率
+                circumference = 2 * math.pi * r
+                n_samples = max(int(circumference / sample_step), 12)
+                
+                hits = 0
+                total = 0
+                deviations = []
+                
+                for i in range(n_samples):
+                    angle = 2 * math.pi * i / n_samples
+                    px = cx + r * math.cos(angle)
+                    py = cy + r * math.sin(angle)
+                    
+                    if px < 0 or px >= w or py < 0 or py >= h:
+                        total += 1
+                        continue
+                    
+                    # 沿径向搜索
+                    min_dist = None
+                    for r_off in range(-arc_width, arc_width + 1):
+                        r_samp = r + r_off
+                        sx = int(cx + r_samp * math.cos(angle) + 0.5)
+                        sy = int(cy + r_samp * math.sin(angle) + 0.5)
+                        if 0 <= sx < w and 0 <= sy < h:
+                            if skeleton[sy, sx] > 0:
+                                d = abs(r_off)
+                                if min_dist is None or d < min_dist:
+                                    min_dist = d
+                    
+                    total += 1
+                    if min_dist is not None:
+                        hits += 1
+                        deviations.append(min_dist)
+                
+                coverage = hits / max(1, total)
+                avg_dev = sum(deviations) / max(1, len(deviations)) if deviations else 999
+                
+                if coverage > best_coverage:
+                    best_coverage = coverage
+                    best_center = (cx, cy)
+                    best_radius = r
+                    best_dev = avg_dev
+    
+    exists = best_coverage >= min_coverage
+    
+    return {
+        'exists': exists,
+        'coverage': best_coverage,
+        'avg_deviation': best_dev,
+        'samples': int(2 * math.pi * best_radius / sample_step),
+        'hits': int(best_coverage * 2 * math.pi * best_radius / sample_step),
+        'best_center': best_center,
+        'best_radius': best_radius,
+    }
+
+
+def verify_and_rebuild_geometry(shapes, label_points, skeleton=None, img_color=None,
+                                min_line_coverage=0.5, min_circle_coverage=0.4):
+    """标注驱动的几何验证与重建
+    
+    核心算法：
+    1. 从标注点生成候选几何元素（直线、圆）
+    2. 在图像中验证每个候选元素
+    3. 将验证通过的候选与原始检测形状匹配
+    4. 返回验证通过的形状列表（只保留正确的）
+    
+    Args:
+        shapes: 原始检测的形状列表
+        label_points: 标注点列表（支持两种格式：
+                      - label_points格式: {'pos':(x,y), 'bbox':..., 'label':...}
+                      - merged_annotations格式: {'cx', 'cy', 'bbox', 'text', ...})
+        skeleton: 骨架图像（可选，没有则从img_color生成）
+        img_color: 彩色图像（可选，用于生成骨架）
+        min_line_coverage: 直线验证最小覆盖率
+        min_circle_coverage: 圆验证最小覆盖率
+    
+    Returns:
+        list: 验证通过的形状列表（只保留正确的）
+        dict: 验证统计信息
+    """
+    stats = {
+        'original_count': len(shapes),
+        'candidate_lines': 0,
+        'verified_lines': 0,
+        'candidate_circles': 0,
+        'verified_circles': 0,
+        'final_count': 0,
+        'method': 'label_verification',
+    }
+    
+    if not label_points:
+        return shapes, stats
+    
+    # 统一标注点格式（转换为 label_points 格式）
+    normalized_labels = []
+    for lp in label_points:
+        if 'pos' in lp:
+            # 已经是 label_points 格式
+            normalized_labels.append(lp)
+        else:
+            # merged_annotations 格式，转换
+            bbox = lp.get('bbox')
+            if not bbox:
+                if all(k in lp for k in ('x', 'y', 'w', 'h')):
+                    bbox = (lp['x'], lp['y'], lp['w'], lp['h'])
+                else:
+                    continue
+            
+            if 'cx' in lp and 'cy' in lp:
+                pos = (lp['cx'], lp['cy'])
+            else:
+                bx, by, bw, bh = bbox
+                pos = (bx + bw / 2, by + bh / 2)
+            
+            label_text = lp.get('text', lp.get('main_char', ''))
+            
+            normalized_labels.append({
+                'pos': pos,
+                'bbox': bbox,
+                'label': label_text,
+                'confidence': lp.get('confidence', 0.5),
+                'type': 'vertex',
+            })
+    
+    if not normalized_labels:
+        return shapes, stats
+    
+    # 生成骨架图（如果没有提供）
+    if skeleton is None and img_color is not None:
+        gray = cv2.cvtColor(img_color, cv2.COLOR_BGR2GRAY)
+        _, binary = cv2.threshold(gray, 0, 255,
+                                   cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+        skeleton = _skeletonize_fast(binary)
+    
+    if skeleton is None:
+        return shapes, stats
+    
+    # ---- 步骤1：生成候选直线并验证 ----
+    candidate_lines = generate_candidate_lines_from_labels(normalized_labels)
+    stats['candidate_lines'] = len(candidate_lines)
+    
+    verified_lines = []
+    for cand in candidate_lines:
+        result = verify_line_in_image(
+            skeleton, cand['p1'], cand['p2'],
+            line_width=4, min_coverage=min_line_coverage
+        )
+        if result['exists']:
+            cand['verification'] = result
+            verified_lines.append(cand)
+    
+    stats['verified_lines'] = len(verified_lines)
+    
+    # ---- 步骤2：生成候选圆并验证 ----
+    candidate_circles = generate_candidate_circles_from_labels(normalized_labels)
+    stats['candidate_circles'] = len(candidate_circles)
+    
+    verified_circles = []
+    for cand in candidate_circles:
+        result = verify_circle_in_image(
+            skeleton, cand['center'], cand['radius'],
+            arc_width=4, min_coverage=min_circle_coverage
+        )
+        if result['exists']:
+            cand['verification'] = result
+            verified_circles.append(cand)
+    
+    stats['verified_circles'] = len(verified_circles)
+    
+    # ---- 步骤2.5：合并验证通过的共线直线 ----
+    # 如果两条验证通过的直线共线，说明它们实际上是同一条直线的不同部分
+    # 合并成一条更长的直线
+    if len(verified_lines) > 1:
+        merged_lines = []
+        used = [False] * len(verified_lines)
+        
+        for i in range(len(verified_lines)):
+            if used[i]:
+                continue
+            
+            current = verified_lines[i]
+            used[i] = True
+            
+            # 找所有与当前直线共线的其他验证直线
+            colinear_indices = [i]
+            for j in range(i + 1, len(verified_lines)):
+                if used[j]:
+                    continue
+                if _is_colinear(current['p1'], current['p2'],
+                               verified_lines[j]['p1'], verified_lines[j]['p2'],
+                               angle_tol=8.0, dist_tol=20.0):
+                    colinear_indices.append(j)
+                    used[j] = True
+            
+            if len(colinear_indices) > 1:
+                # 多条共线，合并它们
+                # 收集所有端点，投影到直线方向上找最大范围
+                all_pts = []
+                for idx in colinear_indices:
+                    all_pts.append(verified_lines[idx]['p1'])
+                    all_pts.append(verified_lines[idx]['p2'])
+                
+                # 以第一条的方向为基准
+                ref_p1 = current['p1']
+                ref_p2 = current['p2']
+                dx = ref_p2[0] - ref_p1[0]
+                dy = ref_p2[1] - ref_p1[1]
+                ref_len = math.hypot(dx, dy)
+                if ref_len > 0:
+                    dx /= ref_len
+                    dy /= ref_len
+                
+                # 计算所有点的投影
+                min_proj = float('inf')
+                max_proj = float('-inf')
+                for pt in all_pts:
+                    proj = (pt[0] - ref_p1[0]) * dx + (pt[1] - ref_p1[1]) * dy
+                    min_proj = min(min_proj, proj)
+                    max_proj = max(max_proj, proj)
+                
+                # 合并后的端点
+                merged_p1 = (
+                    ref_p1[0] + dx * min_proj,
+                    ref_p1[1] + dy * min_proj,
+                )
+                merged_p2 = (
+                    ref_p1[0] + dx * max_proj,
+                    ref_p1[1] + dy * max_proj,
+                )
+                
+                # 合并标签
+                all_labels = []
+                total_coverage = 0
+                for idx in colinear_indices:
+                    l1 = verified_lines[idx]['label1']
+                    l2 = verified_lines[idx]['label2']
+                    if l1 not in all_labels:
+                        all_labels.append(l1)
+                    if l2 not in all_labels:
+                        all_labels.append(l2)
+                    total_coverage += verified_lines[idx]['verification']['coverage']
+                
+                merged_line = {
+                    'p1': merged_p1,
+                    'p2': merged_p2,
+                    'label1': all_labels[0] if all_labels else '',
+                    'label2': all_labels[-1] if len(all_labels) > 1 else '',
+                    'length': math.hypot(merged_p2[0]-merged_p1[0], merged_p2[1]-merged_p1[1]),
+                    'verification': {
+                        'coverage': total_coverage / len(colinear_indices),
+                        'best_offset': 0,
+                    },
+                    '_merged_from': len(colinear_indices),
+                    '_all_labels': all_labels,
+                }
+                merged_lines.append(merged_line)
+            else:
+                # 只有一条，直接保留
+                merged_lines.append(current)
+        
+        verified_lines = merged_lines
+        stats['verified_lines'] = len(verified_lines)
+    
+    # ---- 步骤3：将验证通过的候选与原始形状匹配并重建 ----
+    rebuilt_shapes = []
+    
+    # 收集所有原始线段（用于合并共线碎片）
+    raw_line_segments = []
+    for s in shapes:
+        if s.get('type') in ('line', 'polyline'):
+            pts = s.get('points', [])
+            if len(pts) >= 2:
+                raw_line_segments.append({
+                    'shape': s,
+                    'p1': pts[0],
+                    'p2': pts[-1],
+                })
+    
+    # 3.1 处理直线：验证通过的主直线 + 合并共线原始线段
+    for vl in verified_lines:
+        # 主直线的两个端点（标注点位置）
+        main_p1 = vl['p1']
+        main_p2 = vl['p2']
+        
+        # 找所有与主直线共线的原始线段
+        colinear_segs = []
+        for rls in raw_line_segments:
+            if _is_colinear(main_p1, main_p2, rls['p1'], rls['p2'], 
+                           angle_tol=8.0, dist_tol=15.0):
+                colinear_segs.append(rls)
+        
+        # 如果有共线段，用它们来延长主直线的端点
+        if colinear_segs:
+            # 将所有共线段的端点投影到主直线上，找最大范围
+            main_dir_x = main_p2[0] - main_p1[0]
+            main_dir_y = main_p2[1] - main_p1[1]
+            main_len = math.hypot(main_dir_x, main_dir_y)
+            if main_len > 0:
+                main_dir_x /= main_len
+                main_dir_y /= main_len
+            
+            # 计算主直线上的投影范围
+            min_proj = 0
+            max_proj = main_len
+            
+            # 加上主直线两端标注点的投影
+            # （p1是0，p2是main_len）
+            
+            # 加入所有共线段端点的投影
+            for seg in colinear_segs:
+                for pt in (seg['p1'], seg['p2']):
+                    # 投影到主直线方向上
+                    proj = ((pt[0] - main_p1[0]) * main_dir_x + 
+                            (pt[1] - main_p1[1]) * main_dir_y)
+                    min_proj = min(min_proj, proj)
+                    max_proj = max(max_proj, proj)
+            
+            # 延长后的端点（从主直线p1出发，沿方向偏移）
+            extended_p1 = (
+                main_p1[0] + main_dir_x * min_proj,
+                main_p1[1] + main_dir_y * min_proj,
+            )
+            extended_p2 = (
+                main_p1[0] + main_dir_x * max_proj,
+                main_p1[1] + main_dir_y * max_proj,
+            )
+            
+            final_p1 = extended_p1
+            final_p2 = extended_p2
+            merged_count = len(colinear_segs)
+        else:
+            final_p1 = main_p1
+            final_p2 = main_p2
+            merged_count = 0
+        
+        # 找最匹配的原始形状（继承颜色等属性）
+        best_shape = None
+        best_score = float('inf')
+        for s in shapes:
+            if s.get('type') not in ('line', 'polyline'):
+                continue
+            pts = s.get('points', [])
+            if len(pts) < 2:
+                continue
+            
+            d1 = math.hypot(pts[0][0] - final_p1[0], pts[0][1] - final_p1[1])
+            d2 = math.hypot(pts[-1][0] - final_p2[0], pts[-1][1] - final_p2[1])
+            d3 = math.hypot(pts[0][0] - final_p2[0], pts[0][1] - final_p2[1])
+            d4 = math.hypot(pts[-1][0] - final_p1[0], pts[-1][1] - final_p1[1])
+            score = min(d1 + d2, d3 + d4)
+            
+            if score < best_score:
+                best_score = score
+                best_shape = s
+        
+        # 创建新的线形状
+        new_shape = {
+            'type': 'line',
+            'points': [final_p1, final_p2],
+            'bbox': _calc_bbox([final_p1, final_p2]),
+            'area': best_shape.get('area', math.hypot(final_p2[0]-final_p1[0], final_p2[1]-final_p1[1])) if best_shape 
+                    else math.hypot(final_p2[0]-final_p1[0], final_p2[1]-final_p1[1]),
+            '_verified_by_label': True,
+            '_label_pair': (vl['label1'], vl['label2']),
+            '_verification_score': vl['verification']['coverage'],
+            '_merged_segments': merged_count,
+        }
+        
+        # 继承颜色属性
+        if best_shape:
+            for key in ('color_bgr', 'color', 'thickness'):
+                if key in best_shape:
+                    new_shape[key] = best_shape[key]
+        
+        rebuilt_shapes.append(new_shape)
+    
+    # 3.2 处理圆：从验证通过的候选圆创建新的圆形状
+    for vc in verified_circles:
+        # 使用验证得到的最佳圆心和半径
+        best_center = vc['verification'].get('best_center', vc['center'])
+        best_radius = vc['verification'].get('best_radius', vc['radius'])
+        
+        # 从原始形状中找最匹配的圆
+        best_shape = None
+        best_score = float('inf')
+        
+        for s in shapes:
+            if s.get('type') != 'circle':
+                continue
+            center = s.get('center', (0, 0))
+            radius = s.get('radius', 0)
+            
+            dc = math.hypot(center[0] - best_center[0], 
+                           center[1] - best_center[1])
+            dr = abs(radius - best_radius)
+            score = dc + dr
+            
+            if score < best_score:
+                best_score = score
+                best_shape = s
+        
+        # 创建新的圆形状
+        new_shape = {
+            'type': 'circle',
+            'center': best_center,
+            'radius': best_radius,
+            'points': _circle_to_points(best_center, best_radius),
+            'bbox': (best_center[0] - best_radius, 
+                     best_center[1] - best_radius,
+                     best_radius * 2, best_radius * 2),
+            'area': best_shape.get('area', math.pi * best_radius**2) if best_shape else math.pi * best_radius**2,
+            '_verified_by_label': True,
+            '_circle_method': vc['method'],
+            '_verification_score': vc['verification']['coverage'],
+        }
+        
+        # 继承颜色属性
+        if best_shape:
+            for key in ('color_bgr', 'color', 'thickness'):
+                if key in best_shape:
+                    new_shape[key] = best_shape[key]
+        
+        rebuilt_shapes.append(new_shape)
+    
+    # 3.3 保留原始形状中与验证直线不共线、但可能是辅助线的形状
+    # 注意：只有当没有足够的验证直线时才保留（防止太多杂线）
+    # 策略：如果验证直线 >= 3条，说明标注足够多，严格过滤，只保留验证通过的
+    #      如果验证直线 < 3条，可能有些线没有标注，保留共线度高的
+    if len(verified_lines) < 3:
+        # 标注不足时，保留一些可能是辅助线的原始线段
+        for s in shapes:
+            if s.get('_is_text_candidate', False):
+                continue
+            
+            stype = s.get('type')
+            if stype not in ('line', 'polyline', 'circle', 'arc'):
+                continue
+            
+            # 检查是否与验证通过的形状重复或共线
+            is_duplicate = False
+            is_colinear_with_main = False
+            
+            for rs in rebuilt_shapes:
+                if rs.get('type') in ('line', 'polyline') and stype in ('line', 'polyline'):
+                    rs_pts = rs.get('points', [])
+                    s_pts = s.get('points', [])
+                    if len(rs_pts) >= 2 and len(s_pts) >= 2:
+                        if _is_colinear(rs_pts[0], rs_pts[-1], s_pts[0], s_pts[-1],
+                                       angle_tol=5.0, dist_tol=10.0):
+                            is_colinear_with_main = True
+                            break
+                
+                if _is_duplicate_shape(s, rs):
+                    is_duplicate = True
+                    break
+            
+            if not is_duplicate and not is_colinear_with_main:
+                s_copy = dict(s)
+                s_copy['_auxiliary_shape'] = True
+                rebuilt_shapes.append(s_copy)
+    
+    stats['final_count'] = len(rebuilt_shapes)
+    
+    return rebuilt_shapes, stats
+
+
+def _is_colinear(p1, p2, p3, p4, angle_tol=8.0, dist_tol=15.0):
+    """判断两条线段是否共线（近似平行且距离近）
+    
+    考虑到标注点在直线端点外侧，主直线（标注点连线）与实际线段
+    可能有一定距离，因此距离阈值较宽松。
+    
+    Args:
+        p1, p2: 第一条线段的两个端点（通常是标注点连线）
+        p3, p4: 第二条线段的两个端点（通常是原始检测线段）
+        angle_tol: 角度容差（度）
+        dist_tol: 距离容差（像素）
+    
+    Returns:
+        bool: 是否共线
+    """
+    # 计算方向向量
+    dx1 = p2[0] - p1[0]
+    dy1 = p2[1] - p1[1]
+    dx2 = p4[0] - p3[0]
+    dy2 = p4[1] - p3[1]
+    
+    len1 = math.hypot(dx1, dy1)
+    len2 = math.hypot(dx2, dy2)
+    
+    if len1 < 1 or len2 < 1:
+        return False
+    
+    # 角度差
+    angle1 = math.degrees(math.atan2(dy1, dx1))
+    angle2 = math.degrees(math.atan2(dy2, dx2))
+    angle_diff = abs(angle1 - angle2)
+    # 处理180度翻转的情况
+    angle_diff = min(angle_diff, 180 - angle_diff)
+    
+    if angle_diff > angle_tol:
+        return False
+    
+    # 计算点到直线的距离（p3和p4到直线p1-p2的距离）
+    # 距离 = |(p2-p1) × (p-p1)| / |p2-p1|
+    cross3 = dx1 * (p3[1] - p1[1]) - dy1 * (p3[0] - p1[0])
+    dist_p3 = abs(cross3) / len1
+    
+    cross4 = dx1 * (p4[1] - p1[1]) - dy1 * (p4[0] - p1[0])
+    dist_p4 = abs(cross4) / len1
+    
+    # 两个端点都在容差范围内，或者至少一个很近且另一个不太远
+    if dist_p3 < dist_tol and dist_p4 < dist_tol:
+        return True
+    
+    # 一个端点很近，另一个端点在2倍容差内（可能是斜线末端）
+    if (dist_p3 < dist_tol * 0.5 and dist_p4 < dist_tol * 2):
+        return True
+    if (dist_p4 < dist_tol * 0.5 and dist_p3 < dist_tol * 2):
+        return True
+    
+    return False
+
+
+def _calc_bbox(points):
+    """计算点集的包围盒"""
+    if not points:
+        return (0, 0, 0, 0)
+    xs = [p[0] for p in points]
+    ys = [p[1] for p in points]
+    return (min(xs), min(ys), max(xs) - min(xs), max(ys) - min(ys))
+
+
+def _circle_to_points(center, radius, n=48):
+    """将圆转换为多边形点列表（用于兼容）"""
+    cx, cy = center
+    points = []
+    for i in range(n):
+        angle = 2 * math.pi * i / n
+        points.append((cx + radius * math.cos(angle), 
+                       cy + radius * math.sin(angle)))
+    return points
+
+
+def _is_duplicate_shape(s1, s2, dist_threshold=10.0):
+    """判断两个形状是否重复（近似相同）"""
+    t1 = s1.get('type')
+    t2 = s2.get('type')
+    
+    if t1 != t2:
+        return False
+    
+    if t1 in ('line', 'polyline'):
+        pts1 = s1.get('points', [])
+        pts2 = s2.get('points', [])
+        if len(pts1) < 2 or len(pts2) < 2:
+            return False
+        
+        # 比较两端点
+        d1 = math.hypot(pts1[0][0] - pts2[0][0], pts1[0][1] - pts2[0][1])
+        d2 = math.hypot(pts1[-1][0] - pts2[-1][0], pts1[-1][1] - pts2[-1][1])
+        d3 = math.hypot(pts1[0][0] - pts2[-1][0], pts1[0][1] - pts2[-1][1])
+        d4 = math.hypot(pts1[-1][0] - pts2[0][0], pts1[-1][1] - pts2[0][1])
+        min_dist_sum = min(d1 + d2, d3 + d4)
+        
+        return min_dist_sum < dist_threshold * 2
+    
+    elif t1 == 'circle':
+        c1 = s1.get('center', (0, 0))
+        c2 = s2.get('center', (0, 0))
+        r1 = s1.get('radius', 0)
+        r2 = s2.get('radius', 0)
+        
+        dc = math.hypot(c1[0] - c2[0], c1[1] - c2[1])
+        dr = abs(r1 - r2)
+        
+        return dc < dist_threshold and dr < dist_threshold
+    
+    return False

@@ -135,6 +135,7 @@ class Image2WSDApp:
         self.geo_min_area = tk.IntVar(value=50)
         self.geo_epsilon = tk.DoubleVar(value=0.02)
         self.geo_use_hough = tk.BooleanVar(value=True)
+        self.geo_detect_mode = tk.StringVar(value='standard')  # standard / hough_pipeline
         self.geo_min_line_length = tk.IntVar(value=80)
         self.geo_line_threshold = tk.IntVar(value=30)
         self.geo_circle_sensitivity = tk.IntVar(value=50)
@@ -219,6 +220,21 @@ class Image2WSDApp:
         hough_row.pack(fill='x', padx=8, pady=2)
         ttk.Checkbutton(hough_row, text="启用霍夫变换", variable=self.geo_use_hough,
                         command=self._on_geo_param_change).pack(side='left')
+        
+        # 检测精度模式
+        ttk.Label(hough_row, text="  检测模式:", width=10).pack(side='left')
+        self.geo_detect_mode_combo = ttk.Combobox(
+            hough_row,
+            textvariable=self.geo_detect_mode,
+            values=['标准模式', '高精度管道模式'],
+            state='readonly',
+            width=14
+        )
+        self.geo_detect_mode_combo.pack(side='left')
+        self.geo_detect_mode_combo.bind(
+            '<<ComboboxSelected>>',
+            lambda e: self._on_geo_param_change()
+        )
 
         # 最小直线长度
         self.mll_scale, self.mll_val_label = _make_slider_row(
@@ -2632,6 +2648,7 @@ class Image2WSDApp:
                         min_line_length=self.geo_min_line_length.get(),
                         line_threshold=self.geo_line_threshold.get(),
                         circle_param2=circle_param2,
+                        mode='hough_pipeline' if self.geo_detect_mode.get() == '高精度管道模式' else 'auto',
                         symmetry_correction=self.geo_symmetry_correction.get(),
                         symmetry_type=self.geo_symmetry_type.get(),
                         right_angle_correction=self.geo_right_angle_correction.get(),

@@ -30,6 +30,8 @@ SHAPE_LINE = 'line'
 SHAPE_POLYLINE = 'polyline'
 SHAPE_POLYGON = 'polygon'
 SHAPE_RECTANGLE = 'rectangle'
+SHAPE_PARALLELOGRAM = 'parallelogram'  # 平行四边形
+SHAPE_TRAPEZOID = 'trapezoid'  # 梯形
 SHAPE_TRIANGLE = 'triangle'
 SHAPE_CIRCLE = 'circle'
 SHAPE_ARC = 'arc'
@@ -607,6 +609,106 @@ def _detect_ellipse_arc_from_contour(cnt_pts, area, bbox,
         'bbox': bbox,
         'points': cnt_pts[:],
     }
+
+
+# ============================================================
+# 四边形分类工具（矩形/平行四边形/梯形）
+# ============================================================
+
+def _classify_quadrilateral(points, angle_tolerance_deg=15):
+    """
+    对四边形进行分类：矩形 / 平行四边形 / 梯形 / 普通四边形
+    
+    判断逻辑：
+    1. 先检查4个角是否接近90度 → 矩形
+    2. 再检查两组对边是否分别平行 → 平行四边形
+    3. 再检查是否只有一组对边平行 → 梯形
+    4. 否则 → 普通多边形
+    
+    Args:
+        points: 4个顶点的列表 [(x,y), ...]，按顺序排列
+        angle_tolerance_deg: 角度容差（度）
+    
+    Returns:
+        str: 形状类型 SHAPE_RECTANGLE / SHAPE_PARALLELOGRAM / SHAPE_TRAPEZOID / SHAPE_POLYGON
+    """
+    import math
+    
+    if len(points) != 4:
+        return SHAPE_POLYGON
+    
+    pts = points
+    
+    # 计算4条边的向量
+    edges = []
+    for i in range(4):
+        x1, y1 = pts[i]
+        x2, y2 = pts[(i + 1) % 4]
+        edges.append((x2 - x1, y2 - y1))
+    
+    # 计算边的角度（弧度）
+    edge_angles = []
+    for dx, dy in edges:
+        angle = math.atan2(dy, dx)
+        edge_angles.append(angle)
+    
+    def angle_diff(a1, a2):
+        """计算两个角度的最小差值（弧度，0~pi/2）"""
+        diff = abs(a1 - a2)
+        # 归一化到 [0, pi)
+        while diff > math.pi:
+            diff -= math.pi
+        # 平行的定义：差值接近0或接近pi（反向平行）
+        if diff > math.pi / 2:
+            diff = math.pi - diff
+        return diff
+    
+    tol = math.radians(angle_tolerance_deg)
+    
+    # 检查对边是否平行（边0和边2，边1和边3）
+    parallel_0_2 = angle_diff(edge_angles[0], edge_angles[2]) < tol
+    parallel_1_3 = angle_diff(edge_angles[1], edge_angles[3]) < tol
+    
+    # 计算4个内角
+    def angle_between(v1, v2):
+        """计算两个向量的夹角（弧度，0~pi）"""
+        dot = v1[0] * v2[0] + v1[1] * v2[1]
+        mag1 = math.hypot(v1[0], v1[1])
+        mag2 = math.hypot(v2[0], v2[1])
+        if mag1 == 0 or mag2 == 0:
+            return 0
+        cos_val = max(-1, min(1, dot / (mag1 * mag2)))
+        return math.acos(cos_val)
+    
+    # 每个顶点的内角 = pi - 相邻边的夹角（因为边是连续的，需要反转前一条边）
+    interior_angles = []
+    for i in range(4):
+        # 前一条边（指向当前顶点）
+        prev_edge = (-edges[(i - 1) % 4][0], -edges[(i - 1) % 4][1])
+        # 当前边（离开当前顶点）
+        curr_edge = edges[i]
+        angle = angle_between(prev_edge, curr_edge)
+        interior_angles.append(angle)
+    
+    # 检查是否是矩形（4个角都接近90度）
+    right_angle_count = 0
+    for ang in interior_angles:
+        if abs(ang - math.pi / 2) < tol:
+            right_angle_count += 1
+    
+    if right_angle_count >= 3:  # 至少3个角是直角
+        return SHAPE_RECTANGLE
+    
+    # 检查是否是平行四边形（两组对边都平行）
+    if parallel_0_2 and parallel_1_3:
+        return SHAPE_PARALLELOGRAM
+    
+    # 检查是否是梯形（只有一组对边平行）
+    if parallel_0_2 or parallel_1_3:
+        return SHAPE_TRAPEZOID
+    
+    # 普通四边形
+    return SHAPE_POLYGON
 
 
 # ============================================================
@@ -2384,6 +2486,411 @@ def _build_image_pyramid(gray, num_levels=3, scale=0.5):
     return pyramid
 
 
+def _build_quadrilaterals_from_lines(lines, dist_thresh=15, angle_thresh_deg=15):
+    """
+    从霍夫直线中重建四边形（矩形/平行四边形/梯形）
+    
+    算法（基于平行直线组）：
+    1. 将直线按角度分组（平行线组）
+    2. 对于不同方向的两组平行线，计算它们的交点
+    3. 从交点中筛选出4个构成四边形的顶点
+    4. 验证顶点附近是否有线段端点（确保图形真实存在）
+    5. 分类为矩形/平行四边形/梯形
+    
+    参数:
+        lines: list of ((x1, y1), (x2, y2)) 线段列表
+        dist_thresh: 端点距离阈值（像素）
+        angle_thresh_deg: 平行角度阈值（度）
+    
+    返回:
+        list of dict: 四边形形状列表
+    """
+    import math
+    
+    if len(lines) < 4:
+        return []
+    
+    n = len(lines)
+    angle_thresh = math.radians(angle_thresh_deg)
+    
+    # 计算每条线段的信息
+    line_info = []
+    for idx, ((x1, y1), (x2, y2)) in enumerate(lines):
+        dx = x2 - x1
+        dy = y2 - y1
+        length = math.hypot(dx, dy)
+        if length < 1:
+            continue
+        angle = math.atan2(dy, dx)
+        # 归一化到 [0, pi)
+        norm_angle = angle % math.pi
+        if norm_angle < 0:
+            norm_angle += math.pi
+        line_info.append({
+            'idx': idx,
+            'p1': (float(x1), float(y1)),
+            'p2': (float(x2), float(y2)),
+            'angle': angle,
+            'norm_angle': norm_angle,
+            'length': length,
+        })
+    
+    if len(line_info) < 4:
+        return []
+    
+    def angle_diff(a1, a2):
+        """两个角度的最小差值（用于判断平行）"""
+        diff = abs(a1 - a2)
+        if diff > math.pi / 2:
+            diff = math.pi - diff
+        return diff
+    
+    def point_dist(p1, p2):
+        """两点距离"""
+        return math.hypot(p1[0] - p2[0], p1[1] - p2[1])
+    
+    def line_intersection(l1, l2):
+        """计算两条直线的交点（不是线段，是无限直线）"""
+        x1, y1 = l1['p1']
+        x2, y2 = l1['p2']
+        x3, y3 = l2['p1']
+        x4, y4 = l2['p2']
+        
+        denom = (x1 - x2) * (y3 - y4) - (y1 - y2) * (x3 - x4)
+        if abs(denom) < 1e-10:
+            return None  # 平行或重合
+        
+        t = ((x1 - x3) * (y3 - y4) - (y1 - y3) * (x3 - x4)) / denom
+        # u = -((x1 - x2) * (y1 - y3) - (y1 - y2) * (x1 - x3)) / denom
+        
+        ix = x1 + t * (x2 - x1)
+        iy = y1 + t * (y2 - y1)
+        
+        return (ix, iy)
+    
+    def point_near_line_endpoint(pt, line_info, max_dist):
+        """检查点是否接近某条线段的端点"""
+        d1 = point_dist(pt, line_info['p1'])
+        d2 = point_dist(pt, line_info['p2'])
+        return min(d1, d2) < max_dist
+    
+    # 步骤1：将直线按角度分组（平行线组）
+    groups = []
+    used = [False] * len(line_info)
+    
+    for i in range(len(line_info)):
+        if used[i]:
+            continue
+        group = [i]
+        used[i] = True
+        for j in range(i + 1, len(line_info)):
+            if used[j]:
+                continue
+            if angle_diff(line_info[i]['norm_angle'], line_info[j]['norm_angle']) < angle_thresh:
+                group.append(j)
+                used[j] = True
+        groups.append(group)
+    
+    # 只保留至少有2条线的组
+    groups = [g for g in groups if len(g) >= 2]
+    
+    if len(groups) < 2:
+        # 少于两组平行线，退化为邻边查找法
+        return _build_quads_from_adjacent_edges(line_info, dist_thresh, angle_thresh)
+    
+    # 步骤2：对每两组不同方向的平行线，尝试构建四边形
+    quads = []
+    used_lines_global = set()
+    
+    for gi in range(len(groups)):
+        for gj in range(gi + 1, len(groups)):
+            group_a = groups[gi]  # 第一组平行线（方向A）
+            group_b = groups[gj]  # 第二组平行线（方向B）
+            
+            if len(group_a) < 2 or len(group_b) < 2:
+                continue
+            
+            # 计算两组线之间的所有交点
+            # 每条A组线与每条B组线都有一个交点
+            intersections = []
+            for a_idx in group_a:
+                for b_idx in group_b:
+                    la = line_info[a_idx]
+                    lb = line_info[b_idx]
+                    
+                    if la['idx'] in used_lines_global or lb['idx'] in used_lines_global:
+                        continue
+                    
+                    pt = line_intersection(la, lb)
+                    if pt is None:
+                        continue
+                    
+                    # 检查交点是否接近两条线段的端点
+                    # （四边形的顶点应该是线段的端点附近）
+                    # 注意：有些边可能检测不完整，所以适当放宽阈值
+                    near_a = point_near_line_endpoint(pt, la, dist_thresh * 3)
+                    near_b = point_near_line_endpoint(pt, lb, dist_thresh * 3)
+                    
+                    if near_a and near_b:
+                        intersections.append({
+                            'point': pt,
+                            'a_idx': a_idx,
+                            'b_idx': b_idx,
+                        })
+            
+            if len(intersections) < 4:
+                continue
+            
+            # 从交点中找出4个构成四边形的顶点
+            # 策略：找两个不同的a_idx和两个不同的b_idx，它们组合出4个交点
+            a_indices = list(set(inter['a_idx'] for inter in intersections))
+            b_indices = list(set(inter['b_idx'] for inter in intersections))
+            
+            found_quads = []
+            
+            # 遍历所有两线组合（A组选2条，B组选2条）
+            for ai in range(len(a_indices)):
+                for aj in range(ai + 1, len(a_indices)):
+                    a1 = a_indices[ai]
+                    a2 = a_indices[aj]
+                    
+                    for bi in range(len(b_indices)):
+                        for bj in range(bi + 1, len(b_indices)):
+                            b1 = b_indices[bi]
+                            b2 = b_indices[bj]
+                            
+                            # 找4个交点：a1-b1, a1-b2, a2-b1, a2-b2
+                            pts = {}
+                            keys = [(a1, b1), (a1, b2), (a2, b1), (a2, b2)]
+                            valid = True
+                            
+                            for a_idx, b_idx in keys:
+                                found = None
+                                for inter in intersections:
+                                    if inter['a_idx'] == a_idx and inter['b_idx'] == b_idx:
+                                        found = inter['point']
+                                        break
+                                if found is None:
+                                    valid = False
+                                    break
+                                pts[(a_idx, b_idx)] = found
+                            
+                            if not valid:
+                                continue
+                            
+                            # 4个顶点
+                            p_a1b1 = pts[(a1, b1)]
+                            p_a1b2 = pts[(a1, b2)]
+                            p_a2b1 = pts[(a2, b1)]
+                            p_a2b2 = pts[(a2, b2)]
+                            
+                            # 按顺序排列顶点（凸四边形）
+                            # a1-b1, a2-b1, a2-b2, a1-b2 应该是正确的顺序
+                            quad_pts = [p_a1b1, p_a2b1, p_a2b2, p_a1b2]
+                            
+                            # 计算面积
+                            area = 0
+                            for i in range(4):
+                                x1, y1 = quad_pts[i]
+                                x2, y2 = quad_pts[(i + 1) % 4]
+                                area += x1 * y2 - x2 * y1
+                            area = abs(area) / 2
+                            
+                            if area < 100:
+                                continue
+                            
+                            # 检查边长不能太短
+                            min_side = float('inf')
+                            for i in range(4):
+                                d = point_dist(quad_pts[i], quad_pts[(i + 1) % 4])
+                                min_side = min(min_side, d)
+                            
+                            if min_side < 20:
+                                continue
+                            
+                            # 分类
+                            shape_type = _classify_quadrilateral(quad_pts)
+                            
+                            # bbox
+                            xs = [p[0] for p in quad_pts]
+                            ys = [p[1] for p in quad_pts]
+                            bbox = (int(min(xs)), int(min(ys)), 
+                                    int(max(xs) - min(xs)), int(max(ys) - min(ys)))
+                            
+                            quad_shape = {
+                                'type': shape_type,
+                                'points': [(float(p[0]), float(p[1])) for p in quad_pts],
+                                'area': area,
+                                'bbox': bbox,
+                                'from_lines': True,
+                            }
+                            
+                            found_quads.append((area, a1, a2, b1, b2, quad_shape))
+            
+            # 按面积排序，优先保留大的四边形
+            found_quads.sort(key=lambda x: x[0], reverse=True)
+            
+            for area, a1, a2, b1, b2, quad_shape in found_quads:
+                # 检查这些线是否已被使用
+                line_indices = [line_info[a1]['idx'], line_info[a2]['idx'],
+                               line_info[b1]['idx'], line_info[b2]['idx']]
+                if any(li in used_lines_global for li in line_indices):
+                    continue
+                
+                quads.append(quad_shape)
+                for li in line_indices:
+                    used_lines_global.add(li)
+    
+    return quads
+
+
+def _build_quads_from_adjacent_edges(line_info, dist_thresh, angle_thresh):
+    """
+    退化方案：从邻边对出发构建四边形
+    当平行线组不足两组时使用
+    """
+    import math
+    
+    n = len(line_info)
+    if n < 4:
+        return []
+    
+    def angle_diff(a1, a2):
+        diff = abs(a1 - a2)
+        if diff > math.pi / 2:
+            diff = math.pi - diff
+        return diff
+    
+    def point_dist(p1, p2):
+        return math.hypot(p1[0] - p2[0], p1[1] - p2[1])
+    
+    def find_connected_endpoint(li, lj):
+        """检查两条线段是否端点相连"""
+        pairs = [
+            (li['p1'], lj['p1'], li['p2'], lj['p2']),
+            (li['p1'], lj['p2'], li['p2'], lj['p1']),
+            (li['p2'], lj['p1'], li['p1'], lj['p2']),
+            (li['p2'], lj['p2'], li['p1'], lj['p1']),
+        ]
+        
+        for li_end, lj_end, li_other, lj_other in pairs:
+            d = point_dist(li_end, lj_end)
+            if d < dist_thresh:
+                conn_pt = ((li_end[0] + lj_end[0]) / 2, (li_end[1] + lj_end[1]) / 2)
+                return (conn_pt, li_other, lj_other)
+        
+        return None
+    
+    # 找出所有相连的线段对
+    connected_pairs = []
+    for i in range(n):
+        for j in range(i + 1, n):
+            conn = find_connected_endpoint(line_info[i], line_info[j])
+            if conn is not None:
+                connected_pairs.append((i, j, conn))
+    
+    if len(connected_pairs) < 2:
+        return []
+    
+    connected_pairs.sort(
+        key=lambda x: line_info[x[0]]['length'] + line_info[x[1]]['length'],
+        reverse=True
+    )
+    
+    quads = []
+    used_lines = set()
+    
+    for li_idx, lj_idx, (corner_pt, li_other, lj_other) in connected_pairs:
+        if line_info[li_idx]['idx'] in used_lines or line_info[lj_idx]['idx'] in used_lines:
+            continue
+        
+        # 寻找对边：与li平行，且一个端点接近lj_other
+        best_opposite = None
+        best_score = float('inf')
+        li_end_on_opposite = None
+        
+        for k in range(n):
+            if k == li_idx or k == lj_idx:
+                continue
+            if line_info[k]['idx'] in used_lines:
+                continue
+            
+            lk = line_info[k]
+            
+            # 检查是否与li平行
+            if angle_diff(lk['norm_angle'], line_info[li_idx]['norm_angle']) > angle_thresh * 2:
+                continue
+            
+            # 检查一个端点是否接近lj_other
+            d_p1 = point_dist(lk['p1'], lj_other)
+            d_p2 = point_dist(lk['p2'], lj_other)
+            min_d = min(d_p1, d_p2)
+            
+            if min_d < dist_thresh * 2:
+                if min_d < best_score:
+                    best_score = min_d
+                    best_opposite = k
+                    if d_p1 < d_p2:
+                        li_end_on_opposite = lk['p2']
+                    else:
+                        li_end_on_opposite = lk['p1']
+        
+        if best_opposite is None:
+            continue
+        
+        lk_idx = best_opposite
+        
+        # 四个顶点
+        pts = [
+            corner_pt,
+            (li_other[0], li_other[1]),
+            (li_end_on_opposite[0], li_end_on_opposite[1]),
+            (lj_other[0], lj_other[1]),
+        ]
+        
+        # 验证
+        valid = True
+        for i in range(4):
+            length = point_dist(pts[i], pts[(i + 1) % 4])
+            if length < 20:
+                valid = False
+                break
+        
+        if not valid:
+            continue
+        
+        area = 0
+        for i in range(4):
+            x1, y1 = pts[i]
+            x2, y2 = pts[(i + 1) % 4]
+            area += x1 * y2 - x2 * y1
+        area = abs(area) / 2
+        
+        if area < 100:
+            continue
+        
+        shape_type = _classify_quadrilateral(pts)
+        
+        xs = [p[0] for p in pts]
+        ys = [p[1] for p in pts]
+        bbox = (int(min(xs)), int(min(ys)), int(max(xs) - min(xs)), int(max(ys) - min(ys)))
+        
+        quad_shape = {
+            'type': shape_type,
+            'points': [(float(p[0]), float(p[1])) for p in pts],
+            'area': area,
+            'bbox': bbox,
+            'from_lines': True,
+        }
+        
+        quads.append(quad_shape)
+        used_lines.add(line_info[li_idx]['idx'])
+        used_lines.add(line_info[lj_idx]['idx'])
+        used_lines.add(line_info[lk_idx]['idx'])
+    
+    return quads
+
+
 def _detect_enhanced_shapes(gray, skeleton, binary,
                             min_area=50,
                             min_line_length=50,
@@ -2468,6 +2975,17 @@ def _detect_enhanced_shapes(gray, skeleton, binary,
             lines_hough, dist_thresh=15, angle_thresh=15
         )
         results['line_connections'] = connections
+        
+        # 从霍夫直线重建四边形
+        # 使用较低的min_length以检测到更多边（特别是较短的边）
+        lines_for_quads = _detect_lines_hough(
+            gray, min_length=max(30, min_line_length // 2),
+            skeleton=skeleton, threshold=max(15, line_threshold // 2)
+        )
+        quads_from_lines = _build_quadrilaterals_from_lines(
+            lines_for_quads, dist_thresh=15, angle_thresh_deg=15
+        )
+        results['quadrilaterals'] = quads_from_lines
 
     # 步骤4：从轮廓检测椭圆和椭圆弧
     if binary is not None:
@@ -2599,7 +3117,27 @@ def _merge_enhanced_results(base_shapes, enhanced_results):
     for cc in enhanced_results.get('concentric_circles', []):
         cc['_concentric_group'] = True
         merged.append(cc)
-
+    
+    # 合并从直线重建的四边形
+    # 如果四边形与已有的多边形/四边形高度重叠，保留面积较大的
+    quads_from_lines = enhanced_results.get('quadrilaterals', [])
+    if quads_from_lines:
+        for quad in quads_from_lines:
+            # 检查是否与已有四边形/多边形高度重叠
+            is_dup = False
+            for s in merged:
+                if s.get('type') in (SHAPE_RECTANGLE, SHAPE_PARALLELOGRAM, 
+                                     SHAPE_TRAPEZOID, SHAPE_POLYGON,
+                                     SHAPE_TRIANGLE):
+                    if _shapes_overlap(quad, s) > 0.6:
+                        # 如果新四边形面积更大，替换旧的
+                        if quad.get('area', 0) > s.get('area', 0):
+                            s.update(quad)
+                        is_dup = True
+                        break
+            if not is_dup:
+                merged.append(quad)
+    
     return merged
 
 
@@ -2629,6 +3167,316 @@ def _ellipse_shape_overlap(ellipse1, shape2):
     """
     # 简单用 bbox 重叠判断
     return _shapes_overlap(ellipse1, shape2) > 0.6
+
+
+def smart_adjust_label_positions(shape_points, label_positions, offset=600):
+    """
+    智能调整多边形顶点/边上标注的位置，使其沿图形外侧偏移。
+    
+    算法：
+    1. 对于每个标注点，找到最近的顶点或边
+    2. 计算该位置的"外侧方向"（凸多边形内角平分线向外）
+    3. 沿外侧方向偏移指定距离
+    
+    Args:
+        shape_points: 多边形顶点列表 [(x, y), ...]，顺时针或逆时针排列
+        label_positions: dict {label_name: (x, y)} 当前标注坐标
+        offset: 偏移距离（像素或WSD单位，与输入一致），默认600
+    
+    Returns:
+        dict: {label_name: (new_x, new_y)} 调整后的标注坐标
+    """
+    import math
+    
+    n = len(shape_points)
+    if n < 3:
+        return label_positions
+    
+    def _point_to_seg_dist(pt, p1, p2):
+        """点到线段的距离、投影点、参数t"""
+        seg_dx = p2[0] - p1[0]
+        seg_dy = p2[1] - p1[1]
+        seg_len2 = seg_dx * seg_dx + seg_dy * seg_dy
+        if seg_len2 < 1e-10:
+            return math.hypot(pt[0] - p1[0], pt[1] - p1[1]), p1, 0.0
+        t = ((pt[0] - p1[0]) * seg_dx + (pt[1] - p1[1]) * seg_dy) / seg_len2
+        t = max(0.0, min(1.0, t))
+        proj = (p1[0] + t * seg_dx, p1[1] + t * seg_dy)
+        dist = math.hypot(pt[0] - proj[0], pt[1] - proj[1])
+        return dist, proj, t
+    
+    def _vertex_outward(prev_pt, vertex_pt, next_pt):
+        """计算顶点的外侧单位向量"""
+        v_prev = (prev_pt[0] - vertex_pt[0], prev_pt[1] - vertex_pt[1])
+        v_next = (next_pt[0] - vertex_pt[0], next_pt[1] - vertex_pt[1])
+        len_prev = math.hypot(v_prev[0], v_prev[1])
+        len_next = math.hypot(v_next[0], v_next[1])
+        if len_prev < 1e-10 or len_next < 1e-10:
+            return (0.0, -1.0)
+        n_prev = (v_prev[0] / len_prev, v_prev[1] / len_prev)
+        n_next = (v_next[0] / len_next, v_next[1] / len_next)
+        bisector = (n_prev[0] + n_next[0], n_prev[1] + n_next[1])
+        bis_len = math.hypot(bisector[0], bisector[1])
+        if bis_len < 1e-3:
+            # 接近平角，取边的左垂直方向
+            return (-n_prev[1], n_prev[0])
+        bis_norm = (bisector[0] / bis_len, bisector[1] / bis_len)
+        cross = v_prev[0] * v_next[1] - v_prev[1] * v_next[0]
+        if cross > 0:
+            # 逆时针缠绕，角平分线指向内部，取反
+            return (-bis_norm[0], -bis_norm[1])
+        else:
+            return bis_norm
+    
+    def _edge_outward(shape_pts, edge_idx):
+        """计算边中点的外侧单位向量"""
+        m = len(shape_pts)
+        p1 = shape_pts[edge_idx]
+        p2 = shape_pts[(edge_idx + 1) % m]
+        prev_pt = shape_pts[(edge_idx - 1) % m]
+        edge_vec = (p2[0] - p1[0], p2[1] - p1[1])
+        prev_vec = (prev_pt[0] - p1[0], prev_pt[1] - p1[1])
+        cross = edge_vec[0] * prev_vec[1] - edge_vec[1] * prev_vec[0]
+        e_len = math.hypot(edge_vec[0], edge_vec[1])
+        if e_len < 1e-10:
+            return (0.0, -1.0)
+        e_norm = (edge_vec[0] / e_len, edge_vec[1] / e_len)
+        perp_left = (-e_norm[1], e_norm[0])
+        perp_right = (e_norm[1], -e_norm[0])
+        return perp_right if cross > 0 else perp_left
+    
+    result = {}
+    for label, pos in label_positions.items():
+        # 找最近的顶点
+        best_vertex_dist = float('inf')
+        best_vertex_idx = 0
+        for i in range(n):
+            d = math.hypot(pos[0] - shape_points[i][0],
+                          pos[1] - shape_points[i][1])
+            if d < best_vertex_dist:
+                best_vertex_dist = d
+                best_vertex_idx = i
+        
+        # 找最近的边
+        best_edge_dist = float('inf')
+        best_edge_idx = 0
+        for i in range(n):
+            d, _, _ = _point_to_seg_dist(
+                pos, shape_points[i], shape_points[(i + 1) % n]
+            )
+            if d < best_edge_dist:
+                best_edge_dist = d
+                best_edge_idx = i
+        
+        # 决定按顶点还是按边偏移
+        if best_vertex_dist <= best_edge_dist * 1.2:
+            # 更接近顶点，按顶点外侧偏移
+            prev_idx = (best_vertex_idx - 1) % n
+            next_idx = (best_vertex_idx + 1) % n
+            dx, dy = _vertex_outward(
+                shape_points[prev_idx],
+                shape_points[best_vertex_idx],
+                shape_points[next_idx],
+            )
+            base_pt = shape_points[best_vertex_idx]
+        else:
+            # 更接近边，按边外侧偏移
+            dx, dy = _edge_outward(shape_points, best_edge_idx)
+            base_pt = pos
+        
+        new_x = base_pt[0] + dx * offset
+        new_y = base_pt[1] + dy * offset
+        result[label] = (new_x, new_y)
+    
+    return result
+
+
+def assign_labels_to_shape_anchors(shape_points, label_positions):
+    """
+    智能标注第一步：将字母标注分配到最近的顶点/边上，确定标注锚点坐标。
+    
+    锚点精确落在顶点或边上，是标注的"基准点"。
+    
+    Args:
+        shape_points: 多边形顶点列表 [(x, y), ...]
+        label_positions: dict {label: (x, y)} 字母的初始位置（用于匹配）
+    
+    Returns:
+        dict: {label: {'type': 'vertex'|'edge', 'point': (x, y), 'index': int}}
+    """
+    import math
+    
+    n = len(shape_points)
+    if n < 3:
+        return {}
+    
+    result = {}
+    
+    for label, pos in label_positions.items():
+        # 找最近的顶点
+        best_v_dist = float('inf')
+        best_v_idx = 0
+        for i in range(n):
+            d = math.hypot(pos[0] - shape_points[i][0],
+                          pos[1] - shape_points[i][1])
+            if d < best_v_dist:
+                best_v_dist = d
+                best_v_idx = i
+        
+        # 找最近的边（以及边上的投影点）
+        best_e_dist = float('inf')
+        best_e_idx = 0
+        best_e_proj = None
+        
+        for i in range(n):
+            p1 = shape_points[i]
+            p2 = shape_points[(i + 1) % n]
+            
+            edge_dx = p2[0] - p1[0]
+            edge_dy = p2[1] - p1[1]
+            edge_len2 = edge_dx * edge_dx + edge_dy * edge_dy
+            
+            if edge_len2 < 1e-10:
+                continue
+            
+            t = ((pos[0] - p1[0]) * edge_dx + (pos[1] - p1[1]) * edge_dy) / edge_len2
+            t = max(0.0, min(1.0, t))
+            
+            proj_x = p1[0] + t * edge_dx
+            proj_y = p1[1] + t * edge_dy
+            d = math.hypot(pos[0] - proj_x, pos[1] - proj_y)
+            
+            if d < best_e_dist:
+                best_e_dist = d
+                best_e_idx = i
+                best_e_proj = (proj_x, proj_y)
+        
+        # 判断是顶点标注还是边标注
+        if best_v_dist <= best_e_dist * 1.5 or best_v_dist < 300:
+            result[label] = {
+                'type': 'vertex',
+                'point': shape_points[best_v_idx],
+                'index': best_v_idx,
+            }
+        else:
+            result[label] = {
+                'type': 'edge',
+                'point': best_e_proj,
+                'index': best_e_idx,
+            }
+    
+    return result
+
+
+def compute_label_offset_direction(shape_points, anchor_info):
+    """
+    智能标注第二步：计算标注字母相对于锚点的偏移方向（指向图形外侧）。
+    
+    Args:
+        shape_points: 多边形顶点列表
+        anchor_info: dict 锚点信息（type, point, index）
+    
+    Returns:
+        (dx, dy): 单位方向向量
+    """
+    import math
+    
+    n = len(shape_points)
+    if n < 3:
+        return (0.0, -1.0)
+    
+    if anchor_info['type'] == 'vertex':
+        idx = anchor_info['index']
+        prev_idx = (idx - 1) % n
+        next_idx = (idx + 1) % n
+        
+        prev_pt = shape_points[prev_idx]
+        vertex_pt = shape_points[idx]
+        next_pt = shape_points[next_idx]
+        
+        v_prev = (prev_pt[0] - vertex_pt[0], prev_pt[1] - vertex_pt[1])
+        v_next = (next_pt[0] - vertex_pt[0], next_pt[1] - vertex_pt[1])
+        
+        len_prev = math.hypot(v_prev[0], v_prev[1])
+        len_next = math.hypot(v_next[0], v_next[1])
+        
+        if len_prev < 1e-10 or len_next < 1e-10:
+            return (0.0, -1.0)
+        
+        n_prev = (v_prev[0] / len_prev, v_prev[1] / len_prev)
+        n_next = (v_next[0] / len_next, v_next[1] / len_next)
+        
+        bisector = (n_prev[0] + n_next[0], n_prev[1] + n_next[1])
+        bis_len = math.hypot(bisector[0], bisector[1])
+        
+        if bis_len < 1e-3:
+            return (-n_prev[1], n_prev[0])
+        
+        bis_norm = (bisector[0] / bis_len, bisector[1] / bis_len)
+        cross = v_prev[0] * v_next[1] - v_prev[1] * v_next[0]
+        
+        if cross > 0:
+            return (-bis_norm[0], -bis_norm[1])
+        else:
+            return bis_norm
+    
+    else:  # edge
+        edge_idx = anchor_info['index']
+        p1 = shape_points[edge_idx]
+        p2 = shape_points[(edge_idx + 1) % n]
+        prev_pt = shape_points[(edge_idx - 1) % n]
+        
+        edge_vec = (p2[0] - p1[0], p2[1] - p1[1])
+        prev_vec = (prev_pt[0] - p1[0], prev_pt[1] - p1[1])
+        cross = edge_vec[0] * prev_vec[1] - edge_vec[1] * prev_vec[0]
+        
+        e_len = math.hypot(edge_vec[0], edge_vec[1])
+        if e_len < 1e-10:
+            return (0.0, -1.0)
+        
+        e_norm = (edge_vec[0] / e_len, edge_vec[1] / e_len)
+        perp_left = (-e_norm[1], e_norm[0])
+        perp_right = (e_norm[1], -e_norm[0])
+        
+        return perp_right if cross > 0 else perp_left
+
+
+def smart_label_placement(shape_points, label_positions, offset=600):
+    """
+    两步法智能标注布局（推荐使用）：
+    1. 确定标注锚点（精确在顶点/边上）
+    2. 计算字母相对于锚点的外侧偏移位置
+    
+    Args:
+        shape_points: 多边形顶点列表 [(x, y), ...]
+        label_positions: dict {label: (x, y)} 字母初始位置（用于匹配锚点）
+        offset: 偏移距离，默认600
+    
+    Returns:
+        dict: {label: {'anchor': (x, y), 'text': (x, y), 'direction': (dx, dy),
+                        'type': 'vertex'|'edge', 'index': int}}
+            - anchor: 标注锚点（在端点/边上）
+            - text: 文字显示位置（锚点 + 方向 * 偏移）
+            - direction: 偏移方向单位向量
+            - type/index: 锚点类型及索引
+    """
+    anchors = assign_labels_to_shape_anchors(shape_points, label_positions)
+    
+    result = {}
+    for label, info in anchors.items():
+        dx, dy = compute_label_offset_direction(shape_points, info)
+        anchor_pt = info['point']
+        text_pt = (anchor_pt[0] + dx * offset, anchor_pt[1] + dy * offset)
+        
+        result[label] = {
+            'anchor': anchor_pt,
+            'text': text_pt,
+            'direction': (dx, dy),
+            'type': info['type'],
+            'index': info['index'],
+        }
+    
+    return result
 
 
 def detect_geometric_shapes(image_path, min_area=50, epsilon_ratio=0.01,
@@ -2911,8 +3759,9 @@ def detect_geometric_shapes(image_path, min_area=50, epsilon_ratio=0.01,
                 shape_type = SHAPE_TRIANGLE
                 extra['points'] = mid_pts if mid_pts else outer_pts
             elif n_outer == 4 and n_inner == 4:
-                shape_type = SHAPE_RECTANGLE
-                extra['points'] = mid_pts if mid_pts else outer_pts
+                quad_pts = mid_pts if mid_pts else outer_pts
+                shape_type = _classify_quadrilateral(quad_pts)
+                extra['points'] = quad_pts
             elif n_outer > 6 and n_inner > 6:
                 # 可能是圆或圆弧 —— 如果霍夫已检测到圆则跳过
                 if use_hough and _contour_overlaps_hough_circle(bbox, hough_circles, 0.5):
@@ -3088,7 +3937,7 @@ def detect_geometric_shapes(image_path, min_area=50, epsilon_ratio=0.01,
                 if n == 3:
                     shape_type = SHAPE_TRIANGLE
                 elif n == 4:
-                    shape_type = SHAPE_RECTANGLE
+                    shape_type = _classify_quadrilateral(pts)
                 else:
                     shape_type = SHAPE_POLYGON
 
@@ -3386,30 +4235,9 @@ def detect_filled_colored_shapes(img_color, min_area=50, epsilon_ratio=0.01,
             # ========== 三角形检测 ==========
             elif n == 3:
                 shape_type = SHAPE_TRIANGLE
-            # ========== 矩形检测 ==========
+            # ========== 四边形检测（矩形/平行四边形/梯形）==========
             elif n == 4:
-                # 验证是否为矩形：检查四个角是否接近90度
-                is_rect = True
-                for j in range(4):
-                    p1 = pts[j]
-                    p2 = pts[(j + 1) % 4]
-                    p3 = pts[(j + 2) % 4]
-                    # 向量
-                    v1 = (p1[0] - p2[0], p1[1] - p2[1])
-                    v2 = (p3[0] - p2[0], p3[1] - p2[1])
-                    # 夹角
-                    dot = v1[0] * v2[0] + v1[1] * v2[1]
-                    mag1 = math.hypot(v1[0], v1[1])
-                    mag2 = math.hypot(v2[0], v2[1])
-                    if mag1 > 0 and mag2 > 0:
-                        cos_angle = dot / (mag1 * mag2)
-                        cos_angle = max(-1, min(1, cos_angle))
-                        angle = math.degrees(math.acos(cos_angle))
-                        # 角度应接近90度（矩形）或接近对角
-                        if abs(angle - 90) > 20 and abs(angle - 270) > 20:
-                            # 检查是否接近矩形角（考虑顺序可能是对角）
-                            pass
-                shape_type = SHAPE_RECTANGLE
+                shape_type = _classify_quadrilateral(pts, angle_tolerance_deg=20)
             # ========== 五角星/星形检测 ==========
             elif 8 <= n <= 14:  # 放宽顶点数范围（8-14）
                 # 星形检测算法：
@@ -3750,7 +4578,7 @@ def _merge_two_shapes(target_shape, source_shape):
     if n == 3:
         target_shape['type'] = SHAPE_TRIANGLE
     elif n == 4:
-        target_shape['type'] = SHAPE_RECTANGLE
+        target_shape['type'] = _classify_quadrilateral(hull_pts)
     else:
         target_shape['type'] = SHAPE_POLYGON
 
@@ -4453,6 +5281,123 @@ def _filter_text_shapes(shapes, img_size=None):
             continue
 
         filtered.append(s)
+
+    return filtered
+
+
+def _filter_shapes_by_ocr_letters(shapes, letter_annotations, img_size=None):
+    """
+    基于OCR识别到的字母位置，过滤掉明显是字母拟合成的几何形状
+
+    原理：字母在图像中会被边缘检测算法检测成小的多边形/闭合曲线，
+    这些形状不应该作为几何图形绘制出来。
+    
+    判定条件（满足以下任一条件即认为是字母形状）：
+      1. 形状的中心落在字母bbox内，且面积与字母面积相近
+      2. 形状与字母bbox的重叠度 > 60%
+      3. 形状很小且完全在字母bbox的扩展范围内
+
+    参数:
+        shapes: 形状列表
+        letter_annotations: 字母标注列表（来自OCR识别）
+        img_size: (w, h) 图像尺寸
+
+    返回:
+        过滤后的形状列表
+    """
+    import math
+
+    if not shapes or not letter_annotations:
+        return shapes
+
+    # 收集所有字母的bbox（含扩展边界）
+    letter_bboxes = []
+    for ann in letter_annotations:
+        bbox = ann.get('bbox')
+        if not bbox:
+            # 尝试从x,y,w,h构建
+            if all(k in ann for k in ('x', 'y', 'w', 'h')):
+                bbox = (ann['x'], ann['y'], ann['w'], ann['h'])
+            else:
+                continue
+        x, y, w, h = bbox
+        # 扩展边界（字母笔画可能超出bbox一点）
+        pad = max(w, h) * 0.3
+        letter_bboxes.append({
+            'x': x - pad,
+            'y': y - pad,
+            'w': w + 2 * pad,
+            'h': h + 2 * pad,
+            'cx': x + w / 2,
+            'cy': y + h / 2,
+            'area': w * h,
+            'char': ann.get('text', ann.get('main_char', '?')),
+        })
+
+    if not letter_bboxes:
+        return shapes
+
+    # 计算字母的平均面积，用于判断
+    avg_letter_area = sum(lb['area'] for lb in letter_bboxes) / len(letter_bboxes)
+
+    filtered = []
+    removed_count = 0
+
+    for s in shapes:
+        s_bbox = s.get('bbox', (0, 0, 0, 0))
+        sx, sy, sw, sh = s_bbox
+        s_area = s.get('area', sw * sh)
+        s_cx = sx + sw / 2
+        s_cy = sy + sh / 2
+
+        is_letter_shape = False
+
+        for lb in letter_bboxes:
+            # 条件1：形状中心在字母bbox（扩展）内
+            center_inside = (lb['x'] <= s_cx <= lb['x'] + lb['w'] and
+                           lb['y'] <= s_cy <= lb['y'] + lb['h'])
+
+            if not center_inside:
+                continue
+
+            # 条件2：形状面积与字母面积在同一数量级（0.1x ~ 3x）
+            area_ratio = s_area / max(1, lb['area'])
+            area_similar = 0.05 < area_ratio < 5.0
+
+            if not area_similar:
+                continue
+
+            # 条件3：计算重叠度（IoU）
+            # 交集区域
+            ix1 = max(sx, lb['x'])
+            iy1 = max(sy, lb['y'])
+            ix2 = min(sx + sw, lb['x'] + lb['w'])
+            iy2 = min(sy + sh, lb['y'] + lb['h'])
+            iw = max(0, ix2 - ix1)
+            ih = max(0, iy2 - iy1)
+            intersection = iw * ih
+            union = s_area + lb['area'] - intersection
+            iou = intersection / max(1, union)
+
+            # 重叠度高 或 形状完全在字母区域内且面积小
+            if iou > 0.3 or (intersection / max(1, s_area) > 0.7):
+                is_letter_shape = True
+                break
+
+            # 额外条件：小的多边形（点数多）且在字母区域附近，很可能是字母的笔画
+            pts = s.get('points', [])
+            if len(pts) >= 6 and s_area < avg_letter_area * 0.5 and center_inside:
+                is_letter_shape = True
+                break
+
+        if is_letter_shape:
+            removed_count += 1
+            continue
+
+        filtered.append(s)
+
+    if removed_count > 0:
+        print(f"[字母过滤] 移除了 {removed_count} 个字母形状的几何图形")
 
     return filtered
 
@@ -6005,31 +6950,9 @@ def fit_geometric_shapes_from_paths(subpaths, colors=None, epsilon_ratio=0.02):
         # ========== 三角形检测 ==========
         elif n == 3:
             shape_type = SHAPE_TRIANGLE
-        # ========== 矩形检测 ==========
+        # ========== 四边形检测（矩形/平行四边形/梯形）==========
         elif n == 4:
-            # 验证是否为矩形：检查4个角是否接近90度，且对边长度接近
-            is_rect = True
-            angles = []
-            for j in range(4):
-                p1 = pts[j]
-                p2 = pts[(j + 1) % 4]
-                p3 = pts[(j + 2) % 4]
-                v1 = (p1[0] - p2[0], p1[1] - p2[1])
-                v2 = (p3[0] - p2[0], p3[1] - p2[1])
-                dot = v1[0] * v2[0] + v1[1] * v2[1]
-                mag1 = math.hypot(v1[0], v1[1])
-                mag2 = math.hypot(v2[0], v2[1])
-                if mag1 > 0 and mag2 > 0:
-                    cos_angle = dot / (mag1 * mag2)
-                    cos_angle = max(-1, min(1, cos_angle))
-                    angle = math.degrees(math.acos(cos_angle))
-                    angles.append(angle)
-            if angles:
-                # 矩形的4个角应该接近90度（或者对角色接近90/270）
-                # 检查最小角和最大角与90度的偏差
-                angle_diffs = [min(abs(a - 90), abs(a - 270)) for a in angles]
-                if max(angle_diffs) < 20:
-                    shape_type = SHAPE_RECTANGLE
+            shape_type = _classify_quadrilateral(pts, angle_tolerance_deg=20)
         # ========== 星形检测 ==========
         elif 8 <= n <= 16:  # 放宽范围，适应变形
             # 星形特征：顶点到中心的距离交替变化（远-近-远-近）
@@ -6205,7 +7128,7 @@ def shape_to_polyline_points(shape):
         except (TypeError, ValueError, IndexError):
             return []
         return circle_to_polyline(cx, cy, r)
-    elif shape['type'] in (SHAPE_RECTANGLE, SHAPE_TRIANGLE, SHAPE_POLYGON, SHAPE_STAR):
+    elif shape['type'] in (SHAPE_RECTANGLE, SHAPE_PARALLELOGRAM, SHAPE_TRAPEZOID, SHAPE_TRIANGLE, SHAPE_POLYGON, SHAPE_STAR):
         # 闭合多边形/五角星：首尾相连
         pts = shape['points']
         if pts and pts[0] != pts[-1]:
@@ -6278,7 +7201,7 @@ def _validate_shape(shape):
         return False, "缺少type字段"
 
     # 需要 points 字段的形状
-    if shape_type in (SHAPE_LINE, SHAPE_POLYLINE, SHAPE_RECTANGLE,
+    if shape_type in (SHAPE_LINE, SHAPE_POLYLINE, SHAPE_RECTANGLE, SHAPE_PARALLELOGRAM, SHAPE_TRAPEZOID,
                       SHAPE_TRIANGLE, SHAPE_POLYGON, SHAPE_STAR):
         pts = shape.get('points')
         if pts is None:
@@ -6322,12 +7245,14 @@ def _shape_to_gt_segs(shape, sx, sy, ox, oy, flip_v=False):
         ty = y * sy + oy
         return (int(round(tx)), int(round(ty)))
 
-    # 直线
+    # 直线：使用EE原生直线格式（支持裁剪）
     if shape_type == SHAPE_LINE:
         pts = _validate_points(shape.get('points', []))
         if len(pts) >= 2:
             wsd_pts = [_transform(p[0], p[1]) for p in pts]
-            return [make_line_seg(wsd_pts)], False
+            # 使用EE原生直线格式（开放路径类 sub_type=0x01），支持在EE中裁剪
+            # 返回特殊标记 __native_line__，让上层用 make_native_line_path 构建
+            return [('__native_line__', wsd_pts[0], wsd_pts[-1])], False
         return [], False
 
     # 圆：使用原生圆格式 (0x4284)
@@ -6374,16 +7299,23 @@ def _shape_to_gt_segs(shape, sx, sy, ox, oy, flip_v=False):
         # 返回格式: (['__arc_path__', cx, cy, r, start_angle, end_angle], False)
         return [('__arc_path__', cx, cy, r, start_angle, end_angle)], False
 
-    # 闭合多边形类：矩形、三角形、多边形、五角星
-    elif shape_type in (SHAPE_RECTANGLE, SHAPE_TRIANGLE, SHAPE_POLYGON, SHAPE_STAR):
+    # 闭合多边形类：矩形、平行四边形、梯形、三角形、多边形、五角星
+    elif shape_type in (SHAPE_RECTANGLE, SHAPE_PARALLELOGRAM, SHAPE_TRAPEZOID, SHAPE_TRIANGLE, SHAPE_POLYGON, SHAPE_STAR):
         pts = _validate_points(shape.get('points', []))
         if not pts:
             return [], False
         wsd_pts = [_transform(p[0], p[1]) for p in pts]
-        # 如果是边框形状（空心的），用线条段而不是填充多边形
+        # 如果是边框形状（空心的），拆分成多条原生直线（支持裁剪）
         is_border = shape.get('is_border', False)
         if is_border:
-            return [make_line_seg(wsd_pts)], False
+            # 边框形状（空心）：拆分为多条EE原生直线，每条都可以独立裁剪
+            native_lines = []
+            n = len(wsd_pts)
+            for i in range(n):
+                p1 = wsd_pts[i]
+                p2 = wsd_pts[(i + 1) % n]
+                native_lines.append(('__native_line__', p1, p2))
+            return native_lines, False
         return [make_gon_seg(wsd_pts)], True
 
     # 折线（开放）
@@ -6392,7 +7324,11 @@ def _shape_to_gt_segs(shape, sx, sy, ox, oy, flip_v=False):
         if not pts:
             return [], False
         wsd_pts = [_transform(p[0], p[1]) for p in pts]
-        return [make_line_seg(wsd_pts)], False
+        # 拆分为多条EE原生直线，每条都可以独立裁剪
+        native_lines = []
+        for i in range(len(wsd_pts) - 1):
+            native_lines.append(('__native_line__', wsd_pts[i], wsd_pts[i + 1]))
+        return native_lines, False
 
     # 椭圆：用贝塞尔曲线近似（WSD无原生椭圆段）
     elif shape_type == SHAPE_ELLIPSE:
@@ -6413,7 +7349,7 @@ def _shape_to_gt_segs(shape, sx, sy, ox, oy, flip_v=False):
         wsd_pts = [_transform(p[0], p[1]) for p in pts]
         return [make_gon_seg(wsd_pts)], True
 
-    # 椭圆弧：用贝塞尔曲线近似
+    # 椭圆弧：用多段原生直线近似（支持裁剪）
     elif shape_type == SHAPE_ELLIPSE_ARC:
         center = _validate_point(shape.get('center'))
         if center is None:
@@ -6436,16 +7372,23 @@ def _shape_to_gt_segs(shape, sx, sy, ox, oy, flip_v=False):
             start_angle, end_angle, segments=36
         )
         wsd_pts = [_transform(p[0], p[1]) for p in pts]
-        return [make_line_seg(wsd_pts)], False
+        # 拆分为多条EE原生直线，每条都可以独立裁剪
+        native_lines = []
+        for i in range(len(wsd_pts) - 1):
+            native_lines.append(('__native_line__', wsd_pts[i], wsd_pts[i + 1]))
+        return native_lines, False
 
-    # 虚线：用折线表示（首尾点），保留虚线信息
+    # 虚线：拆分为多条原生直线段，保留虚线信息
     elif shape_type == SHAPE_DASHED_LINE:
         pts = _validate_points(shape.get('points', []))
         if not pts:
             return [], False
         wsd_pts = [_transform(p[0], p[1]) for p in pts]
-        # 先用普通直线段表示，虚线信息保存在 shape 属性中
-        return [make_line_seg(wsd_pts)], False
+        # 拆分为多条EE原生直线，每条都可以独立裁剪
+        native_lines = []
+        for i in range(len(wsd_pts) - 1):
+            native_lines.append(('__native_line__', wsd_pts[i], wsd_pts[i + 1]))
+        return native_lines, False
 
     # 同心圆组：展开为多个圆
     elif shape_type == SHAPE_CONCENTRIC_CIRCLES:
@@ -6564,17 +7507,73 @@ def convert_geo_to_wsd(input_path, wsd_path,
     # 步骤1：检测几何形状
     if progress_cb:
         progress_cb("检测几何形状...", 0)
-
-    shapes = _step("形状检测", lambda: detect_geometric_shapes(
-        input_path, min_area=min_area, epsilon_ratio=epsilon_ratio,
-        use_hough=use_hough, min_line_length=min_line_length,
-        line_threshold=line_threshold, circle_param2=circle_param2,
-        mode=mode, max_colors=max_colors,
-        detect_symmetry=detect_symmetry,
-        symmetry_threshold=symmetry_threshold,
-        enhanced_detection=enhanced_detection,
-        num_circles=num_circles,
-    ))
+    
+    # 判断是否使用高精度霍夫管道模式
+    use_hough_pipeline = (mode == 'hough_pipeline')
+    
+    if use_hough_pipeline:
+        # 新模式：使用高精度霍夫管道
+        # 先读取图像
+        import cv2
+        img_color_for_pipeline = cv2.imread(input_path)
+        if img_color_for_pipeline is None:
+            from PIL import Image
+            img_pil = Image.open(input_path).convert('RGB')
+            img_color_for_pipeline = np.array(img_pil)
+            img_color_for_pipeline = cv2.cvtColor(img_color_for_pipeline, cv2.COLOR_RGB2BGR)
+        
+        # 先做OCR识别标注（管道需要标注点作为输入）
+        pipeline_label_points = None
+        if auto_label:
+            try:
+                from wsd_letter_recognizer import recognize_geo_annotations
+                rec_result = recognize_geo_annotations(
+                    img_color_for_letters if img_color_for_letters is not None else img_color_for_pipeline,
+                    min_confidence=auto_label_min_confidence,
+                )
+                anns = rec_result.get('merged_annotations', [])
+                pipeline_label_points = []
+                for ann in anns:
+                    bbox = ann.get('bbox')
+                    if bbox:
+                        cx = bbox[0] + bbox[2] / 2
+                        cy = bbox[1] + bbox[3] / 2
+                        pipeline_label_points.append({
+                            'pos': (cx, cy),
+                            'bbox': bbox,
+                            'label': ann.get('text', ''),
+                            'confidence': ann.get('confidence', 0.5),
+                            'type': 'vertex',
+                        })
+            except Exception:
+                pass
+        
+        # 使用管道检测
+        from wsd_geo_pipeline import geometry_pipeline, pipeline_to_shapes
+        pipeline_result = _step("高精度霍夫管道检测", lambda: geometry_pipeline(
+            img_color_for_pipeline,
+            label_points=pipeline_label_points,
+            num_circles=num_circles if num_circles != -1 else 'auto',
+            denoise=True,
+            use_hough=True,
+            merge_colinear=True,
+            snap_intersections=True,
+            trim_intersections=False,
+        ))
+        shapes = pipeline_to_shapes(pipeline_result)
+        pipeline_stats = pipeline_result['stats']
+    else:
+        shapes = _step("形状检测", lambda: detect_geometric_shapes(
+            input_path, min_area=min_area, epsilon_ratio=epsilon_ratio,
+            use_hough=use_hough, min_line_length=min_line_length,
+            line_threshold=line_threshold, circle_param2=circle_param2,
+            mode=mode, max_colors=max_colors,
+            detect_symmetry=detect_symmetry,
+            symmetry_threshold=symmetry_threshold,
+            enhanced_detection=enhanced_detection,
+            num_circles=num_circles,
+        ))
+        pipeline_stats = None
 
     if not shapes:
         raise ValueError("图片中没有检测到几何形状")
@@ -6600,16 +7599,25 @@ def convert_geo_to_wsd(input_path, wsd_path,
 
             if img_color_for_letters is not None:
                 h, w = img_color_for_letters.shape[:2]
-                letter_recognition_result = recognize_text_from_image(
-                    img_color_for_letters, shapes,
-                    img_size=(w, h),
-                    min_confidence=auto_label_min_confidence,
-                    direct_detect=True,
-                    label_type=auto_label_type,
-                )
+                # 优先使用改进版几何图标注识别
+                try:
+                    from wsd_letter_recognizer import recognize_geo_annotations
+                    letter_recognition_result = recognize_geo_annotations(
+                        img_color_for_letters,
+                        min_confidence=auto_label_min_confidence,
+                    )
+                except Exception:
+                    # 回退到旧版识别
+                    letter_recognition_result = recognize_text_from_image(
+                        img_color_for_letters, shapes,
+                        img_size=(w, h),
+                        min_confidence=auto_label_min_confidence,
+                        direct_detect=True,
+                        label_type=auto_label_type,
+                    )
                 n_letters = len(letter_recognition_result.get('merged_annotations', []))
                 rec_method = letter_recognition_result.get('recognition_method', 'template')
-                method_name = 'OCR' if rec_method == 'ocr' else '模板匹配'
+                method_name = 'OCR增强' if 'enhanced' in rec_method else ('OCR' if rec_method == 'ocr' else '模板匹配')
                 if progress_cb:
                     progress_cb(f"识别到 {n_letters} 个文字标注（{method_name}）", 22)
         except Exception as e:
@@ -6618,9 +7626,37 @@ def convert_geo_to_wsd(input_path, wsd_path,
             traceback.print_exc()
             letter_recognition_result = None
 
+    # 步骤1.25：基于OCR字母位置过滤字母形状（防止字母被画成几何图形）
+    if letter_recognition_result and auto_label:
+        try:
+            merged_anns = letter_recognition_result.get('merged_annotations', [])
+            raw_letters = letter_recognition_result.get('letters', [])
+            # 同时使用原始字母列表和合并后的标注（更全面）
+            all_letter_bboxes = []
+            for ann in merged_anns:
+                if ann.get('bbox'):
+                    all_letter_bboxes.append(ann)
+            for lt in raw_letters:
+                if lt.get('bbox'):
+                    all_letter_bboxes.append(lt)
+
+            if all_letter_bboxes:
+                original_count = len(shapes)
+                shapes = _filter_shapes_by_ocr_letters(
+                    shapes, all_letter_bboxes, img_size=(w, h) if img_color_for_letters is not None else None
+                )
+                filtered_count = original_count - len(shapes)
+                if filtered_count > 0 and progress_cb:
+                    progress_cb(f"过滤掉 {filtered_count} 个字母形状", 23)
+        except Exception as e:
+            print(f"字母形状过滤失败: {e}")
+            import traceback
+            traceback.print_exc()
+
     # 步骤1.3：标注引导的几何形状精化（如果启用）
+    # 注意：hough_pipeline模式下跳过，管道已内置标注驱动精化
     label_guided_info = {}
-    if label_guided and letter_recognition_result and auto_label:
+    if not use_hough_pipeline and label_guided and letter_recognition_result and auto_label:
         try:
             from wsd_label_guided_geo import refine_shapes_with_labels
 
@@ -6651,6 +7687,39 @@ def convert_geo_to_wsd(input_path, wsd_path,
             import traceback
             traceback.print_exc()
             label_guided_info = {'error': str(e)}
+
+    # 步骤1.4：标注驱动的几何验证与重建（如果有足够的标注点）
+    # 注意：hough_pipeline模式下跳过，管道已内置标注驱动验证
+    label_verification_info = {}
+    if (not use_hough_pipeline and label_guided and letter_recognition_result and auto_label
+            and len(letter_recognition_result.get('merged_annotations', [])) >= 2):
+        try:
+            from wsd_label_guided_geo import verify_and_rebuild_geometry
+
+            merged_anns = letter_recognition_result.get('merged_annotations', [])
+            if len(merged_anns) >= 2:
+                original_count = len(shapes)
+                shapes, verify_stats = _step("标注驱动几何验证", lambda: verify_and_rebuild_geometry(
+                    shapes,
+                    merged_anns,
+                    skeleton=None,
+                    img_color=img_color_for_letters,
+                    min_line_coverage=0.3,
+                    min_circle_coverage=0.3,
+                ))
+                label_verification_info = verify_stats
+                verified_count = len(shapes)
+                if progress_cb:
+                    progress_cb(
+                        f"标注验证: {verify_stats['verified_lines']}条直线 "
+                        f"{verify_stats['verified_circles']}个圆 通过验证",
+                        26
+                    )
+        except Exception as e:
+            print(f"标注驱动几何验证失败: {e}")
+            import traceback
+            traceback.print_exc()
+            label_verification_info = {'error': str(e)}
 
     # 步骤1.5：形状矫正（直角、对称性）
     if symmetry_correction or right_angle_correction:
@@ -6782,13 +7851,32 @@ def convert_geo_to_wsd(input_path, wsd_path,
         progress_cb("组装文件...", 92)
 
     # 步骤5：组装WSD文件
+    path_records = []  # 保存路径记录，用于后续合并文字
+    
     def _build_file():
-        from wsd_gt_build import make_arc_native_path
+        from wsd_gt_build import make_arc_native_path, make_native_line_path
+        nonlocal path_records
         paths = []
         for i, segs in enumerate(seglists):
             color = colors[i] if i < len(colors) else colors[0]
+            # 检查是否全部是原生直线（边框形状拆分成多条原生直线）
+            all_native_lines = (len(segs) > 0 and
+                all(isinstance(s, tuple) and len(s) == 3 and s[0] == '__native_line__' 
+                    for s in segs))
+            if all_native_lines:
+                # 多条原生直线（边框形状拆分）
+                for seg in segs:
+                    _, p1, p2 = seg
+                    path = make_native_line_path(p1, p2, color, linewidth)
+                    paths.append(path)
+            # 检查是否是单条原生直线（特殊标记）
+            elif len(segs) == 1 and isinstance(segs[0], tuple) and len(segs[0]) == 3 and segs[0][0] == '__native_line__':
+                # 原生直线
+                _, p1, p2 = segs[0]
+                path = make_native_line_path(p1, p2, color, linewidth)
+                paths.append(path)
             # 检查是否是原生圆弧（特殊标记）
-            if len(segs) == 1 and isinstance(segs[0], tuple) and len(segs[0]) == 6 and segs[0][0] == '__arc_path__':
+            elif len(segs) == 1 and isinstance(segs[0], tuple) and len(segs[0]) == 6 and segs[0][0] == '__arc_path__':
                 # 原生圆弧
                 _, cx, cy, r, start_angle, end_angle = segs[0]
                 path = make_arc_native_path(cx, cy, r, start_angle, end_angle,
@@ -6855,6 +7943,7 @@ def convert_geo_to_wsd(input_path, wsd_path,
                             )
                             paths.append(sym_path)
 
+        path_records = paths  # 保存路径记录
         wsd_data = build_wsd(paths)
         with open(wsd_path, 'wb') as f:
             f.write(wsd_data)
@@ -6867,9 +7956,10 @@ def convert_geo_to_wsd(input_path, wsd_path,
     if auto_label and letter_recognition_result:
         try:
             from wsd_letter_recognizer import (
-                associate_letters_to_geometry, annotations_to_wsd_config
+                associate_letters_to_geometry,
+                optimize_annotation_positions,
+                annotations_to_wsd_config
             )
-            from wsd_mixed_build import merge_geo_and_text
 
             merged_anns = letter_recognition_result.get('merged_annotations', [])
             if merged_anns:
@@ -6879,14 +7969,42 @@ def convert_geo_to_wsd(input_path, wsd_path,
                     list(merged_anns), geo_shapes_for_assoc
                 )
 
+                # 优化标注位置（角平分线方向向外偏移）
+                h_img, w_img = img_color_for_letters.shape[:2] if img_color_for_letters is not None else (0, 0)
+                associated = optimize_annotation_positions(
+                    associated, geo_shapes_for_assoc,
+                    img_size=(w_img, h_img) if w_img > 0 else None
+                )
+
                 # 转换为WSD坐标
                 wsd_anns = annotations_to_wsd_config(
                     associated, sx=sx, sy=sy, ox=ox, oy=oy
                 )
 
-                # 合并到WSD文件
+                # 合并到WSD文件（优先使用基于样本的生成方式，确保能正常打开）
                 if wsd_anns:
-                    wsd_data = merge_geo_and_text(wsd_data, wsd_anns)
+                    try:
+                        from wsd_sample_builder import build_wsd_sample_based
+                        import os
+                        from wsd_text import TEMPLATE_DIR
+                        sample_path = os.path.join(TEMPLATE_DIR, '几何_样本_三角+圆.wsd')
+                        if os.path.exists(sample_path):
+                            # 基于样本生成（最稳定方案）
+                            # 默认使用 FS Math Type 斜体
+                            wsd_data = build_wsd_sample_based(
+                                path_records, wsd_anns,
+                                font_name="FS Math Type",
+                                italic=True,
+                            )
+                        else:
+                            # 回退到旧的混合构建方式
+                            from wsd_mixed_build import merge_geo_and_text
+                            wsd_data = merge_geo_and_text(wsd_data, wsd_anns)
+                    except Exception as inner_e:
+                        print(f"基于样本生成失败，回退到混合构建: {inner_e}")
+                        from wsd_mixed_build import merge_geo_and_text
+                        wsd_data = merge_geo_and_text(wsd_data, wsd_anns)
+                    
                     # 重新写入文件
                     with open(wsd_path, 'wb') as f:
                         f.write(wsd_data)
@@ -6921,6 +8039,7 @@ def convert_geo_to_wsd(input_path, wsd_path,
         'symmetries': symmetry_stats,  # 对称类型统计
         'text_annotations': text_annotations_info,  # 文字标注信息
         'label_guided': label_guided_info,  # 标注引导精化信息
+        'label_verification': label_verification_info,  # 标注驱动验证信息
         'recognition_method': letter_recognition_result.get('recognition_method', 'none') if letter_recognition_result else 'none',
     }
 
@@ -7163,7 +8282,25 @@ def convert_geo_to_wsd_multi(input_files, output_path, **kwargs):
                     continue
 
             if all_wsd_anns:
-                wsd_data = merge_geo_and_text(wsd_data, all_wsd_anns)
+                try:
+                    from wsd_sample_builder import build_wsd_sample_based
+                    import os
+                    from wsd_text import TEMPLATE_DIR
+                    sample_path = os.path.join(TEMPLATE_DIR, '几何_样本_三角+圆.wsd')
+                    if os.path.exists(sample_path):
+                        # 默认使用 FS Math Type 斜体
+                        wsd_data = build_wsd_sample_based(
+                            paths, all_wsd_anns,
+                            font_name="FS Math Type",
+                            italic=True,
+                        )
+                    else:
+                        from wsd_mixed_build import merge_geo_and_text
+                        wsd_data = merge_geo_and_text(wsd_data, all_wsd_anns)
+                except Exception as inner_e:
+                    print(f"基于样本生成失败，回退到混合构建: {inner_e}")
+                    from wsd_mixed_build import merge_geo_and_text
+                    wsd_data = merge_geo_and_text(wsd_data, all_wsd_anns)
                 if progress_cb:
                     progress_cb(f"已添加 {len(all_wsd_anns)} 个文字标注", 95)
         except Exception as e:

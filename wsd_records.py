@@ -56,63 +56,80 @@ def rainbow_argb(index, total):
 
 # ========== 直线记录 (0x00FF, 子类型01) ==========
 
+# EE原生直线模板（77字节，从EE生成的直线文件中提取）
+# 格式: 32B头部 + 28B数据区(float) + 16B坐标(i32) + 1B结束
+_LINE_TEMPLATE = bytes([
+    # 头部 (32B)
+    0x0f, 0x33,        # 0-1: 记录标记 0x330f
+    0xff, 0x00,        # 2-3: 类型字 0x00FF (开放路径)
+    0x07, 0x04, 0xff, 0xff,  # 4-7: flags
+    0x00, 0x00, 0xff, 0xff,  # 8-11: 颜色 BGRA (默认红色)
+    0x00, 0x00, 0x00, 0x00,  # 12-15: 填充颜色
+    0x50, 0x00, 0x00, 0x00,  # 16-19: 线宽 (80 = 0.2mm)
+    0x00, 0x04, 0x00, 0x04,  # 20-23: 坐标属性
+    0x00, 0x01, 0x00, 0x01,  # 24-27: 子类型flags
+    0x00, 0x00, 0x00, 0x01,  # 28-31: 子类型 01=直线
+    # 数据区 (28B, float参数，具体含义待研究，从EE模板复制)
+    0x47, 0x3f, 0x14, 0x46,  # +0x20
+    0x47, 0x3f, 0x61, 0xb4,  # +0x24
+    0x20, 0x3f, 0x61, 0xb4,  # +0x28
+    0x20, 0xbf, 0x14, 0x46,  # +0x2c
+    0x47, 0x3f, 0xde, 0x28,  # +0x30
+    0x89, 0x45, 0x1e, 0x01,  # +0x34
+    0x11, 0xc6, 0x02, 0x00,  # +0x38
+    # 坐标 (16B, i32)
+    0x00, 0x00, 0x00, 0x00,  # +0x3c: 起点x
+    0x00, 0x00, 0x00, 0x00,  # +0x40: 起点y
+    0x00, 0x00, 0x00, 0x00,  # +0x44: 终点x
+    0x00, 0x00, 0x00, 0x00,  # +0x48: 终点y
+    # 结束 (1B)
+    0x64,                  # +0x4c: 结束标记
+])
+
 def build_line_record(x1, y1, x2, y2,
                       line_color=hex_to_argb('#ff0000'),
                       linewidth=DEFAULT_LINEWIDTH):
     """
-    构建直线记录
-    类型: 开放路径类 0x00FF, 子类型 0x01
-    总大小: 77字节 (32B头 + 44B数据 + 1B结束)
+    构建直线段记录（多边形格式，坐标与文字标注一致）
+    
+    使用闭合形状类(0x10CF)的折线段格式绘制直线，
+    确保坐标系统与文字标注/关联标注一致。
+    
+    Args:
+        x1, y1: 起点坐标（WSD单位）
+        x2, y2: 终点坐标（WSD单位）
+        line_color: 线条颜色 (BGRA 4字节)
+        linewidth: 线宽（WSD单位，1mm = 400）
+    
+    Returns:
+        bytes: 直线记录数据
     """
     rec = bytearray()
-
-    # 头部 (32字节)
-    rec += bytes([0x0f, 0x33])           # 0-1: 记录标记
-    rec += bytes([0xff, 0x00])           # 2-3: 类型字 0x00FF (开放路径)
-    rec += bytes([0x07, 0x04, 0xff, 0xff])  # 4-7: 固定flags
-    rec += line_color                     # 8-11: 线条颜色 ARGB
-    rec += b'\x00\x00\x00\x00'           # 12-15: 填充颜色 (无填充)
-    rec += struct.pack('<I', linewidth)   # 16-19: 线宽
+    
+    # 记录头 32字节
+    rec += bytes([0x0f, 0x33])           # 0-1: 标记
+    rec += struct.pack('<H', 0x10CF)      # 2-3: 类型字 0x10CF (闭合形状)
+    rec += bytes([0x07, 0x04, 0xff, 0xff])  # 4-7: flags
+    rec += line_color                     # 8-11: 线条颜色 BGRA
+    rec += bytes([0x00, 0x00, 0x00, 0x00])  # 12-15: 填充色(无)
+    rec += struct.pack('<I', linewidth)    # 16-19: 线宽
     rec += bytes([0x00, 0x04, 0x00, 0x04])  # 20-23: 坐标属性
-    rec += bytes([0x00, 0x01, 0x00, 0x01])  # 24-27: 子类型flags
-    rec += bytes([0x00, 0x00, 0x00, 0x01])  # 28-31: 子类型 01=直线 (高字节)
-
-    # 数据区 (44字节)
-    # 计算边界框
-    dx = x2 - x1
-    dy = y2 - y1
-    length = math.hypot(dx, dy)
-
-    if length > 0:
-        nx = abs(dy / length) * linewidth
-        ny = abs(dx / length) * linewidth
-    else:
-        nx = ny = linewidth
-
-    min_x = int(min(x1, x2) - nx)
-    max_x = int(max(x1, x2) + nx)
-    min_y = int(min(y1, y2) - ny)
-    max_y = int(max(y1, y2) + ny)
-
-    # 前28字节: 边界框 + 保留
-    rec += struct.pack('<i', min_x)    # 32-35: 左边界
-    rec += struct.pack('<i', min_y)    # 36-39: 上边界
-    rec += struct.pack('<i', max_x)    # 40-43: 右边界
-    rec += struct.pack('<i', max_y)    # 44-47: 下边界
-    rec += struct.pack('<i', 0)        # 48-51: 保留
-    rec += struct.pack('<i', 0)        # 52-55: 保留
-    rec += struct.pack('<i', 0)        # 56-59: 保留
-
-    # 端点坐标 (16字节)
-    rec += struct.pack('<i', int(x1))   # 60-63: 起点X
-    rec += struct.pack('<i', int(y1))   # 64-67: 起点Y
-    rec += struct.pack('<i', int(x2))   # 68-71: 终点X
-    rec += struct.pack('<i', int(y2))   # 72-75: 终点Y
-
+    rec += bytes([0x00, 0x01, 0x00, 0x01])  # 24-27: flags
+    rec += bytes([0x47, 0x00])            # 28-29: 子类型 0x47=折线
+    
+    # 顶点数 = 2
+    rec += struct.pack('<H', 2)
+    
+    # 两个顶点
+    rec += struct.pack('<i', int(round(x1)))
+    rec += struct.pack('<i', int(round(y1)))
+    rec += struct.pack('<i', int(round(x2)))
+    rec += struct.pack('<i', int(round(y2)))
+    
     # 结束标记
-    rec += bytes([0x64])                 # 76: 结束
-
-    return rec
+    rec += bytes([0x64])
+    
+    return bytes(rec)
 
 
 # ========== 圆弧记录 (0x00FF, 子类型07) ==========
@@ -222,7 +239,8 @@ def build_circle_record(cx, cy, radius,
 
 def build_polyline_native_record(points,
                                  line_color=hex_to_argb('#ff0000'),
-                                 linewidth=DEFAULT_LINEWIDTH):
+                                 linewidth=DEFAULT_LINEWIDTH,
+                                 closed=True):
     """
     构建折线段记录 (原生WSD格式)
     类型: 闭合形状类 0x10CF, 子类型 0x47
@@ -230,10 +248,19 @@ def build_polyline_native_record(points,
 
     参数:
         points: list of (x, y) 顶点坐标
+        closed: 是否闭合形状（闭合时自动添加闭合顶点，即最后一点=第一点）
     """
     n = len(points)
     if n < 2:
         raise ValueError("折线段至少需要2个点")
+
+    # 闭合形状：添加闭合顶点（最后一点=第一点）
+    if closed:
+        n_actual = n + 1
+        all_points = list(points) + [points[0]]
+    else:
+        n_actual = n
+        all_points = list(points)
 
     rec = bytearray()
 
@@ -247,10 +274,10 @@ def build_polyline_native_record(points,
     rec += bytes([0x00, 0x01, 0x00, 0x01])  # 20-23: 坐标属性
     rec += bytes([0x00, 0x00, 0x00, 0x02])  # 24-27: 折线段flags
     rec += bytes([0x47, 0x00])           # 28-29: 子类型 47=折线段
-    rec += struct.pack('<H', n)          # 30-31: 顶点数
+    rec += struct.pack('<H', n_actual)          # 30-31: 顶点数
 
     # 顶点数据 (N*8字节)
-    for x, y in points:
+    for x, y in all_points:
         rec += struct.pack('<i', int(x))
         rec += struct.pack('<i', int(y))
 

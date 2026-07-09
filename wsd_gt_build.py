@@ -371,6 +371,30 @@ def make_arc_native_path(cx, cy, r, start_angle, end_angle,
     return bytes(path)
 
 
+def make_native_line_path(p1, p2, line_color_bgra, line_width_wsd):
+    """
+    构建EE原生格式的直线路径（开放路径类, sub_type=0x01, 77字节）
+
+    经过实验验证，这种格式的直线可以在EE中被裁剪。
+    基于EE生成的直线样本（77字节），修改坐标、颜色和线宽。
+    
+    格式: 32B头部 + 28B数据区(float) + 16B坐标(i32) + 1B结束
+
+    Args:
+        p1: 起点 (x, y)，WSD单位
+        p2: 终点 (x, y)，WSD单位
+        line_color_bgra: 线条颜色 (BGRA 4字节)
+        line_width_wsd: 线宽（WSD单位）
+
+    Returns:
+        bytes: 完整的原生直线路径记录（77字节）
+    """
+    from wsd_records import build_line_record
+    return build_line_record(p1[0], p1[1], p2[0], p2[1],
+                             line_color=line_color_bgra,
+                             linewidth=line_width_wsd)
+
+
 def make_circle_segs(cx, cy, r):
     """
     用4段贝塞尔曲线近似一个圆（备用方案，优先使用原生圆）
