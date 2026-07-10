@@ -596,21 +596,17 @@ def _modify_text_from_template(template, text, x, y,
     """
     rec = bytearray(template)
     
-    # 设置坐标
-    struct.pack_into('<H', rec, 0x0d, int(x))
-    struct.pack_into('<H', rec, 0x11, int(y))
+    # 设置坐标（i32 LE, 偏移0x0c和0x10）
+    struct.pack_into('<i', rec, 0x0c, int(x))
+    struct.pack_into('<i', rec, 0x10, int(y))
     
-    # 设置上下标标志
+    # 设置上下标标志 (+0x1a, u16 LE)
     flags = 0
     if superscript:
         flags |= 0x0001
     if subscript:
         flags |= 0x0100
     struct.pack_into('<H', rec, 0x1a, flags)
-    
-    # 设置边距 (+0x17, u16 LE, 400单位/mm)
-    margin_units = int(margin_mm * 400)
-    struct.pack_into('<H', rec, 0x17, margin_units)
     
     # 设置 +0x1c 字节（模式控制）
     # bit7: 1=关联标注模式, 0=普通文字模式
