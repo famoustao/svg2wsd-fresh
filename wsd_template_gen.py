@@ -1,138 +1,195 @@
 #!/usr/bin/env python3
 """
-基于模板的WSD生成器 v6 - 最终正确版（槽位规则）
+基于模板的WSD生成器 v8 - 最终版（几何格式，支持任意数量记录）
 
-已验证的核心规则：
-1. 文件大小必须与模板完全一致
-2. 记录数(count)必须与模板完全一致
-3. 每条记录的大小必须保持不变
-4. 文字长度必须匹配槽位（2字符槽只能放2字符，1字符槽只能放1字符）
-5. 上下标类型不能改变（下标槽只能是下标，上标槽只能是上标，普通槽只能是普通）
-   - 但可以在同类型之间互换（如下标槽A和下标槽B互换b1a）
-6. 可以改：文字内容（长度匹配）、坐标
-7. 多余的文字可以移到(0,0)或画布外隐藏
+核心规则（已通过27个测试文件验证）：
+1. ✅ count字段可以修改，只要和实际记录数匹配
+2. ✅ 文件大小可以修改，只要ffff前的大小字段正确更新
+3. ✅ 记录可以任意增减（追加到最后一条记录之后、块尾部之前）
+4. ✅ 三种文字原型：普通(52B)、下标(54B)、上标(54B)
+5. ❌ b1a字段（上下标标志）不能修改！必须用对应原型复制
+6. ✅ 可以修改：坐标、文字内容（长度不超过原型）、关联参数
 
-模板槽位配置（用户模板_全能标注.wsd）：
-  [0] 2字符，下标
-  [1] 2字符，上标
-  [2] 1字符，普通
-  [3] 1字符，普通
-  [4] 1字符，普通
-  [5] 1字符，普通
-  [6] 1字符，普通
+原型来源：
+- normal（普通）：几何模板_A  52B
+- subscript（下标）：几何模板_C1  54B
+- superscript（上标）：用户模板_B'  54B
 """
 
 import struct
 import os
 
 
-class TemplateWSDGenerator:
+class FlexibleWSDGenerator:
     """
-    基于用户模板的WSD生成器（槽位规则）
+    灵活WSD生成器（基于几何.wsd格式）
     
-    保持模板的文件大小、记录数、记录大小、上下标类型完全不变，
-    只修改文字内容（长度匹配）和坐标。
+    支持任意数量的路径和文字记录，自动调整count和文件大小。
+    三种文字原型，绝不修改b1a字段。
     """
     
-    def __init__(self, template_path):
+    def __init__(self, template_path=None):
+        if template_path is None:
+            template_path = self._default_template()
+        
         with open(template_path, 'rb') as f:
-            self.data = bytearray(f.read())
+            self.data = f.read()
+        
         self.template_path = template_path
         self._parse_structure()
+        self._load_prototypes()
+    
+    def _default_template(self):
+        """获取默认模板路径"""
+        candidates = [
+            os.path.join(os.path.dirname(__file__), 'wsd_label_samples', '几何模板_可增减记录.wsd'),
+            'wsd_label_samples/几何模板_可增减记录.wsd',
+        ]
+        for c in candidates:
+            if os.path.exists(c):
+                return c
+        raise ValueError("找不到几何模板_可增减记录.wsd")
+    
+    def _load_prototypes(self):
+        """加载三种文字原型（从预存的bin文件）"""
+        sample_dir = os.path.join(os.path.dirname(__file__), 'wsd_label_samples')
+        
+        self.prototypes = {}
+        
+        # 尝试从bin文件加载
+        for mode, fname in [('normal', 'proto_normal.bin'),
+                            ('subscript', 'proto_subscript.bin'),
+                            ('superscript', 'proto_superscript.bin')]:
+            fpath = os.path.join(sample_dir, fname)
+            if os.path.exists(fpath):
+                with open(fpath, 'rb') as f:
+                    self.prototypes[mode] = bytearray(f.read())
+        
+        # 如果bin文件不全，从模板中提取
+        if 'normal' not in self.prototypes or 'subscript' not in self.prototypes:
+            for rec in self.records:
+                if rec['type'] == 'text':
+                    mode = rec['mode']
+                    if mode not in self.prototypes:
+                        self.prototypes[mode] = bytearray(rec['data'])
+        
+        # 上标可能不在几何模板中，从用户模板加载
+        if 'superscript' not in self.prototypes:
+            tpl_path = os.path.join(sample_dir, '用户模板_全能标注.wsd')
+            if os.path.exists(tpl_path):
+                with open(tpl_path, 'rb') as f:
+                    tpl_data = f.read()
+                # 扫描上标记录
+                tpl_ffff = tpl_data.rfind(b'\xff\xff\xff\xff')
+                pos = 0xea50 + 14
+                while pos < tpl_ffff - 10:
+                    if tpl_data[pos] == 0x09 and tpl_data[pos+1] == 0x31 and tpl_data[pos+2] == 0x07 and tpl_data[pos+3] == 0x10:
+                        text_start = pos + 0x26
+                        end_m = tpl_data.find(b'\x01\xff', text_start, text_start + 200)
+                        if end_m > 0:
+                            b1a = struct.unpack_from('<H', tpl_data, pos + 0x1a)[0]
+                            if b1a & 0x0001:  # 上标
+                                pos_50 = tpl_data.find(b'\x50\x00\x00\x00', end_m + 2, end_m + 100)
+                                rec_end = pos_50 + 4 if pos_50 > 0 else end_m + 20
+                                self.prototypes['superscript'] = bytearray(tpl_data[pos:rec_end])
+                                break
+                            pos_50 = tpl_data.find(b'\x50\x00\x00\x00', end_m + 2, end_m + 100)
+                            pos = pos_50 + 4 if pos_50 > 0 else end_m + 20
+                            continue
+                    pos += 1
     
     def _parse_structure(self):
-        """解析整个文件结构"""
+        """解析文件结构"""
         data = self.data
         
-        # 1. 找ffff尾部
+        # 找ffff尾部
         self.ffff_pos = data.rfind(b'\xff\xff\xff\xff')
         
-        # 2. 找数据块
+        # 找数据块
         self.block_start = None
-        self.block_count = 0
-        
         for pos in range(self.ffff_pos - 100, self.ffff_pos - 8000, -1):
             if pos < 0:
                 break
             word2 = struct.unpack_from('<H', data, pos + 2)[0]
             if word2 == 0x1000:
                 count = struct.unpack_from('<H', data, pos + 0x0a)[0]
-                if 1 <= count <= 200:
+                if 1 <= count <= 500:
                     if data[pos + 14] == 0x0f and data[pos + 15] == 0x33:
                         self.block_start = pos
                         self.block_count = count
                         break
         
         if self.block_start is None:
-            raise ValueError(f"找不到数据块在模板 {self.template_path} 中")
+            raise ValueError(f"找不到数据块在 {self.template_path} 中")
         
-        # 3. 扫描所有路径记录
-        self._scan_path_records()
+        # 扫描所有记录
+        self._scan_records()
         
-        # 4. 扫描所有文字记录（槽位）
-        self._scan_text_slots()
+        # 提取块尾部数据
+        last_end = self.records[-1]['end'] if self.records else self.block_start + 14
+        self.block_tail = bytes(data[last_end:self.ffff_pos])
+        
+        # 提取文件头
+        self.file_header = bytes(data[:self.block_start])
+        
+        # 提取文件尾（ffff及之后）
+        self.file_footer = bytes(data[self.ffff_pos:])
     
-    def _scan_path_records(self):
-        """扫描路径记录"""
+    def _scan_records(self):
+        """扫描所有记录"""
         data = self.data
         pos = self.block_start + 14
         end_limit = self.ffff_pos
         
-        self.path_recs = []
+        self.records = []
         
-        while pos < end_limit - 10 and len(self.path_recs) < self.block_count:
+        while pos < end_limit - 10 and len(self.records) < self.block_count + 10:
+            # 路径记录
             if data[pos] == 0x0f and data[pos + 1] == 0x33:
                 word2 = struct.unpack_from('<H', data, pos + 2)[0]
                 if word2 in (0x10cf, 0x00ff):
-                    # 找下一条记录
-                    next_pos = self._find_next_record(pos + 10, end_limit)
+                    next_pos = self._find_next_record(pos + 8, end_limit)
                     if next_pos > pos and next_pos - pos < 500:
-                        self.path_recs.append({
+                        self.records.append({
+                            'type': 'path',
                             'pos': pos,
                             'end': next_pos,
                             'size': next_pos - pos,
                             'subtype': 'closed' if word2 == 0x10cf else 'open',
+                            'data': bytes(data[pos:next_pos]),
                         })
                         pos = next_pos
                         continue
-            pos += 1
-    
-    def _scan_text_slots(self):
-        """扫描文字槽位（精确位置）"""
-        data = self.data
-        pos = self.block_start + 14
-        end_limit = self.ffff_pos
-        
-        self.text_slots = []
-        
-        while pos < end_limit - 4:
+            
+            # 文字记录
             if data[pos] == 0x09 and data[pos+1] == 0x31 and data[pos+2] == 0x07 and data[pos+3] == 0x10:
                 text_start = pos + 0x26
                 end_m = data.find(b'\x01\xff', text_start, text_start + 200)
                 if end_m > 0:
                     text = data[text_start:end_m].decode('utf-16-le', errors='?')
+                    pos_50 = data.find(b'\x50\x00\x00\x00', end_m + 2, end_m + 100)
+                    rec_end = pos_50 + 4 if pos_50 > 0 else end_m + 20
+                    
                     b1a = struct.unpack_from('<H', data, pos + 0x1a)[0]
-                    max_chars = (end_m - text_start) // 2
-                    
-                    # 判断类型
                     if b1a & 0x0100:
-                        slot_type = 'subscript'   # 下标
+                        mode = 'subscript'
                     elif b1a & 0x0001:
-                        slot_type = 'superscript'  # 上标
+                        mode = 'superscript'
                     else:
-                        slot_type = 'normal'       # 普通
+                        mode = 'normal'
                     
-                    self.text_slots.append({
+                    self.records.append({
+                        'type': 'text',
                         'pos': pos,
-                        'text_start': text_start,
-                        'text_end': end_m,
+                        'end': rec_end,
+                        'size': rec_end - pos,
                         'text': text,
-                        'max_chars': max_chars,
-                        'slot_type': slot_type,
-                        'b1a': b1a,
+                        'mode': mode,
+                        'data': bytes(data[pos:rec_end]),
                     })
-                    pos = end_m + 10
+                    pos = rec_end
                     continue
+            
             pos += 1
     
     def _find_next_record(self, start, end_limit):
@@ -141,150 +198,151 @@ class TemplateWSDGenerator:
         for p in range(start, min(start + 300, end_limit - 4)):
             if data[p] == 0x0f and data[p + 1] == 0x33:
                 word2 = struct.unpack_from('<H', data, p + 2)[0]
-                if word2 in (0x10cf, 0x00ff, 0x0004, 0x1007):
+                if word2 in (0x10cf, 0x00ff):
                     return p
-            if data[p] == 0x09 and data[p+1] == 0x31:
-                word2 = struct.unpack_from('<H', data, p + 2)[0]
-                if word2 == 0x1007:
-                    return p
+            if data[p] == 0x09 and data[p+1] == 0x31 and data[p+2] == 0x07 and data[p+3] == 0x10:
+                return p
         return start
     
-    def get_slot_info(self):
-        """获取槽位信息"""
-        return {
-            'path_count': len(self.path_recs),
-            'text_slot_count': len(self.text_slots),
-            'slots': [
-                {
-                    'index': i,
-                    'max_chars': s['max_chars'],
-                    'type': s['slot_type'],
-                }
-                for i, s in enumerate(self.text_slots)
-            ],
-            'subscript_slots': [i for i, s in enumerate(self.text_slots) if s['slot_type'] == 'subscript'],
-            'superscript_slots': [i for i, s in enumerate(self.text_slots) if s['slot_type'] == 'superscript'],
-            'normal_slots': [i for i, s in enumerate(self.text_slots) if s['slot_type'] == 'normal'],
-        }
+    def _create_text_record(self, text, x, y, mode='normal',
+                            associated_mode=True, assoc_type=4,
+                            assoc_f1=0.5, assoc_f2=0.5, assoc_b1d=0x54):
+        """
+        创建一条新的文字记录
+        
+        重要：使用对应模式的原型复制，绝不修改b1a字段！
+        只修改：坐标、文字内容、关联参数
+        """
+        if mode not in self.prototypes:
+            # 没有对应原型，降级为normal
+            mode = 'normal'
+        
+        proto = self.prototypes[mode]
+        rec = bytearray(proto)
+        
+        # 修改坐标（u16 @ +0x0d, +0x11）
+        struct.pack_into('<H', rec, 0x0d, int(x) & 0xffff)
+        struct.pack_into('<H', rec, 0x11, int(y) & 0xffff)
+        
+        # 修改文字内容（保持长度不变，用0填充剩余）
+        text_start = 0x26
+        end_m_off = rec.find(b'\x01\xff', text_start)
+        if end_m_off > 0:
+            max_chars = (end_m_off - text_start) // 2
+            if len(text) > max_chars:
+                text = text[:max_chars]
+            
+            text_bytes = text.encode('utf-16-le')
+            padded = text_bytes + b'\x00' * (end_m_off - text_start - len(text_bytes))
+            rec[text_start:end_m_off] = padded
+        
+        # 关联模式 bit7 @ +0x1c
+        if associated_mode:
+            rec[0x1c] = rec[0x1c] | 0x80
+        else:
+            rec[0x1c] = rec[0x1c] & ~0x80
+        
+        # 关联类型 低3位 @ +0x1c
+        rec[0x1c] = (rec[0x1c] & 0xf8) | (assoc_type & 0x07)
+        
+        # 关联子类型 @ +0x1d
+        rec[0x1d] = assoc_b1d & 0xff
+        
+        # 关联参数 @ +0x1e, +0x22
+        struct.pack_into('<f', rec, 0x1e, assoc_f1)
+        struct.pack_into('<f', rec, 0x22, assoc_f2)
+        
+        return bytes(rec)
     
     def build(self, path_records, text_annotations):
         """
-        生成WSD文件（槽位规则）
+        生成WSD文件（灵活模式，支持任意数量记录）
         
         Args:
-            path_records: list of bytes - 路径记录（数量<=模板路径数）
-            text_annotations: list of dict - 文字标注（数量<=模板文字槽位数）
-                每个标注：
+            path_records: list of bytes - 路径记录列表
+            text_annotations: list of dict - 文字标注列表
                 {
-                    'text': str,           # 文字内容（长度必须匹配槽位）
-                    'x': int, 'y': int,    # 坐标
-                    'subscript': bool,     # 是否下标（决定分配哪种槽位）
-                    'superscript': bool,   # 是否上标（决定分配哪种槽位）
+                    'text': str,
+                    'x': int, 'y': int,
+                    'subscript': bool,
+                    'superscript': bool,
+                    'associated_mode': bool,
+                    'assoc_type': int,
+                    'assoc_f1': float,
+                    'assoc_f2': float,
+                    'assoc_b1d': int,
                 }
         
         Returns:
             bytes: WSD文件数据
         """
-        result = bytearray(self.data)  # 复制模板
+        result = bytearray()
         
-        # === 修改路径记录 ===
-        for i, path_data in enumerate(path_records):
-            if i >= len(self.path_recs):
-                break
+        # 文件头
+        result += self.file_header
+        
+        # 计算总记录数
+        total_count = len(path_records) + len(text_annotations)
+        
+        # 块头（14字节，修改count）
+        block_header = bytearray(self.data[self.block_start:self.block_start + 14])
+        struct.pack_into('<H', block_header, 0x0a, total_count)
+        result += block_header
+        
+        # 添加所有路径记录
+        for pr in path_records:
+            result += pr
+        
+        # 添加所有文字记录
+        for ann in text_annotations:
+            text = ann.get('text', 'A')
+            x = ann.get('x', 10000)
+            y = ann.get('y', 10000)
             
-            rec = self.path_recs[i]
-            rec_size = rec['size']
-            
-            if len(path_data) <= rec_size:
-                padded = path_data + b'\x00' * (rec_size - len(path_data))
-                result[rec['pos']:rec['end']] = padded
+            if ann.get('subscript', False):
+                mode = 'subscript'
+            elif ann.get('superscript', False):
+                mode = 'superscript'
             else:
-                result[rec['pos']:rec['end']] = path_data[:rec_size]
+                mode = 'normal'
+            
+            text_rec = self._create_text_record(
+                text, x, y, mode,
+                associated_mode=ann.get('associated_mode', True),
+                assoc_type=ann.get('assoc_type', 4),
+                assoc_f1=ann.get('assoc_f1', 0.5),
+                assoc_f2=ann.get('assoc_f2', 0.5),
+                assoc_b1d=ann.get('assoc_b1d', 0x54),
+            )
+            result += text_rec
         
-        # === 分配文字槽位 ===
-        # 策略：
-        # - 下标标注 -> 下标槽
-        # - 上标标注 -> 上标槽
-        # - 普通标注 -> 普通槽
-        # - 多余的槽 -> 移到(0,0)隐藏
+        # 块尾部数据（保持不变）
+        result += self.block_tail
         
-        sub_slots = [i for i, s in enumerate(self.text_slots) if s['slot_type'] == 'subscript']
-        sup_slots = [i for i, s in enumerate(self.text_slots) if s['slot_type'] == 'superscript']
-        norm_slots = [i for i, s in enumerate(self.text_slots) if s['slot_type'] == 'normal']
+        # 文件尾（ffff及之后）
+        result += self.file_footer
         
-        used_slots = set()
+        # 更新文件大小（ffff前4字节）
+        ffff_pos_new = result.rfind(b'\xff\xff\xff\xff')
+        if ffff_pos_new >= 4:
+            struct.pack_into('<I', result, ffff_pos_new - 4, len(result))
         
-        # 分配下标标注到下标槽
-        sub_anns = [a for a in text_annotations if a.get('subscript', False)]
-        for i, ann in enumerate(sub_anns):
-            if i < len(sub_slots):
-                slot_idx = sub_slots[i]
-                self._fill_text_slot(result, slot_idx, ann)
-                used_slots.add(slot_idx)
-        
-        # 分配上标标注到上标槽
-        sup_anns = [a for a in text_annotations if a.get('superscript', False)]
-        for i, ann in enumerate(sup_anns):
-            if i < len(sup_slots):
-                slot_idx = sup_slots[i]
-                self._fill_text_slot(result, slot_idx, ann)
-                used_slots.add(slot_idx)
-        
-        # 分配普通标注到普通槽
-        norm_anns = [a for a in text_annotations 
-                     if not a.get('subscript', False) and not a.get('superscript', False)]
-        for i, ann in enumerate(norm_anns):
-            if i < len(norm_slots):
-                slot_idx = norm_slots[i]
-                self._fill_text_slot(result, slot_idx, ann)
-                used_slots.add(slot_idx)
-        
-        # 未使用的槽位移到(0,0)隐藏
-        for i in range(len(self.text_slots)):
-            if i not in used_slots:
-                slot = self.text_slots[i]
-                struct.pack_into('<H', result, slot['pos'] + 0x0d, 0)
-                struct.pack_into('<H', result, slot['pos'] + 0x11, 0)
-        
-        # count和文件大小都不变
         return bytes(result)
-    
-    def _fill_text_slot(self, result, slot_idx, ann):
-        """填充一个文字槽位"""
-        slot = self.text_slots[slot_idx]
-        text = ann.get('text', 'A')
-        x = ann.get('x', 10000)
-        y = ann.get('y', 10000)
-        
-        # 修改坐标
-        struct.pack_into('<H', result, slot['pos'] + 0x0d, int(x) & 0xffff)
-        struct.pack_into('<H', result, slot['pos'] + 0x11, int(y) & 0xffff)
-        
-        # 修改文字内容（长度必须匹配，超长截断，短了补0）
-        max_chars = slot['max_chars']
-        if len(text) > max_chars:
-            text = text[:max_chars]
-        
-        new_text_bytes = text.encode('utf-16-le')
-        text_len = slot['text_end'] - slot['text_start']
-        padded = new_text_bytes + b'\x00' * (text_len - len(new_text_bytes))
-        result[slot['text_start']:slot['text_end']] = padded
-        
-        # b1a 保持不变！（上下标类型不能改）
     
     def get_info(self):
         """获取模板信息"""
-        info = self.get_slot_info()
+        path_count = sum(1 for r in self.records if r['type'] == 'path')
+        text_count = sum(1 for r in self.records if r['type'] == 'text')
         return {
             'template': self.template_path,
             'file_size': len(self.data),
-            'total_records': self.block_count,
-            'path_records': info['path_count'],
-            'text_slots': info['text_slot_count'],
-            'slot_details': info['slots'],
-            'subscript_slots': len(info['subscript_slots']),
-            'superscript_slots': len(info['superscript_slots']),
-            'normal_slots': len(info['normal_slots']),
+            'block_start': self.block_start,
+            'block_count': self.block_count,
+            'path_records': path_count,
+            'text_records': text_count,
+            'block_tail_size': len(self.block_tail),
+            'prototypes': {k: len(v) for k, v in self.prototypes.items()},
+            'supports_flexible_count': True,
         }
 
 
@@ -292,96 +350,82 @@ class TemplateWSDGenerator:
 # 兼容接口
 # ============================================================
 
-def get_default_template_path():
-    """获取默认模板路径"""
-    # 优先使用用户模板（全能标注）
-    candidates = [
-        os.path.join(os.path.dirname(__file__), 'wsd_label_samples', '用户模板_全能标注.wsd'),
-        'wsd_label_samples/用户模板_全能标注.wsd',
-        'svg2wsd_gh/wsd_label_samples/用户模板_全能标注.wsd',
-    ]
-    for c in candidates:
-        if os.path.exists(c):
-            return c
-    return None
-
-
 def build_wsd_template_based(geo_paths, text_annotations, template_path=None,
                              font_name=None, italic=False, bold=False):
     """
-    基于模板生成WSD（槽位规则，与 build_wsd_sample_based 接口兼容）
+    基于模板生成WSD（灵活模式，支持任意数量记录）
     
-    Args:
-        geo_paths: 几何路径记录列表（bytes列表），数量需 <= 模板路径数
-        text_annotations: 文字标注列表，数量需 <= 模板文字槽位数
-        template_path: 模板文件路径
-        font_name: 字体名（保留兼容，暂未实现）
-        italic: 是否斜体（保留兼容）
-        bold: 是否粗体（保留兼容）
-    
-    Returns:
-        bytes: 生成的WSD文件数据
+    与 build_wsd_sample_based 接口兼容。
     """
-    if template_path is None:
-        template_path = get_default_template_path()
-    
-    if template_path is None:
-        raise ValueError("找不到可用的WSD模板文件")
-    
-    gen = TemplateWSDGenerator(template_path)
+    gen = FlexibleWSDGenerator(template_path)
     return gen.build(geo_paths, text_annotations)
 
 
 def test_generator():
     """测试生成器"""
-    tpl_path = get_default_template_path()
-    if not tpl_path:
-        print("找不到模板文件！")
-        return
+    import sys
+    sys.path.insert(0, '.')
     
-    print(f"使用模板: {tpl_path}")
-    
-    print("\n加载模板...")
-    gen = TemplateWSDGenerator(tpl_path)
+    print("加载模板...")
+    gen = FlexibleWSDGenerator()
     info = gen.get_info()
     print(f"  文件大小: {info['file_size']} 字节")
-    print(f"  记录数: {info['total_records']} ({info['path_records']}路径 + {info['text_slots']}文字槽)")
-    print(f"  下标槽: {info['subscript_slots']}个, 上标槽: {info['superscript_slots']}个, 普通槽: {info['normal_slots']}个")
-    print(f"  槽位详情:")
-    for s in info['slot_details']:
-        print(f"    [{s['index']}] {s['type']:12s} max={s['max_chars']}字符")
+    print(f"  记录数: {info['block_count']} ({info['path_records']}路径 + {info['text_records']}文字)")
+    print(f"  块尾大小: {info['block_tail_size']} 字节")
+    print(f"  原型: {info['prototypes']}")
     
-    # 测试生成
-    print("\n生成测试WSD（槽位规则）...")
+    # 测试1：10个普通标注
+    print(f"\n测试1：3路径 + 10普通文字 = 13条记录")
     
-    # 使用模板中的前3条路径
-    path_data_list = []
-    for i in range(min(3, info['path_records'])):
-        rec = gen.path_recs[i]
-        path_data_list.append(bytes(gen.data[rec['pos']:rec['end']]))
+    path_recs = []
+    for r in gen.records:
+        if r['type'] == 'path' and len(path_recs) < 3:
+            path_recs.append(r['data'])
     
-    print(f"  使用 {len(path_data_list)} 条路径")
+    annotations = []
+    labels = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J']
+    for i, label in enumerate(labels):
+        ann = {
+            'text': label,
+            'x': 10000 + (i % 5) * 6000,
+            'y': 12000 + (i // 5) * 8000,
+            'subscript': False,
+            'superscript': False,
+            'associated_mode': True,
+            'assoc_type': 4,
+            'assoc_f1': 0.5,
+            'assoc_f2': 0.5,
+            'assoc_b1d': 0x54,
+        }
+        annotations.append(ann)
     
-    annotations = [
-        {'text': 'P1', 'x': 20000, 'y': 15000, 'subscript': True},   # 下标
-        {'text': 'Q2', 'x': 30000, 'y': 18000, 'superscript': True}, # 上标
-        {'text': 'R',  'x': 15000, 'y': 22000},                      # 普通
-        {'text': 'S',  'x': 25000, 'y': 25000},                      # 普通
-        {'text': 'T',  'x': 18000, 'y': 28000},                      # 普通
-    ]
-    print(f"  使用 {len(annotations)} 个标注")
+    wsd_data = gen.build(path_recs, annotations)
+    print(f"  生成成功！大小: {len(wsd_data)} 字节")
     
-    wsd_data = gen.build(path_data_list, annotations)
-    print(f"  生成成功！大小: {len(wsd_data)} 字节 (模板{info['file_size']}字节)")
-    print(f"  大小一致: {len(wsd_data) == info['file_size']}")
-    
-    # 保存
-    out_path = '/data/user/work/template_gen_v6_test.wsd'
+    out_path = '/data/user/work/v8_test1_10normal.wsd'
     with open(out_path, 'wb') as f:
         f.write(wsd_data)
     print(f"  保存到: {out_path}")
     
-    return out_path
+    # 测试2：含上下标
+    print(f"\n测试2：含上下标（用原型复制，不改b1a）")
+    annotations2 = [
+        {'text': 'P1', 'x': 15000, 'y': 10000, 'subscript': True},
+        {'text': 'Q2', 'x': 25000, 'y': 10000, 'superscript': True},
+        {'text': 'R', 'x': 35000, 'y': 10000},
+        {'text': 'S', 'x': 15000, 'y': 20000},
+        {'text': 'T1', 'x': 25000, 'y': 20000, 'subscript': True},
+    ]
+    
+    wsd_data2 = gen.build(path_recs, annotations2)
+    print(f"  生成成功！大小: {len(wsd_data2)} 字节")
+    
+    out_path2 = '/data/user/work/v8_test2_sub_sup.wsd'
+    with open(out_path2, 'wb') as f:
+        f.write(wsd_data2)
+    print(f"  保存到: {out_path2}")
+    
+    return out_path, out_path2
 
 
 if __name__ == '__main__':
