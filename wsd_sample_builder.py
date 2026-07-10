@@ -596,9 +596,10 @@ def _modify_text_from_template(template, text, x, y,
     """
     rec = bytearray(template)
     
-    # 设置坐标（i32 LE, 偏移0x0c和0x10）
-    struct.pack_into('<i', rec, 0x0c, int(x))
-    struct.pack_into('<i', rec, 0x10, int(y))
+    # 设置坐标（u16 LE, 偏移0x0d和0x11）
+    # 注意：文字坐标是16位无符号整数，与路径坐标在同一坐标系
+    struct.pack_into('<H', rec, 0x0d, int(x) & 0xffff)
+    struct.pack_into('<H', rec, 0x11, int(y) & 0xffff)
     
     # 设置上下标标志 (+0x1a, u16 LE)
     flags = 0

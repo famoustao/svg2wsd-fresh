@@ -757,9 +757,10 @@ def _parse_text_record(data, pos):
     ann = WSDTextAnnotation()
     ann.record_offset = pos
 
-    # 坐标
-    ann.x = struct.unpack_from('<i', data, pos + 0x0c)[0]
-    ann.y = struct.unpack_from('<i', data, pos + 0x10)[0]
+    # 坐标（u16 LE, 偏移0x0d和0x11）
+    # 注意：文字坐标是16位无符号整数，与路径坐标在同一坐标系
+    ann.x = struct.unpack_from('<H', data, pos + 0x0d)[0]
+    ann.y = struct.unpack_from('<H', data, pos + 0x11)[0]
 
     # 字体引用
     ann.font_ref = struct.unpack_from('<H', data, pos + 0x14)[0]
