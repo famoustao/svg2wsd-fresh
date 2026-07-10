@@ -8062,29 +8062,36 @@ def convert_geo_to_wsd(input_path, wsd_path,
                     associated, sx=sx, sy=sy, ox=ox, oy=oy
                 )
 
-                # 合并到WSD文件（优先使用基于样本的生成方式，确保能正常打开）
+                # 合并到WSD文件（优先使用基于模板的生成方式，确保标注可见）
                 if wsd_anns:
                     try:
-                        from wsd_sample_builder import build_wsd_sample_based
-                        import os
-                        from wsd_text import TEMPLATE_DIR
-                        sample_path = os.path.join(TEMPLATE_DIR, '几何_样本_三角+圆.wsd')
-                        if os.path.exists(sample_path):
-                            # 基于样本生成（最稳定方案）
-                            # 默认使用 FS Math Type 斜体
-                            wsd_data = build_wsd_sample_based(
-                                path_records, wsd_anns,
-                                font_name="FS Math Type",
-                                italic=True,
-                            )
-                        else:
-                            # 回退到旧的混合构建方式
+                        from wsd_template_gen import build_wsd_template_based
+                        # 基于模板生成（使用统一模板_全能.wsd，标注正常可见）
+                        wsd_data = build_wsd_template_based(
+                            path_records, wsd_anns,
+                            font_name="FS Math Type",
+                            italic=True,
+                        )
+                    except Exception as inner_e:
+                        print(f"基于模板生成失败，回退到样本生成: {inner_e}")
+                        try:
+                            from wsd_sample_builder import build_wsd_sample_based
+                            import os
+                            from wsd_text import TEMPLATE_DIR
+                            sample_path = os.path.join(TEMPLATE_DIR, '几何_样本_三角+圆.wsd')
+                            if os.path.exists(sample_path):
+                                wsd_data = build_wsd_sample_based(
+                                    path_records, wsd_anns,
+                                    font_name="FS Math Type",
+                                    italic=True,
+                                )
+                            else:
+                                from wsd_mixed_build import merge_geo_and_text
+                                wsd_data = merge_geo_and_text(wsd_data, wsd_anns)
+                        except Exception as inner_e2:
+                            print(f"样本生成也失败，回退到混合构建: {inner_e2}")
                             from wsd_mixed_build import merge_geo_and_text
                             wsd_data = merge_geo_and_text(wsd_data, wsd_anns)
-                    except Exception as inner_e:
-                        print(f"基于样本生成失败，回退到混合构建: {inner_e}")
-                        from wsd_mixed_build import merge_geo_and_text
-                        wsd_data = merge_geo_and_text(wsd_data, wsd_anns)
                     
                     # 重新写入文件
                     with open(wsd_path, 'wb') as f:
@@ -8364,24 +8371,33 @@ def convert_geo_to_wsd_multi(input_files, output_path, **kwargs):
 
             if all_wsd_anns:
                 try:
-                    from wsd_sample_builder import build_wsd_sample_based
-                    import os
-                    from wsd_text import TEMPLATE_DIR
-                    sample_path = os.path.join(TEMPLATE_DIR, '几何_样本_三角+圆.wsd')
-                    if os.path.exists(sample_path):
-                        # 默认使用 FS Math Type 斜体
-                        wsd_data = build_wsd_sample_based(
-                            paths, all_wsd_anns,
-                            font_name="FS Math Type",
-                            italic=True,
-                        )
-                    else:
+                    from wsd_template_gen import build_wsd_template_based
+                    # 基于模板生成（使用统一模板_全能.wsd，标注正常可见）
+                    wsd_data = build_wsd_template_based(
+                        paths, all_wsd_anns,
+                        font_name="FS Math Type",
+                        italic=True,
+                    )
+                except Exception as inner_e:
+                    print(f"基于模板生成失败，回退到样本生成: {inner_e}")
+                    try:
+                        from wsd_sample_builder import build_wsd_sample_based
+                        import os
+                        from wsd_text import TEMPLATE_DIR
+                        sample_path = os.path.join(TEMPLATE_DIR, '几何_样本_三角+圆.wsd')
+                        if os.path.exists(sample_path):
+                            wsd_data = build_wsd_sample_based(
+                                paths, all_wsd_anns,
+                                font_name="FS Math Type",
+                                italic=True,
+                            )
+                        else:
+                            from wsd_mixed_build import merge_geo_and_text
+                            wsd_data = merge_geo_and_text(wsd_data, all_wsd_anns)
+                    except Exception as inner_e2:
+                        print(f"样本生成也失败，回退到混合构建: {inner_e2}")
                         from wsd_mixed_build import merge_geo_and_text
                         wsd_data = merge_geo_and_text(wsd_data, all_wsd_anns)
-                except Exception as inner_e:
-                    print(f"基于样本生成失败，回退到混合构建: {inner_e}")
-                    from wsd_mixed_build import merge_geo_and_text
-                    wsd_data = merge_geo_and_text(wsd_data, all_wsd_anns)
                 if progress_cb:
                     progress_cb(f"已添加 {len(all_wsd_anns)} 个文字标注", 95)
         except Exception as e:
