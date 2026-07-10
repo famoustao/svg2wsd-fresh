@@ -25,6 +25,24 @@ from wsd_gt_build import (
     hex_to_bgra, rainbow_bgra, MM_TO_WSD,
 )
 
+# 增强版直线检测模块
+from wsd_line_enhanced import detect_lines_enhanced
+
+# 增强版几何检测模块（骨架修复、轮廓融合等）
+from wsd_geo_enhanced import (
+    repair_skeleton_breaks,
+    enhanced_geo_preprocess,
+    merge_contour_hough_lines,
+    estimate_detection_params,
+)
+
+# 增强版标注位置模块
+from wsd_label_enhanced import (
+    enhanced_label_placement,
+    enhanced_circle_label_placement,
+    enhanced_multi_shape_label_placement,
+)
+
 # 几何形状类型
 SHAPE_LINE = 'line'
 SHAPE_POLYLINE = 'polyline'
@@ -2219,9 +2237,9 @@ def _verify_line_straightness(skeleton, x1, y1, x2, y2, max_deviation=1.5):
     return avg_deviation <= max_deviation
 
 
-def _detect_lines_hough(gray, min_length=50, skeleton=None, threshold=30):
+def _detect_lines_hough_original(gray, min_length=50, skeleton=None, threshold=30):
     """
-    霍夫直线检测 + 直线度验证 + 合并共线线段
+    原始版霍夫直线检测 + 直线度验证 + 合并共线线段（保留作为备选）
 
     优先在骨架图上检测（如果提供），否则在灰度图的Canny边缘上检测。
     骨架图模式下会先进行直线度验证，过滤掉弯曲的线段（如圆弧），
@@ -2318,6 +2336,59 @@ def _detect_lines_hough(gray, min_length=50, skeleton=None, threshold=30):
         result.append(((float(x1), float(y1)), (float(x2), float(y2))))
 
     return result
+
+
+def _detect_lines_hough(gray, min_length=50, skeleton=None, threshold=30, use_enhanced=True):
+    """
+    霍夫直线检测（增强版）
+
+    增强版特性：
+    - SVD最小二乘拟合（支持任意角度，更稳定）
+    - 改进的共线合并（方向+偏移聚类，更大间隙容忍）
+    - 平行线合并（消除线宽双线）
+    - 端点精修（对齐到骨架端点）
+    - L型/T型延长到交点
+    - 改进的直线度验证（更高容忍度，中位数+均值双重判断）
+
+    参数:
+        gray: 灰度图像
+        min_length: 最小线段长度（像素）
+        skeleton: 骨架图像（优先使用，提供则在骨架图上检测）
+        threshold: 霍夫直线检测阈值（越小越灵敏）
+        use_enhanced: 是否使用增强版（默认True）
+
+    返回:
+        list of ((x1, y1), (x2, y2))
+    """
+    if use_enhanced:
+        try:
+            lines = detect_lines_enhanced(
+                gray, min_length=min_length,
+                skeleton=skeleton, threshold=threshold
+            )
+            # 验证返回格式兼容性
+            valid_lines = []
+            for ln in lines:
+                try:
+                    if (isinstance(ln, (tuple, list)) and len(ln) == 2
+                            and isinstance(ln[0], (tuple, list)) and len(ln[0]) == 2
+                            and isinstance(ln[1], (tuple, list)) and len(ln[1]) == 2):
+                        valid_lines.append(
+                            ((float(ln[0][0]), float(ln[0][1])),
+                             (float(ln[1][0]), float(ln[1][1])))
+                        )
+                except (TypeError, ValueError, IndexError):
+                    continue
+            if valid_lines:
+                return valid_lines
+        except Exception as e:
+            # 增强版失败时回退到原始版
+            import traceback
+            print(f"[警告] 增强直线检测失败，回退到原始版: {e}")
+            traceback.print_exc()
+
+    # 回退到原始版
+    return _detect_lines_hough_original(gray, min_length, skeleton, threshold)
 
 
 def _sample_skeleton_along_line(skeleton, x1, y1, x2, y2, step=1):
@@ -3585,6 +3656,16 @@ def detect_geometric_shapes(image_path, min_area=50, epsilon_ratio=0.01,
         binary = _preprocess_image(gray, enhance=True)
         # 骨架化（使用形态学快速版本，兼顾速度和效果）
         skeleton = _skeletonize(binary)
+        
+        # 骨架断裂修复：连接交叉处和细线处的小断裂
+        try:
+            h_skel, w_skel = skeleton.shape[:2]
+            max_gap = min(20, int(min(h_skel, w_skel) * 0.02))
+            skeleton = repair_skeleton_breaks(
+                skeleton, max_gap=max_gap, angle_thresh_deg=30
+            )
+        except Exception as e:
+            print(f"[提示] 骨架断裂修复跳过: {e}")
 
     # ========== 步骤1：霍夫圆检测（多尺度，在原图灰度图上检测） ==========
     if use_hough and num_circles != 0:
