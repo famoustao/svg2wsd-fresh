@@ -235,7 +235,8 @@ class ComicMode:
         将原始路径数据转换为 CanvasData 格式
 
         参数:
-            geo_paths: 路径记录列表（bytes 列表）
+            geo_paths: 子路径列表，每个子路径是 [(x,y), ...] 点列表
+                      每4个点为一段三次贝塞尔曲线 (p0, c1, c2, p3)
             text_annotations: 文字标注列表
             image_path: 源图像路径
             fill_colors: 填充颜色列表（可选）
@@ -247,23 +248,30 @@ class ComicMode:
         canvas_data.source_file = image_path
 
         # 转换路径记录为 Shape 对象
-        # 这里暂时将每条路径记录转为一个 BEZIER 类型的 Shape
-        # 实际应用中需要根据路径记录的具体类型来解析
-        for i, path_data in enumerate(geo_paths):
-            shape = Shape(
-                type=ShapeType.POLYGON,  # 默认为多边形，具体类型需进一步解析
-                points=[],  # 具体坐标点需要从 path_data 中提取
-                line_color=(0, 0, 0),
-                fill_color=None,
-                line_width=1.0,
-                extra={'raw_path_data': path_data}
-            )
-
-            # 如果有填充颜色，应用填充
+        # 每个子路径作为一个 BEZIER 类型的 Shape
+        all_points = []
+        for i, path_points in enumerate(geo_paths):
+            # path_points 是 [(x,y), ...] 贝塞尔曲线点列表
+            fill_color = None
             if fill_colors and i < len(fill_colors):
-                shape.fill_color = fill_colors[i]
+                fill_color = fill_colors[i]
 
+            shape = Shape(
+                type=ShapeType.BEZIER,
+                points=list(path_points),  # 直接用贝塞尔点列表
+                line_color=(0, 0, 0),
+                fill_color=fill_color,
+                line_width=1.0,
+                extra={}
+            )
             canvas_data.shapes.append(shape)
+            all_points.extend(path_points)
+
+        # 计算边界框
+        if all_points:
+            xs = [p[0] for p in all_points]
+            ys = [p[1] for p in all_points]
+            canvas_data.bbox = (min(xs), min(ys), max(xs), max(ys))
 
         # 转换文字标注
         for ann in text_annotations:

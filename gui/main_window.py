@@ -390,17 +390,20 @@ class MainWindow:
 
         # 漫画模式选项卡
         self.comic_tab = ttk.Frame(self.mode_notebook, style='TFrame')
-        self.mode_notebook.add(self.comic_tab, text=' 🎨 漫画模式 ')
+        self.mode_notebook.add(self.comic_tab, text='🎨 漫画模式')
 
         # 几何模式选项卡
         self.geo_tab = ttk.Frame(self.mode_notebook, style='TFrame')
-        self.mode_notebook.add(self.geo_tab, text=' 📐 几何模式 ')
+        self.mode_notebook.add(self.geo_tab, text=' 几何模式 ')
 
         # 绑定选项卡切换事件
         self.mode_notebook.bind(
             '<<NotebookTabChanged>>',
             self._on_mode_changed,
         )
+
+        # 初始化选项卡图标状态（第一个选中）
+        self.after(100, self._update_tab_icons)
 
     # ============================================================
     # 左侧控制面板
@@ -1028,8 +1031,22 @@ class MainWindow:
                                        after=self._file_card)
             self._comic_params_card.pack_forget()
 
+        # 更新选项卡图标（选中彩色，未选中灰色）
+        self._update_tab_icons()
+
         self._update_status(f'已切换到{"漫画模式" if current == 0 else "几何模式"}')
         self._on_param_changed()
+
+    def _update_tab_icons(self):
+        """更新模式选项卡图标：选中时彩色emoji，未选中时无图标"""
+        current = self.mode_notebook.index(self.mode_notebook.select())
+        # 漫画模式选项卡
+        if current == 0:
+            self.mode_notebook.tab(0, text='🎨 漫画模式')
+            self.mode_notebook.tab(1, text='  几何模式  ')
+        else:
+            self.mode_notebook.tab(0, text='  漫画模式  ')
+            self.mode_notebook.tab(1, text='📐 几何模式')
 
     def _on_comic_mode_changed(self):
         """漫画子模式切换时调整显示的参数项"""
@@ -1649,10 +1666,10 @@ class MainWindow:
         elif size == 'A3':
             return (420.0, 297.0)
         elif size == '正方形':
-            return (200.0, 200.0)
+            return (140.0, 140.0)
         else:
             # 自定义 - 使用默认正方形
-            return (200.0, 200.0)
+            return (140.0, 140.0)
 
     # ============================================================
     # 主循环

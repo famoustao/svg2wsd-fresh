@@ -469,6 +469,27 @@ class WsdPreviewCanvas(ZoomableCanvas):
         super().__init__(master, **kwargs)
         self._canvas_data: Optional[CanvasData] = None
 
+    def _get_content_origin(self) -> Tuple[float, float]:
+        """获取内容原点（bbox 的 min_x, min_y）"""
+        if self._canvas_data is not None:
+            min_x, min_y, _, _ = self._canvas_data.bbox
+            return (min_x, min_y)
+        return (0.0, 0.0)
+
+    def _to_canvas_x(self, x: float) -> float:
+        """内容坐标 -> 画布控件 x 坐标（考虑内容原点偏移）"""
+        ox, _ = self._get_content_origin()
+        return (x - ox) * self._zoom + self._offset_x
+
+    def _to_canvas_y(self, y: float) -> float:
+        """内容坐标 -> 画布控件 y 坐标（考虑内容原点偏移）"""
+        _, oy = self._get_content_origin()
+        return (y - oy) * self._zoom + self._offset_y
+
+    def _to_canvas_size(self, size: float) -> float:
+        """内容尺寸 -> 画布控件尺寸"""
+        return size * self._zoom
+
     def set_canvas_data(self, canvas_data: CanvasData):
         """
         设置 WSD 预览数据
@@ -885,6 +906,9 @@ class PreviewPanel(ttk.Frame):
 
         # 初始显示 WSD 预览页
         self.notebook.select(self.ws_tab)
+        self._active_canvas = self.wsd_canvas
+        # 初始化选项卡图标
+        self._update_preview_tab_icons(self.ws_tab)
 
     # --------------------------------------------------------
     # UI 构建
@@ -898,35 +922,36 @@ class PreviewPanel(ttk.Frame):
 
         # --- 原图预览页 ---
         self.image_tab = ttk.Frame(self.notebook)
-        self.notebook.add(self.image_tab, text=' 🖼 原图 ')
+        self.notebook.add(self.image_tab, text='  原图  ')
         self.image_canvas = ImagePreviewCanvas(self.image_tab)
         self.image_canvas.pack(fill=tk.BOTH, expand=True)
         self.image_canvas.on_zoom_changed(self._on_zoom_changed)
 
         # --- WSD 预览页 ---
         self.ws_tab = ttk.Frame(self.notebook)
-        self.notebook.add(self.ws_tab, text=' ✏️ WSD ')
+        self.notebook.add(self.ws_tab, text='✏️ WSD')
         self.wsd_canvas = WsdPreviewCanvas(self.ws_tab)
         self.wsd_canvas.pack(fill=tk.BOTH, expand=True)
         self.wsd_canvas.on_zoom_changed(self._on_zoom_changed)
 
         # --- SVG 预览页 ---
         self.svg_tab = ttk.Frame(self.notebook)
-        self.notebook.add(self.svg_tab, text=' 📄 SVG ')
+        self.notebook.add(self.svg_tab, text='  SVG  ')
         self.svg_canvas = PlaceholderPreviewCanvas(self.svg_tab, title='SVG')
         self.svg_canvas.pack(fill=tk.BOTH, expand=True)
         self.svg_canvas.on_zoom_changed(self._on_zoom_changed)
 
         # --- LaTeX 预览页 ---
         self.latex_tab = ttk.Frame(self.notebook)
-        self.notebook.add(self.latex_tab, text=' 📝 LaTeX ')
+        self.notebook.add(self.latex_tab, text=' LaTeX ')
         self.latex_canvas = PlaceholderPreviewCanvas(self.latex_tab, title='LaTeX')
         self.latex_canvas.pack(fill=tk.BOTH, expand=True)
         self.latex_canvas.on_zoom_changed(self._on_zoom_changed)
 
         # --- GGB 预览页 ---
         self.ggb_tab = ttk.Frame(self.notebook)
-        self.notebook.add(self.ggb_tab, text=' 📊 GGB ')
+        self.ggb_tab_text = ' GGB '
+        self.notebook.add(self.ggb_tab, text=' GGB ')
         self.ggb_canvas = PlaceholderPreviewCanvas(self.ggb_tab, title='GGB')
         self.ggb_canvas.pack(fill=tk.BOTH, expand=True)
         self.ggb_canvas.on_zoom_changed(self._on_zoom_changed)
@@ -1025,9 +1050,41 @@ class PreviewPanel(ttk.Frame):
         else:
             self._active_canvas = None
 
+        # 更新选项卡图标（选中时彩色emoji，未选中时无图标）
+        self._update_preview_tab_icons(tab_widget)
+
         # 同步缩放显示
         if self._active_canvas is not None:
             self._update_zoom_display(self._active_canvas.get_zoom())
+
+    def _update_preview_tab_icons(self, active_tab_widget):
+        """更新预览选项卡图标：选中时彩色emoji，未选中时无图标"""
+        icon_map = {
+            'image_tab': '🖼',
+            'ws_tab': '✏️',
+            'svg_tab': '📄',
+            'latex_tab': '📝',
+            'ggb_tab': '📊',
+        }
+        name_map = {
+            'image_tab': '原图',
+            'ws_tab': 'WSD',
+            'svg_tab': 'SVG',
+            'latex_tab': 'LaTeX',
+            'ggb_tab': 'GGB',
+        }
+        tab_widgets = {
+            'image_tab': self.image_tab,
+            'ws_tab': self.ws_tab,
+            'svg_tab': self.svg_tab,
+            'latex_tab': self.latex_tab,
+            'ggb_tab': self.ggb_tab,
+        }
+        for key, widget in tab_widgets.items():
+            if widget is active_tab_widget:
+                self.notebook.tab(widget, text=f'{icon_map[key]} {name_map[key]}')
+            else:
+                self.notebook.tab(widget, text=f'  {name_map[key]}  ')
 
     @property
     def active_canvas(self) -> Optional[ZoomableCanvas]:

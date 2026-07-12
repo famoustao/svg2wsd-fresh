@@ -86,9 +86,9 @@ def _ensure_wsb_loaded():
 # 常量
 # ============================================================
 
-# 默认画布尺寸：正方形（mm）
-DEFAULT_CANVAS_WIDTH_MM = 200.0
-DEFAULT_CANVAS_HEIGHT_MM = 200.0
+# 默认画布尺寸：正方形（A4宽度的2/3，约140mm）
+DEFAULT_CANVAS_WIDTH_MM = 140.0
+DEFAULT_CANVAS_HEIGHT_MM = 140.0
 
 
 # ============================================================
@@ -532,7 +532,7 @@ def export_wsd_single(canvas_data: CanvasData,
     参数:
         canvas_data: CanvasData 画布数据
         output_path: 输出 WSD 文件路径
-        canvas_size_mm: 画布尺寸 (宽mm, 高mm)，None=默认正方形(200x200)
+        canvas_size_mm: 画布尺寸 (宽mm, 高mm)，None=默认正方形(140x140)
         linewidth: 线宽（WSD单位），默认 80（0.2mm）
 
     返回:
