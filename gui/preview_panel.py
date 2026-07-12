@@ -441,7 +441,7 @@ class ImagePreviewCanvas(ZoomableCanvas):
         """
         self._image = image
         self._photo_image = None
-        self.zoom_reset()
+        self.fit_to_view()
 
     def _get_content_size(self) -> Tuple[float, float]:
         if self._image is not None:

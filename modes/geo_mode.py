@@ -125,71 +125,107 @@ class GeometryMode:
         shapes = []
 
         # 1. 图像预处理
+        import cv2
         if svg2wsd_geo is not None and hasattr(svg2wsd_geo, '_preprocess_image'):
             enhanced = svg2wsd_geo._preprocess_image(gray_img, enhance=True)
         else:
-            enhanced = gray_img
+            # Fallback: 自适应阈值 + 形态学操作增强图像
+            # 自适应二值化
+            enhanced = cv2.adaptiveThreshold(
+                gray_img, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                cv2.THRESH_BINARY_INV, 11, 2
+            )
+            # 形态学闭操作，填充小空洞
+            kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (2, 2))
+            enhanced = cv2.morphologyEx(enhanced, cv2.MORPH_CLOSE, kernel)
 
         # 2. 骨架化
         if svg2wsd_geo is not None and hasattr(svg2wsd_geo, '_skeletonize'):
             skeleton = svg2wsd_geo._skeletonize(enhanced)
         else:
-            skeleton = enhanced
+            # Fallback: 简单的骨架化（形态细化）
+            skeleton = enhanced.copy()
+            kernel = cv2.getStructuringElement(cv2.MORPH_CROSS, (3, 3))
+            prev = np.zeros(skeleton.shape, np.uint8)
+            for _ in range(5):
+                eroded = cv2.erode(skeleton, kernel)
+                temp = cv2.dilate(eroded, kernel)
+                temp = cv2.subtract(skeleton, temp)
+                skeleton = eroded.copy()
+                if cv2.countNonZero(skeleton) == 0:
+                    break
         self._skeleton = skeleton
 
         # 3. 霍夫直线检测
+        has_hough_lines = False
         if svg2wsd_geo is not None and hasattr(svg2wsd_geo, '_detect_lines_hough'):
-            lines_result = svg2wsd_geo._detect_lines_hough(
-                gray_img,
-                min_length=min_line_length,
-                skeleton=skeleton,
-                threshold=30,
+            try:
+                lines_result = svg2wsd_geo._detect_lines_hough(
+                    gray_img,
+                    min_length=min_line_length,
+                    skeleton=skeleton,
+                    threshold=30,
+                )
+                # 转换格式: ((x1,y1), (x2,y2)) -> (x1, y1, x2, y2)
+                lines = []
+                for ln in lines_result:
+                    if len(ln) == 2 and len(ln[0]) == 2:
+                        lines.append((ln[0][0], ln[0][1], ln[1][0], ln[1][1]))
+                    elif len(ln) == 4:
+                        lines.append(tuple(ln))
+                has_hough_lines = True
+            except Exception:
+                has_hough_lines = False
+
+        if not has_hough_lines:
+            # Fallback: 使用轮廓检测 + 多边形近似来提取线段
+            contours, _ = cv2.findContours(
+                enhanced, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE
             )
-            # 转换格式: ((x1,y1), (x2,y2)) -> (x1, y1, x2, y2)
-            lines = []
-            for ln in lines_result:
-                if len(ln) == 2 and len(ln[0]) == 2:
-                    lines.append((ln[0][0], ln[0][1], ln[1][0], ln[1][1]))
-                elif len(ln) == 4:
-                    lines.append(tuple(ln))
-        else:
-            # fallback: 简单轮廓检测
-            import cv2
-            contours, _ = cv2.findContours(enhanced, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
             lines = []
             for cnt in contours:
-                if len(cnt) >= 2:
-                    # 取首尾两点作为直线，格式: (x1, y1, x2, y2)
-                    x1, y1 = cnt[0][0][0], cnt[0][0][1]
-                    x2, y2 = cnt[-1][0][0], cnt[-1][0][1]
-                    lines.append((x1, y1, x2, y2))
+                area = cv2.contourArea(cnt)
+                if area < min_area:
+                    continue
+                # 多边形近似
+                epsilon = approx_accuracy * cv2.arcLength(cnt, True)
+                approx = cv2.approxPolyDP(cnt, epsilon, True)
+                # 提取每条边作为线段
+                for i in range(len(approx)):
+                    x1, y1 = approx[i][0]
+                    x2, y2 = approx[(i + 1) % len(approx)][0]
+                    length = np.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2)
+                    if length >= min_line_length:
+                        lines.append((float(x1), float(y1), float(x2), float(y2)))
 
         # 合并平行和共线线段
-        # _merge_parallel_lines 返回 (rho, theta, best_pts) 格式 (3元素)
-        #   best_pts = (x1, y1, x2, y2) (4元素)
-        # _merge_colinear_segments 期望 (x1, y1, x2, y2) 格式
         if svg2wsd_geo is not None and hasattr(svg2wsd_geo, '_merge_parallel_lines'):
-            parallel_result = svg2wsd_geo._merge_parallel_lines(
-                lines, dist_thresh=10, angle_thresh=3)
-            # 转换回 (x1, y1, x2, y2) 格式
-            lines = []
-            for item in parallel_result:
-                if len(item) == 3:
-                    # (rho, theta, best_pts), best_pts = (x1,y1,x2,y2)
-                    best_pts = item[2]
-                    if isinstance(best_pts, (list, tuple)) and len(best_pts) == 4:
-                        lines.append(tuple(best_pts))
+            try:
+                parallel_result = svg2wsd_geo._merge_parallel_lines(
+                    lines, dist_thresh=10, angle_thresh=3)
+                # 转换回 (x1, y1, x2, y2) 格式
+                lines = []
+                for item in parallel_result:
+                    if len(item) == 3:
+                        best_pts = item[2]
+                        if isinstance(best_pts, (list, tuple)) and len(best_pts) == 4:
+                            lines.append(tuple(best_pts))
+            except Exception:
+                pass
+
         if svg2wsd_geo is not None and hasattr(svg2wsd_geo, '_merge_colinear_segments'):
-            colinear_result = svg2wsd_geo._merge_colinear_segments(
-                lines, angle_thresh=3, dist_thresh=20)
-            # 统一转换为 (x1, y1, x2, y2) 格式
-            if colinear_result and len(colinear_result) > 0:
-                first = colinear_result[0]
-                if len(first) == 4 and all(isinstance(v, (int, float)) for v in first):
-                    lines = colinear_result
-                elif len(first) >= 2 and isinstance(first[0], (list, tuple)):
-                    # ((x1,y1), (x2,y2)) 格式
-                    lines = [(f[0][0], f[0][1], f[1][0], f[1][1]) for f in colinear_result if len(f) >= 2]
+            try:
+                colinear_result = svg2wsd_geo._merge_colinear_segments(
+                    lines, angle_thresh=3, dist_thresh=20)
+                if colinear_result and len(colinear_result) > 0:
+                    first = colinear_result[0]
+                    if len(first) == 4 and all(isinstance(v, (int, float)) for v in first):
+                        lines = colinear_result
+                    elif len(first) >= 2 and isinstance(first[0], (list, tuple)):
+                        lines = [(f[0][0], f[0][1], f[1][0], f[1][1])
+                                 for f in colinear_result if len(f) >= 2]
+            except Exception:
+                pass
 
         # 转换直线为 Shape 对象
         for line in lines:
@@ -205,23 +241,54 @@ class GeometryMode:
             shapes.append(shape)
 
         # 4. 霍夫圆检测
+        circles = []
         if svg2wsd_geo is not None and hasattr(svg2wsd_geo, '_detect_circles_hough'):
-            circles = svg2wsd_geo._detect_circles_hough(
-                gray_img,
-                min_radius=min_radius,
-                skeleton=skeleton,
-                param2_base=hough_circle_sensitivity,
-            )
-        else:
-            circles = []
+            try:
+                circles = svg2wsd_geo._detect_circles_hough(
+                    gray_img,
+                    min_radius=min_radius,
+                    skeleton=skeleton,
+                    param2_base=hough_circle_sensitivity,
+                )
+            except Exception:
+                circles = []
+
+        if not circles and circle_count > 0:
+            # Fallback: 使用 OpenCV 的霍夫圆检测
+            import cv2
+            try:
+                # 先做模糊处理减少噪声
+                blurred = cv2.medianBlur(gray_img, 5)
+                # 霍夫圆检测
+                circles_cv = cv2.HoughCircles(
+                    blurred,
+                    cv2.HOUGH_GRADIENT,
+                    dp=1.2,
+                    minDist=20,
+                    param1=50,
+                    param2=hough_circle_sensitivity,
+                    minRadius=min_radius,
+                    maxRadius=max_radius if max_radius > 0 else 0,
+                )
+                if circles_cv is not None:
+                    circles_cv = circles_cv[0]  # 取第一组结果
+                    # 转换格式：(x, y, r) -> 列表
+                    circles = [(float(c[0]), float(c[1]), float(c[2]))
+                               for c in circles_cv]
+            except Exception:
+                circles = []
 
         # 圆非极大值抑制（去重）
         if svg2wsd_geo is not None and hasattr(svg2wsd_geo, '_nms_circles') and circles:
-            circles = svg2wsd_geo._nms_circles(circles, overlap_thresh=0.15)
+            try:
+                circles = svg2wsd_geo._nms_circles(circles, overlap_thresh=0.15)
+            except Exception:
+                pass
 
         # 限制圆数量
         if circle_count > 0 and len(circles) > circle_count:
-            # 按置信度排序（如果有），取前 N 个
+            # 按半径排序（大的在前），取前 N 个
+            circles.sort(key=lambda c: c[2], reverse=True)
             circles = circles[:circle_count]
 
         # 转换圆为 Shape 对象
@@ -238,15 +305,17 @@ class GeometryMode:
             shapes.append(shape)
 
         # 5. 圆弧检测
+        arcs = []
         if svg2wsd_geo is not None and hasattr(svg2wsd_geo, '_detect_arc_hough'):
-            arcs = svg2wsd_geo._detect_arc_hough(
-                gray_img,
-                skeleton,
-                min_radius=min_radius,
-                max_radius=max_radius,
-            )
-        else:
-            arcs = []
+            try:
+                arcs = svg2wsd_geo._detect_arc_hough(
+                    gray_img,
+                    skeleton,
+                    min_radius=min_radius,
+                    max_radius=max_radius,
+                )
+            except Exception:
+                arcs = []
 
         # 转换圆弧为 Shape 对象
         for arc in arcs:
@@ -274,8 +343,77 @@ class GeometryMode:
             shapes.append(shape)
 
         # 6. 多边形拟合（从轮廓中提取三角形、四边形等）
-        # TODO: 实现轮廓分析 + 多边形近似
-        # 此处预留接口，后续完善
+        import cv2
+        try:
+            contours, _ = cv2.findContours(
+                enhanced, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+            )
+            for cnt in contours:
+                area = cv2.contourArea(cnt)
+                if area < min_area:
+                    continue
+
+                # 计算轮廓的周长
+                perimeter = cv2.arcLength(cnt, True)
+                if perimeter == 0:
+                    continue
+
+                # 多边形近似
+                epsilon = approx_accuracy * perimeter
+                approx = cv2.approxPolyDP(cnt, epsilon, True)
+                num_vertices = len(approx)
+
+                # 计算边界框和宽高比
+                x, y, w, h = cv2.boundingRect(approx)
+                aspect_ratio = float(w) / h if h > 0 else 1.0
+
+                # 根据顶点数判断形状类型
+                if num_vertices == 3:
+                    # 三角形
+                    points = [(float(p[0][0]), float(p[0][1])) for p in approx]
+                    shape = Shape(
+                        type=ShapeType.POLYGON,
+                        points=points,
+                        line_color=(0, 0, 0),
+                        fill_color=None,
+                        line_width=1.0,
+                        extra={'num_sides': 3, 'shape_type': 'triangle'}
+                    )
+                    shapes.append(shape)
+                elif num_vertices == 4:
+                    # 四边形（矩形、正方形、平行四边形等）
+                    points = [(float(p[0][0]), float(p[0][1])) for p in approx]
+                    # 判断是否为矩形（通过角点检测）
+                    shape_type = 'quadrilateral'
+                    # 简单判断：宽高比接近且面积接近边界框面积则为矩形
+                    rect_area = w * h
+                    if rect_area > 0:
+                        fill_ratio = area / rect_area
+                        if fill_ratio > 0.9:
+                            shape_type = 'rectangle'
+                    shape = Shape(
+                        type=ShapeType.POLYGON,
+                        points=points,
+                        line_color=(0, 0, 0),
+                        fill_color=None,
+                        line_width=1.0,
+                        extra={'num_sides': 4, 'shape_type': shape_type}
+                    )
+                    shapes.append(shape)
+                elif 5 <= num_vertices <= 8:
+                    # 多边形（5-8边）
+                    points = [(float(p[0][0]), float(p[0][1])) for p in approx]
+                    shape = Shape(
+                        type=ShapeType.POLYGON,
+                        points=points,
+                        line_color=(0, 0, 0),
+                        fill_color=None,
+                        line_width=1.0,
+                        extra={'num_sides': num_vertices, 'shape_type': 'polygon'}
+                    )
+                    shapes.append(shape)
+        except Exception:
+            pass
 
         return shapes
 
@@ -327,6 +465,7 @@ class GeometryMode:
 
         # 1. 使用 wsd_letter_recognizer 识别字母
         letter_annotations = []
+        has_letter_recog = False
         if wsd_letter_recognizer is not None and hasattr(wsd_letter_recognizer, 'recognize_letters_from_image'):
             try:
                 recognize_result = wsd_letter_recognizer.recognize_letters_from_image(
@@ -339,8 +478,90 @@ class GeometryMode:
                     letter_annotations = recognize_result
                 elif isinstance(recognize_result, dict):
                     letter_annotations = recognize_result.get('annotations', [])
+                has_letter_recog = len(letter_annotations) > 0
             except Exception:
                 letter_annotations = []
+                has_letter_recog = False
+
+        # Fallback: 如果没有专业识别器，尝试使用 pytesseract OCR
+        if not has_letter_recog and enable_ocr:
+            try:
+                import cv2
+                # 转换为灰度图
+                gray = cv2.cvtColor(img_color, cv2.COLOR_BGR2GRAY)
+                # 自适应阈值增强
+                thresh = cv2.adaptiveThreshold(
+                    gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                    cv2.THRESH_BINARY, 11, 2
+                )
+
+                # 尝试使用 pytesseract
+                try:
+                    import pytesseract
+                    # 只识别英文和数字
+                    ocr_config = '--psm 6 -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789'
+                    text = pytesseract.image_to_string(thresh, config=ocr_config)
+                    if text.strip():
+                        # 获取文本框位置
+                        try:
+                            data = pytesseract.image_to_data(
+                                thresh, config=ocr_config,
+                                output_type=pytesseract.Output.DICT
+                            )
+                            n_boxes = len(data['text'])
+                            for i in range(n_boxes):
+                                if int(data['conf'][i]) >= min_confidence * 100:
+                                    text_val = data['text'][i].strip()
+                                    if text_val:
+                                        x = data['left'][i] + data['width'][i] / 2
+                                        y = data['top'][i] + data['height'][i] / 2
+                                        font_size = max(12, data['height'][i])
+                                        letter_annotations.append({
+                                            'text': text_val,
+                                            'x': float(x),
+                                            'y': float(y),
+                                            'font_size': float(font_size),
+                                            'superscript': False,
+                                            'subscript': False,
+                                            'associated': False,
+                                        })
+                        except Exception:
+                            # 如果无法获取位置，就在图像中心放一个标注
+                            h, w = img_color.shape[:2]
+                            letter_annotations.append({
+                                'text': text.strip(),
+                                'x': float(w / 2),
+                                'y': float(h / 2),
+                                'font_size': 24.0,
+                                'superscript': False,
+                                'subscript': False,
+                                'associated': False,
+                            })
+                except ImportError:
+                    # pytesseract 不可用，使用简单的轮廓检测找文字区域
+                    contours, _ = cv2.findContours(
+                        thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+                    )
+                    # 按面积排序，找可能的文字区域
+                    contours = sorted(contours, key=cv2.contourArea, reverse=True)
+                    for i, cnt in enumerate(contours[:10]):  # 最多找10个
+                        area = cv2.contourArea(cnt)
+                        if area < 50 or area > 5000:  # 文字大小范围
+                            continue
+                        x, y, w, h = cv2.boundingRect(cnt)
+                        aspect_ratio = w / h if h > 0 else 1
+                        if 0.2 < aspect_ratio < 5:  # 文字的宽高比范围
+                            letter_annotations.append({
+                                'text': f'字{i+1}',
+                                'x': float(x + w / 2),
+                                'y': float(y + h / 2),
+                                'font_size': float(max(h, w)),
+                                'superscript': False,
+                                'subscript': False,
+                                'associated': False,
+                            })
+            except Exception:
+                pass
 
         # 2. 将识别结果转换为 TextAnnotation 列表
         for letter in letter_annotations:
@@ -357,25 +578,48 @@ class GeometryMode:
                 annotations.append(ann)
 
         # 3. 自动关联字母到几何形状
-        if auto_label and shapes and annotations and wsd_letter_recognizer is not None:
+        if auto_label and shapes and annotations:
             h, w = img_color.shape[:2]
-            if hasattr(wsd_letter_recognizer, 'associate_letters_to_geometry'):
-                try:
-                    associated = wsd_letter_recognizer.associate_letters_to_geometry(
-                        annotations, shapes,
-                    )
-                    if associated:
-                        annotations = associated
-                except Exception:
-                    pass
-            if hasattr(wsd_letter_recognizer, 'optimize_annotation_positions'):
-                try:
-                    annotations = wsd_letter_recognizer.optimize_annotation_positions(
-                        annotations, shapes,
-                        img_size=(w, h),
-                    )
-                except Exception:
-                    pass
+            associated_success = False
+            if wsd_letter_recognizer is not None:
+                if hasattr(wsd_letter_recognizer, 'associate_letters_to_geometry'):
+                    try:
+                        associated = wsd_letter_recognizer.associate_letters_to_geometry(
+                            annotations, shapes,
+                        )
+                        if associated:
+                            annotations = associated
+                            associated_success = True
+                    except Exception:
+                        pass
+                if hasattr(wsd_letter_recognizer, 'optimize_annotation_positions'):
+                    try:
+                        annotations = wsd_letter_recognizer.optimize_annotation_positions(
+                            annotations, shapes,
+                            img_size=(w, h),
+                        )
+                    except Exception:
+                        pass
+
+            # Fallback: 简单的距离匹配，将字母关联到最近的形状
+            if not associated_success and shapes and annotations:
+                for ann in annotations:
+                    # 找最近的形状
+                    min_dist = float('inf')
+                    nearest_shape = None
+                    for shape in shapes:
+                        # 计算形状中心点
+                        shape_pts = shape.points
+                        if shape_pts:
+                            cx = sum(p[0] for p in shape_pts) / len(shape_pts)
+                            cy = sum(p[1] for p in shape_pts) / len(shape_pts)
+                            dist = np.sqrt((ann.x - cx) ** 2 + (ann.y - cy) ** 2)
+                            if dist < min_dist:
+                                min_dist = dist
+                                nearest_shape = shape
+                    if nearest_shape is not None:
+                        ann.associated = True
+                        ann.associated_shape = id(nearest_shape)
 
         # 4. 删除字母形状的线条
         if remove_letter_lines and annotations:

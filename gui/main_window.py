@@ -802,7 +802,7 @@ class MainWindow:
         )
         self.auto_label_cb.pack(side='left')
 
-        # 对称性检测（一行排列）
+        # 对称性检测（两行排列）
         sym_frame = tk.Frame(content, bg=get_color('card'))
         sym_frame.pack(fill='x', pady=(2, 0))
 
@@ -812,7 +812,7 @@ class MainWindow:
             bg=get_color('card'),
             fg=get_color('text'),
             font=('Microsoft YaHei UI', 9),
-        ).pack(side='left')
+        ).grid(row=0, column=0, sticky='w', padx=(0, 4), pady=1)
 
         self.sym_axis_var = tk.BooleanVar(value=True)
         tk.Checkbutton(
@@ -825,7 +825,7 @@ class MainWindow:
             selectcolor=get_color('card'),
             activebackground=get_color('card'),
             command=self._on_param_changed,
-        ).pack(side='left', padx=(4, 8))
+        ).grid(row=0, column=1, sticky='w', padx=(0, 12), pady=1)
 
         self.sym_rotate_var = tk.BooleanVar(value=False)
         tk.Checkbutton(
@@ -838,7 +838,7 @@ class MainWindow:
             selectcolor=get_color('card'),
             activebackground=get_color('card'),
             command=self._on_param_changed,
-        ).pack(side='left', padx=(0, 8))
+        ).grid(row=0, column=2, sticky='w', padx=(0, 12), pady=1)
 
         self.sym_center_var = tk.BooleanVar(value=False)
         tk.Checkbutton(
@@ -851,7 +851,7 @@ class MainWindow:
             selectcolor=get_color('card'),
             activebackground=get_color('card'),
             command=self._on_param_changed,
-        ).pack(side='left', padx=(0, 8))
+        ).grid(row=1, column=1, sticky='w', padx=(0, 12), pady=1)
 
         self.sym_rightangle_var = tk.BooleanVar(value=True)
         tk.Checkbutton(
@@ -864,7 +864,7 @@ class MainWindow:
             selectcolor=get_color('card'),
             activebackground=get_color('card'),
             command=self._on_param_changed,
-        ).pack(side='left', padx=(0, 8))
+        ).grid(row=1, column=2, sticky='w', padx=(0, 12), pady=1)
 
     def _build_output_settings_card(self, parent):
         """构建输出设置卡片"""
