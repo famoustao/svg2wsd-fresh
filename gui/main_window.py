@@ -361,72 +361,27 @@ class MainWindow:
     # ============================================================
 
     def _build_top_bar(self, parent):
-        """构建顶部工具栏（模式选项卡 + 公用按钮栏）"""
+        """构建顶部工具栏（模式选项卡）"""
         top_bar = ttk.Frame(parent, style='TFrame')
         top_bar.pack(fill='x', padx=8, pady=(8, 4))
 
         # 模式选项卡（Notebook）
-        self.mode_notebook = ttk.Notebook(top_bar, style='Card.TNotebook')
+        self.mode_notebook = ttk.Notebook(top_bar, style='Flat.TNotebook')
         self.mode_notebook.pack(fill='x')
 
         # 漫画模式选项卡
-        self.comic_tab = ttk.Frame(self.mode_notebook, style='Card.TFrame')
-        self.mode_notebook.add(self.comic_tab, text='🎨 漫画模式')
+        self.comic_tab = ttk.Frame(self.mode_notebook, style='TFrame')
+        self.mode_notebook.add(self.comic_tab, text='  漫画模式  ')
 
         # 几何模式选项卡
-        self.geo_tab = ttk.Frame(self.mode_notebook, style='Card.TFrame')
-        self.mode_notebook.add(self.geo_tab, text='📐 几何模式')
+        self.geo_tab = ttk.Frame(self.mode_notebook, style='TFrame')
+        self.mode_notebook.add(self.geo_tab, text='  几何模式  ')
 
         # 绑定选项卡切换事件
         self.mode_notebook.bind(
             '<<NotebookTabChanged>>',
             self._on_mode_changed,
         )
-
-        # 公用按钮栏（选项卡下方）
-        self._build_toolbar(top_bar)
-
-    def _build_toolbar(self, parent):
-        """构建公用按钮栏"""
-        toolbar = tk.Frame(parent, bg=get_color('card'), padx=8, pady=8)
-        toolbar.pack(fill='x', pady=(4, 0))
-
-        # 导入按钮
-        self.import_btn = ttk.Button(
-            toolbar,
-            text='📂 导入',
-            command=self._on_import_clicked,
-        )
-        self.import_btn.pack(side='left', padx=4)
-
-        # 画布设置按钮
-        self.canvas_setup_btn = ttk.Button(
-            toolbar,
-            text='🖼 画布设置',
-            command=self._on_canvas_setup_clicked,
-        )
-        self.canvas_setup_btn.pack(side='left', padx=4)
-
-        # 批量处理按钮
-        self.batch_btn = ttk.Button(
-            toolbar,
-            text='📦 批量处理',
-            command=self._on_batch_clicked,
-        )
-        self.batch_btn.pack(side='left', padx=4)
-
-        # 右侧分隔
-        ttk.Separator(toolbar, orient='vertical').pack(
-            side='left', fill='y', padx=8,
-        )
-
-        # 帮助按钮
-        self.help_btn = ttk.Button(
-            toolbar,
-            text='❓ 帮助',
-            command=self._on_help_clicked,
-        )
-        self.help_btn.pack(side='right', padx=4)
 
     # ============================================================
     # 左侧控制面板

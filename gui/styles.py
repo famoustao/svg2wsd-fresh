@@ -479,6 +479,34 @@ def _configure_notebook(style):
         ],
     )
 
+    # 扁平化 Notebook 样式 - 只用明暗区分选中状态，大小一致
+    style.configure(
+        'Flat.TNotebook',
+        background=COLOR_BACKGROUND,
+        borderwidth=0,
+    )
+
+    style.configure(
+        'Flat.TNotebook.Tab',
+        background=COLOR_BACKGROUND,
+        foreground=COLOR_TEXT_SECONDARY,
+        font=('Microsoft YaHei UI', 10),
+        padding=(16, 8),
+        borderwidth=0,
+    )
+
+    style.map(
+        'Flat.TNotebook.Tab',
+        background=[
+            ('selected', COLOR_CARD),
+            ('active', COLOR_BORDER),
+        ],
+        foreground=[
+            ('selected', COLOR_TEXT),
+            ('active', COLOR_TEXT),
+        ],
+    )
+
 
 def _configure_progressbar(self):
     """配置进度条样式"""

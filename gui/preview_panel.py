@@ -134,13 +134,19 @@ class ZoomableCanvas(ttk.Frame):
         self.canvas.bind('<Button-4>', self._on_mousewheel_linux_up)
         self.canvas.bind('<Button-5>', self._on_mousewheel_linux_down)
 
-        # 拖拽平移 - 中键或右键
+        # 拖拽平移 - 左键、中键或右键
+        self.canvas.bind('<ButtonPress-1>', self._on_drag_start)
         self.canvas.bind('<ButtonPress-2>', self._on_drag_start)
         self.canvas.bind('<ButtonPress-3>', self._on_drag_start)
+        self.canvas.bind('<B1-Motion>', self._on_drag_motion)
         self.canvas.bind('<B2-Motion>', self._on_drag_motion)
         self.canvas.bind('<B3-Motion>', self._on_drag_motion)
+        self.canvas.bind('<ButtonRelease-1>', self._on_drag_end)
         self.canvas.bind('<ButtonRelease-2>', self._on_drag_end)
         self.canvas.bind('<ButtonRelease-3>', self._on_drag_end)
+
+        # 鼠标样式 - 手型光标表示可拖拽
+        self.canvas.configure(cursor='fleur')
 
         # 画布大小变化
         self.canvas.bind('<Configure>', self._on_canvas_configure)
