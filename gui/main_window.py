@@ -460,9 +460,6 @@ class MainWindow:
         # 4. 输出设置区
         self._build_output_settings_card(inner)
 
-        # 5. 操作按钮区
-        self._build_action_buttons_card(inner)
-
         # 初始显示漫画模式参数，隐藏几何模式参数
         self._geo_params_card.pack_forget()
 
@@ -476,33 +473,52 @@ class MainWindow:
 
         content = self._file_card.content
 
-        # 按钮行
-        btn_frame = tk.Frame(content, bg=get_color('card'))
-        btn_frame.pack(fill='x', pady=(0, 8))
+        # 第一行按钮：添加、移除、清空
+        btn_frame1 = tk.Frame(content, bg=get_color('card'))
+        btn_frame1.pack(fill='x', pady=(0, 8))
 
         self.add_file_btn = ttk.Button(
-            btn_frame,
+            btn_frame1,
             text='添加',
             command=self._on_add_file,
             width=8,
         )
-        self.add_file_btn.pack(side='left', padx=(0, 8))
+        self.add_file_btn.pack(side='left', padx=(0, 6))
 
         self.remove_file_btn = ttk.Button(
-            btn_frame,
+            btn_frame1,
             text='移除',
             command=self._on_remove_file,
             width=8,
         )
-        self.remove_file_btn.pack(side='left', padx=8)
+        self.remove_file_btn.pack(side='left', padx=6)
 
         self.clear_file_btn = ttk.Button(
-            btn_frame,
+            btn_frame1,
             text='清空',
             command=self._on_clear_files,
             width=8,
         )
-        self.clear_file_btn.pack(side='left', padx=8)
+        self.clear_file_btn.pack(side='left', padx=6)
+
+        # 第二行按钮：更新预览、开始转换并导出
+        btn_frame2 = tk.Frame(content, bg=get_color('card'))
+        btn_frame2.pack(fill='x', pady=(0, 10))
+
+        self.update_preview_btn = ttk.Button(
+            btn_frame2,
+            text='🔄 更新预览',
+            command=self._on_update_preview,
+        )
+        self.update_preview_btn.pack(side='left', fill='x', expand=True, padx=(0, 6))
+
+        self.convert_btn = ttk.Button(
+            btn_frame2,
+            text='🚀 开始转换并导出',
+            style='Accent.TButton',
+            command=self._on_start_convert,
+        )
+        self.convert_btn.pack(side='left', fill='x', expand=True, padx=(6, 0))
 
         # 文件列表（Treeview）
         tree_frame = tk.Frame(content, bg=get_color('card'))
@@ -533,6 +549,23 @@ class MainWindow:
 
         # 绑定选择事件
         self.file_tree.bind('<<TreeviewSelect>>', self._on_file_selected)
+
+        # 进度条（默认隐藏）
+        self._progress_var = tk.DoubleVar(value=0.0)
+        self._progress_bar = ttk.Progressbar(
+            content,
+            orient='horizontal',
+            mode='determinate',
+            variable=self._progress_var,
+            maximum=100,
+        )
+        self._progress_label = ttk.Label(
+            content,
+            text='',
+            font=('Segoe UI', 9),
+            foreground=get_color('text_secondary'),
+            anchor='center',
+        )
 
     def _build_comic_params_card(self, parent):
         """构建漫画模式参数卡片"""
@@ -952,48 +985,9 @@ class MainWindow:
         export_mode_combo.pack(side='left', padx=8)
 
     def _build_action_buttons_card(self, parent):
-        """构建操作按钮卡片"""
-        self._action_card = CardFrame(parent, title='🎯 操作')
-        self._action_card.pack(fill='x', pady=4)
-
-        content = self._action_card.content
-
-        # 更新预览按钮
-        self.update_preview_btn = ttk.Button(
-            content,
-            text='🔄 更新预览',
-            command=self._on_update_preview,
-        )
-        self.update_preview_btn.pack(fill='x', pady=(0, 10))
-
-        # 开始转换并导出按钮（主按钮，大尺寸醒目）
-        self.convert_btn = ttk.Button(
-            content,
-            text='🚀 开始转换并导出',
-            style='Accent.TButton',
-            command=self._on_start_convert,
-        )
-        self.convert_btn.pack(fill='x', pady=8, ipady=10)
-
-        # 底部留白，增加卡片高度使滚动条可用
-        tk.Label(content, text='', bg=get_color('card'), height=2).pack(fill='x')
-
-        # 进度条（默认隐藏）
-        self._progress_var = tk.DoubleVar(value=0.0)
-        self._progress_bar = ttk.Progressbar(
-            content,
-            orient='horizontal',
-            mode='determinate',
-            variable=self._progress_var,
-            maximum=100,
-        )
-        self._progress_label = ttk.Label(
-            content,
-            text='',
-            font=('Segoe UI', 9),
-            foreground=get_color('text_secondary'),
-            anchor='center',
-        )
+        """构建操作按钮卡片（已弃用，按钮移至文件列表卡片）"""
+        # 此卡片保留为空，按钮已移至文件列表卡片中
+        pass
 
     # ============================================================
     # 右侧预览面板
@@ -1217,70 +1211,95 @@ class MainWindow:
 
         # 尝试加载原图预览
         ext = os.path.splitext(filepath)[1].lower()
-        try:
-            from PIL import Image
-            if ext == '.svg':
-                # SVG 文件：用 SVG 原始路径和颜色作为原图预览
-                # 这样不依赖 cairosvg，显示效果更准确
+
+        if ext == '.svg':
+            # SVG 文件：优先用 SVG 原始路径和颜色作为原图预览
+            # 这样不依赖 cairosvg，显示效果更准确
+            svg_preview_ok = False
+            try:
+                import svg2wsd_core
+                subpaths, colors, bbox, is_stroke, stroke_widths, path_group_ids = \
+                    svg2wsd_core._parse_svg_file(filepath)
+                # 构建 CanvasData（使用 SVG 原始颜色）
+                from core.data_model import CanvasData, Shape, ShapeType
+                canvas_data = CanvasData()
+                canvas_data.source_file = filepath
+                canvas_data.bbox = bbox
+
+                def _to_bgr(color):
+                    if color is None:
+                        return None
+                    if isinstance(color, (tuple, list)):
+                        return tuple(int(c) for c in color[:3])
+                    if isinstance(color, str) and color.startswith('#'):
+                        h = color.lstrip('#')
+                        if len(h) == 6:
+                            return (int(h[4:6], 16), int(h[2:4], 16), int(h[0:2], 16))
+                        elif len(h) == 3:
+                            # #rgb 短格式：r=h[0], g=h[1], b=h[2]
+                            return (int(h[2]*2, 16), int(h[1]*2, 16), int(h[0]*2, 16))
+                    return (0, 0, 0)
+
+                all_points = []
+                for i, path_points in enumerate(subpaths):
+                    fill_color = None
+                    line_color = (0, 0, 0)
+                    line_width = 1.0
+                    # 判断是描边路径还是填充路径
+                    stroke_path = is_stroke and i < len(is_stroke) and is_stroke[i]
+                    if stroke_path:
+                        # 描边路径：使用颜色作为线条颜色
+                        if colors and i < len(colors):
+                            line_color = _to_bgr(colors[i])
+                    else:
+                        # 填充路径：使用颜色作为填充颜色
+                        if colors and i < len(colors):
+                            fill_color = _to_bgr(colors[i])
+                    if stroke_widths and i < len(stroke_widths) and stroke_widths[i]:
+                        line_width = float(stroke_widths[i])
+                    # 获取路径组ID（用于复合路径/孔洞）
+                    gid = 0
+                    if path_group_ids and i < len(path_group_ids):
+                        gid = path_group_ids[i]
+                    shape = Shape(
+                        type=ShapeType.BEZIER,
+                        points=list(path_points),
+                        line_color=line_color,
+                        fill_color=fill_color,
+                        line_width=line_width,
+                        extra={'path_group_id': gid},
+                    )
+                    canvas_data.shapes.append(shape)
+                    all_points.extend(path_points)
+
+                if all_points:
+                    xs = [p[0] for p in all_points]
+                    ys = [p[1] for p in all_points]
+                    canvas_data.bbox = (min(xs), min(ys), max(xs), max(ys))
+
+                self.preview_panel.set_svg_original(canvas_data)
+                self._update_status(f'已加载SVG原图预览: {file_info["name"]} ({len(subpaths)}条路径)')
+                svg_preview_ok = True
+            except Exception as e:
+                self._update_status(f'SVG路径预览失败: {e}，尝试图像渲染...')
+
+            # 如果路径预览失败，尝试图像渲染方式
+            if not svg_preview_ok:
                 try:
-                    import svg2wsd_core
-                    subpaths, colors, bbox, is_stroke, stroke_widths, path_group_ids = \
-                        svg2wsd_core._parse_svg_file(filepath)
-                    # 构建 CanvasData（使用 SVG 原始颜色）
-                    from core.data_model import CanvasData, Shape, ShapeType
-                    canvas_data = CanvasData()
-                    canvas_data.source_file = filepath
-                    canvas_data.bbox = bbox
-
-                    def _to_bgr(color):
-                        if color is None:
-                            return None
-                        if isinstance(color, (tuple, list)):
-                            return tuple(int(c) for c in color[:3])
-                        if isinstance(color, str) and color.startswith('#'):
-                            h = color.lstrip('#')
-                            if len(h) == 6:
-                                return (int(h[4:6], 16), int(h[2:4], 16), int(h[0:2], 16))
-                        return (0, 0, 0)
-
-                    all_points = []
-                    for i, path_points in enumerate(subpaths):
-                        fill_color = None
-                        line_color = (0, 0, 0)
-                        line_width = 1.0
-                        if is_stroke and i < len(is_stroke) and is_stroke[i]:
-                            if colors and i < len(colors):
-                                line_color = _to_bgr(colors[i])
-                        else:
-                            if colors and i < len(colors):
-                                fill_color = _to_bgr(colors[i])
-                        if stroke_widths and i < len(stroke_widths) and stroke_widths[i]:
-                            line_width = float(stroke_widths[i])
-                        shape = Shape(
-                            type=ShapeType.BEZIER,
-                            points=list(path_points),
-                            line_color=line_color,
-                            fill_color=fill_color,
-                            line_width=line_width,
-                            extra={},
-                        )
-                        canvas_data.shapes.append(shape)
-                        all_points.extend(path_points)
-
-                    if all_points:
-                        xs = [p[0] for p in all_points]
-                        ys = [p[1] for p in all_points]
-                        canvas_data.bbox = (min(xs), min(ys), max(xs), max(ys))
-
-                    self.preview_panel.set_svg_original(canvas_data)
-                except Exception as e:
-                    # 失败时尝试 cairosvg
                     img = self._render_svg_to_image(filepath)
                     if img is not None:
                         self.preview_panel.set_image(img)
+                        self._update_status(f'已加载SVG图像预览: {file_info["name"]}')
                     else:
                         self.preview_panel.set_image(None)
-            else:
+                        self._update_status(f'SVG预览失败')
+                except Exception as e:
+                    self.preview_panel.set_image(None)
+                    self._update_status(f'SVG预览失败: {e}')
+        else:
+            # 普通图片文件
+            try:
+                from PIL import Image
                 img = Image.open(filepath)
                 if img.mode == 'RGBA':
                     background = Image.new('RGB', img.size, (255, 255, 255))
@@ -1289,8 +1308,8 @@ class MainWindow:
                 elif img.mode != 'RGB':
                     img = img.convert('RGB')
                 self.preview_panel.set_image(img)
-        except Exception as e:
-            self._update_status(f'加载预览失败: {str(e)}')
+            except Exception as e:
+                self._update_status(f'加载预览失败: {str(e)}')
 
         # 触发参数变化以更新WSD预览（防抖）
         self._on_param_changed()
