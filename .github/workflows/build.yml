@@ -43,6 +43,8 @@ jobs:
             --collect-all gui `
             --collect-all modes `
             --collect-all utils `
+            --collect-all cairosvg `
+            --collect-all cairocffi `
             --hidden-import potrace `
             --hidden-import PIL `
             --hidden-import PIL.Image `
@@ -61,6 +63,10 @@ jobs:
             --hidden-import tikz_utils `
             --hidden-import cairosvg `
             --hidden-import cairocffi `
+            --hidden-import cssselect2 `
+            --hidden-import defusedxml `
+            --hidden-import tinycss2 `
+            --hidden-import pillow `
             app.py
 
       - name: Copy template and samples

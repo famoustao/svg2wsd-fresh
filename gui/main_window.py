@@ -541,18 +541,21 @@ class MainWindow:
 
         content = self._comic_params_card.content
 
-        # 颜色模式单选
-        self.comic_color_mode = tk.StringVar(value='line_art')
+        # 颜色模式单选（一行排列）
+        self.comic_color_mode = tk.StringVar(value='actual_color')
 
         modes = [
-            ('黑白线稿', 'line_art'),
             ('实际颜色', 'actual_color'),
+            ('黑白线稿', 'line_art'),
             ('彩色填充', 'color_fill'),
         ]
 
+        color_mode_frame = tk.Frame(content, bg=get_color('card'))
+        color_mode_frame.pack(fill='x', pady=2)
+
         for text, value in modes:
             rb = tk.Radiobutton(
-                content,
+                color_mode_frame,
                 text=text,
                 variable=self.comic_color_mode,
                 value=value,
@@ -564,7 +567,7 @@ class MainWindow:
                 activeforeground=get_color('accent'),
                 command=self._on_comic_mode_changed,
             )
-            rb.pack(anchor='w', pady=2)
+            rb.pack(side='left', padx=(0, 16))
 
         # 阈值滑块
         self.threshold_scale = LabeledScale(
@@ -1217,34 +1220,104 @@ class MainWindow:
         try:
             from PIL import Image
             if ext == '.svg':
-                # SVG 文件：使用 cairosvg 渲染为图片
-                import io
-                try:
-                    import cairosvg
-                    png_data = cairosvg.svg2png(url=filepath)
-                    img = Image.open(io.BytesIO(png_data))
-                    # RGBA 转 RGB（白色背景）
-                    if img.mode == 'RGBA':
-                        background = Image.new('RGB', img.size, (255, 255, 255))
-                        background.paste(img, mask=img.split()[3])
-                        img = background
-                    elif img.mode != 'RGB':
-                        img = img.convert('RGB')
+                # SVG 文件：尝试多种方式渲染
+                img = self._render_svg_to_image(filepath)
+                if img is not None:
                     self.preview_panel.set_image(img)
-                except ImportError:
-                    # cairosvg 不可用，跳过原图预览
-                    pass
-                except Exception:
-                    # 渲染失败，跳过原图预览
-                    pass
+                else:
+                    # 渲染失败，在原图选项卡显示提示
+                    self.preview_panel.set_image(None)
             else:
                 img = Image.open(filepath)
+                if img.mode == 'RGBA':
+                    background = Image.new('RGB', img.size, (255, 255, 255))
+                    background.paste(img, mask=img.split()[3])
+                    img = background
+                elif img.mode != 'RGB':
+                    img = img.convert('RGB')
                 self.preview_panel.set_image(img)
         except Exception as e:
             self._update_status(f'加载预览失败: {str(e)}')
 
         # 触发参数变化以更新WSD预览（防抖）
         self._on_param_changed()
+
+    def _render_svg_to_image(self, svg_path: str):
+        """
+        尝试多种方式将 SVG 渲染为 PIL Image
+
+        优先级：
+        1. cairosvg（质量最好）
+        2. 系统命令行工具（rsvg-convert / inkscape）
+        3. QtSvg（如果可用）
+
+        返回:
+            PIL.Image or None
+        """
+        from PIL import Image
+        import io
+
+        # 方案 1: cairosvg
+        try:
+            import cairosvg
+            png_data = cairosvg.svg2png(url=svg_path)
+            img = Image.open(io.BytesIO(png_data))
+            if img.mode == 'RGBA':
+                background = Image.new('RGB', img.size, (255, 255, 255))
+                background.paste(img, mask=img.split()[3])
+                img = background
+            elif img.mode != 'RGB':
+                img = img.convert('RGB')
+            return img
+        except Exception:
+            pass
+
+        # 方案 2: rsvg-convert 命令行
+        try:
+            import subprocess
+            result = subprocess.run(
+                ['rsvg-convert', svg_path],
+                capture_output=True,
+                timeout=10,
+            )
+            if result.returncode == 0 and result.stdout:
+                img = Image.open(io.BytesIO(result.stdout))
+                if img.mode == 'RGBA':
+                    background = Image.new('RGB', img.size, (255, 255, 255))
+                    background.paste(img, mask=img.split()[3])
+                    img = background
+                elif img.mode != 'RGB':
+                    img = img.convert('RGB')
+                return img
+        except Exception:
+            pass
+
+        # 方案 3: inkscape 命令行
+        try:
+            import subprocess
+            import tempfile
+            with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp:
+                tmp_path = tmp.name
+            result = subprocess.run(
+                ['inkscape', svg_path, '--export-type=png', f'--export-filename={tmp_path}'],
+                capture_output=True,
+                timeout=30,
+            )
+            if result.returncode == 0 and os.path.exists(tmp_path):
+                img = Image.open(tmp_path)
+                if img.mode == 'RGBA':
+                    background = Image.new('RGB', img.size, (255, 255, 255))
+                    background.paste(img, mask=img.split()[3])
+                    img = background
+                elif img.mode != 'RGB':
+                    img = img.convert('RGB')
+                os.unlink(tmp_path)
+                return img
+        except Exception:
+            pass
+
+        # 全部失败
+        return None
 
     # ============================================================
     # 事件处理 - 参数变化（防抖更新预览）
