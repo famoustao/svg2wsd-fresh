@@ -125,7 +125,7 @@ class ComicMode:
             params: 参数字典
                 - threshold: 二值化阈值 (0-255)，默认 128
                 - min_area: 最小区域面积（像素），默认 2
-                - smoothness: 平滑度 (0.0-1.0)，越小曲线越锐利，默认 0.5
+                - smoothness: 平滑度 (0-10)，越小曲线越锐利，默认 3
 
         返回:
             CanvasData: 矢量化后的画布数据
@@ -133,20 +133,31 @@ class ComicMode:
         _ensure_core_loaded()
         threshold = params.get('threshold', 128)
         min_area = params.get('min_area', 2)
-        smoothness = params.get('smoothness', 0.5)
+        smoothness = params.get('smoothness', 3)
 
         # alphamax: 0=最锐利, 1=最平滑
-        alphamax = max(0.0, min(1.0, smoothness))
+        # smoothness 是 0-10 的值，转换为 0-1 的 alphamax
+        alphamax = max(0.0, min(1.0, smoothness / 10.0))
 
         # 调用 svg2wsd_core 中的矢量化函数
-        # _parse_image_file 实现了完整的二值图矢量化流程
-        geo_paths, colors, bbox = svg2wsd_core._parse_image_file(
-            image_path,
-            threshold=threshold,
-            turdsize=min_area,
-            alphamax=alphamax,
-            adaptive_binarize=True,
-        )
+        # 先尝试自适应二值化，如果失败则回退到固定阈值
+        try:
+            geo_paths, colors, bbox = svg2wsd_core._parse_image_file(
+                image_path,
+                threshold=threshold,
+                turdsize=min_area,
+                alphamax=alphamax,
+                adaptive_binarize=True,
+            )
+        except Exception:
+            # 自适应二值化失败，回退到固定阈值
+            geo_paths, colors, bbox = svg2wsd_core._parse_image_file(
+                image_path,
+                threshold=threshold,
+                turdsize=min_area,
+                alphamax=alphamax,
+                adaptive_binarize=False,
+            )
 
         # 将原始路径数据转换为 CanvasData 格式
         canvas_data = self._geo_paths_to_canvas_data(geo_paths, [], image_path)
@@ -170,8 +181,8 @@ class ComicMode:
         参数:
             image_path: 输入图像路径
             params: 参数字典
-                - color_count: 颜色数量，默认 32
-                - smoothness: 平滑度 (0.0-1.0)，越小曲线越锐利，默认 0.5
+                - color_count: 颜色数量，默认 16
+                - smoothness: 平滑度 (0-10)，越小曲线越锐利，默认 3
                 - min_area: 最小区域面积，默认 20
                 - precision: 精度等级 0=低 1=中 2=高，默认1
 
@@ -179,8 +190,8 @@ class ComicMode:
             CanvasData: 矢量化后的画布数据（带颜色填充）
         """
         _ensure_core_loaded()
-        color_count = params.get('color_count', params.get('n_colors', 32))
-        smoothness = params.get('smoothness', 0.5)
+        color_count = params.get('color_count', params.get('n_colors', 16))
+        smoothness = params.get('smoothness', 3)
         min_area = params.get('min_area', 20)
         precision = params.get('precision', 1)
 
@@ -191,7 +202,8 @@ class ComicMode:
         step = step_map.get(precision, 3)
 
         # alphamax: 0=最锐利, 1=最平滑
-        alphamax = max(0.0, min(1.0, smoothness))
+        # smoothness 是 0-10 的值，转换为 0-1 的 alphamax
+        alphamax = max(0.0, min(1.0, smoothness / 10.0))
 
         # 调用 svg2wsd_core 中的彩色图像矢量化函数
         # _parse_image_file_contour_color 实现了高精度彩色矢量化
@@ -239,18 +251,32 @@ class ComicMode:
             CanvasData: 带颜色填充的画布数据
         """
         _ensure_core_loaded()
-        color_scheme = params.get('color_scheme', 'rainbow')
+        color_scheme = params.get('color_scheme', 'default')
         threshold = params.get('threshold', 128)
         min_area = params.get('min_area', 10)
+        smoothness = params.get('smoothness', 3)
+
+        # alphamax: 0=最锐利, 1=最平滑
+        alphamax = max(0.0, min(1.0, smoothness / 10.0))
 
         # 第一步：提取线稿
-        # 使用黑白线稿模式的基础矢量化
-        geo_paths, colors, bbox = svg2wsd_core._parse_image_file(
-            image_path,
-            threshold=threshold,
-            turdsize=min_area,
-            alphamax=1.0,
-        )
+        # 先尝试自适应二值化，失败则回退
+        try:
+            geo_paths, colors, bbox = svg2wsd_core._parse_image_file(
+                image_path,
+                threshold=threshold,
+                turdsize=min_area,
+                alphamax=alphamax,
+                adaptive_binarize=True,
+            )
+        except Exception:
+            geo_paths, colors, bbox = svg2wsd_core._parse_image_file(
+                image_path,
+                threshold=threshold,
+                turdsize=min_area,
+                alphamax=alphamax,
+                adaptive_binarize=False,
+            )
 
         # 第二步：为封闭区域随机填充颜色
         # 根据配色方案生成颜色列表
@@ -335,17 +361,36 @@ class ComicMode:
         注意：调用前需确保 svg2wsd_core 已加载
 
         参数:
-            scheme_name: 配色方案名称
+            scheme_name: 配色方案名称（支持中英文）
             count: 需要的颜色数量
 
         返回:
             list: BGR 颜色三元组列表 [(b,g,r), ...]
         """
-        if scheme_name == 'rainbow':
+        # 中文名称映射
+        name_map = {
+            '默认': 'rainbow',
+            '彩虹': 'rainbow',
+            'rainbow': 'rainbow',
+            '暖色调': 'warm',
+            'warm': 'warm',
+            '冷色调': 'cool',
+            'cool': 'cool',
+            '马卡龙': 'pastel',
+            '柔和色': 'pastel',
+            'pastel': 'pastel',
+            '莫兰迪': 'mono',
+            '单色系': 'mono',
+            'mono': 'mono',
+            'default': 'rainbow',
+        }
+        scheme = name_map.get(scheme_name, 'rainbow')
+
+        if scheme == 'rainbow':
             # 彩虹色
             return [svg2wsd_core.rainbow_color_bgr(i, max(count, 1))
                     for i in range(count)]
-        elif scheme_name == 'pastel':
+        elif scheme == 'pastel':
             # 柔和色（低饱和度）
             colors = []
             for i in range(count):
@@ -353,21 +398,21 @@ class ComicMode:
                 # HSV to BGR with low saturation, high value
                 colors.append(self._hsv_to_bgr(hue, 0.3, 0.95))
             return colors
-        elif scheme_name == 'warm':
+        elif scheme == 'warm':
             # 暖色调（红橙黄）
             colors = []
             for i in range(count):
                 hue = (0 + i * 60 / max(count, 1)) % 360  # 0-60度
                 colors.append(self._hsv_to_bgr(hue, 0.7, 0.9))
             return colors
-        elif scheme_name == 'cool':
+        elif scheme == 'cool':
             # 冷色调（蓝绿青）
             colors = []
             for i in range(count):
                 hue = (180 + i * 60 / max(count, 1)) % 360  # 180-240度
                 colors.append(self._hsv_to_bgr(hue, 0.7, 0.9))
             return colors
-        elif scheme_name == 'mono':
+        elif scheme == 'mono':
             # 单色系（灰度）
             colors = []
             for i in range(count):

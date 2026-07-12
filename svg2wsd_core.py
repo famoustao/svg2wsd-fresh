@@ -864,6 +864,13 @@ def _adaptive_binarize(gray_img, method='sauvola', block_size=35, C=10):
     import cv2
     import numpy as np
 
+    h, w = gray_img.shape[:2]
+    min_dim = min(h, w)
+
+    # 如果图像太小，自适应二值化可能不适用，回退到OTSU
+    if min_dim < block_size * 2:
+        method = 'otsu'
+
     if method == 'otsu':
         _, bw = cv2.threshold(gray_img, 0, 255,
                               cv2.THRESH_BINARY + cv2.THRESH_OTSU)
@@ -875,10 +882,10 @@ def _adaptive_binarize(gray_img, method='sauvola', block_size=35, C=10):
         k = 0.2
         R = 128.0
 
-        # 确保block_size是奇数
+        # 确保block_size是奇数且不超过图像尺寸
         if block_size % 2 == 0:
             block_size += 1
-        block_size = max(3, block_size)
+        block_size = max(3, min(block_size, min_dim if min_dim % 2 == 1 else min_dim - 1))
 
         # 局部均值（高斯加权）
         mean = cv2.GaussianBlur(gray_img.astype(np.float32),
@@ -899,7 +906,7 @@ def _adaptive_binarize(gray_img, method='sauvola', block_size=35, C=10):
         # gaussian - OpenCV自带的高斯加权自适应阈值
         if block_size % 2 == 0:
             block_size += 1
-        block_size = max(3, block_size)
+        block_size = max(3, min(block_size, min_dim if min_dim % 2 == 1 else min_dim - 1))
         bw = cv2.adaptiveThreshold(
             gray_img, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
             cv2.THRESH_BINARY, block_size, C
