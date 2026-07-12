@@ -88,34 +88,34 @@ class ComicMode:
           2. 二值化（阈值分割）
           3. 形态学去噪（去除小面积噪点）
           4. 骨架化（提取中心线）
-          5. 矢量化（转换为矢量路径）
+          5. 矢量化（potrace贝塞尔曲线）
 
         参数:
             image_path: 输入图像路径
             params: 参数字典
                 - threshold: 二值化阈值 (0-255)，默认 128
-                - min_area: 最小区域面积（像素），默认 10
-                - smoothness: 平滑度 (0.0-1.0)，默认 1.0
+                - min_area: 最小区域面积（像素），默认 2
+                - smoothness: 平滑度 (0.0-1.0)，越小曲线越锐利，默认 0.5
 
         返回:
             CanvasData: 矢量化后的画布数据
         """
         _ensure_core_loaded()
         threshold = params.get('threshold', 128)
-        min_area = params.get('min_area', 10)
-        smoothness = params.get('smoothness', 1.0)
+        min_area = params.get('min_area', 2)
+        smoothness = params.get('smoothness', 0.5)
+
+        # alphamax: 0=最锐利, 1=最平滑
+        alphamax = max(0.0, min(1.0, smoothness))
 
         # 调用 svg2wsd_core 中的矢量化函数
         # _parse_image_file 实现了完整的二值图矢量化流程
-        # 参数:
-        #   img_threshold: 二值化阈值
-        #   img_turdsize: 最小区域面积（potrace turdsize）
-        #   alphamax: 平滑度参数 (0=尖锐, 1=平滑)
         geo_paths, colors, bbox = svg2wsd_core._parse_image_file(
             image_path,
             threshold=threshold,
             turdsize=min_area,
-            alphamax=smoothness,
+            alphamax=alphamax,
+            adaptive_binarize=True,
         )
 
         # 将原始路径数据转换为 CanvasData 格式
@@ -132,34 +132,47 @@ class ComicMode:
         实际颜色模式处理
 
         处理流程:
-          1. 颜色量化（将图像颜色数减少到指定数量）
-          2. 区域提取（按颜色分割为不同区域）
-          3. 轮廓矢量化（每个区域的轮廓转换为矢量路径）
-          4. 填充对应颜色（保留原始颜色信息）
+          1. LAB颜色空间量化 + 连通区域分析
+          2. 每个区域独立矢量化（potrace贝塞尔曲线）
+          3. 填充对应原始颜色（区域平均色）
+          4. 大区域先画（底色），小区域后画在上层（细节）
 
         参数:
             image_path: 输入图像路径
             params: 参数字典
-                - n_colors: 颜色数量，默认 16
-                - smoothness: 平滑度 (0.0-1.0)，默认 1.0
-                - min_area: 最小区域面积，默认 50
+                - color_count: 颜色数量，默认 32
+                - smoothness: 平滑度 (0.0-1.0)，越小曲线越锐利，默认 0.5
+                - min_area: 最小区域面积，默认 20
+                - precision: 精度等级 0=低 1=中 2=高，默认1
 
         返回:
             CanvasData: 矢量化后的画布数据（带颜色填充）
         """
         _ensure_core_loaded()
-        n_colors = params.get('n_colors', 16)
-        smoothness = params.get('smoothness', 1.0)
-        min_area = params.get('min_area', 50)
+        color_count = params.get('color_count', params.get('n_colors', 32))
+        smoothness = params.get('smoothness', 0.5)
+        min_area = params.get('min_area', 20)
+        precision = params.get('precision', 1)
+
+        # 根据精度等级设置参数
+        scale_map = {0: 0.5, 1: 0.75, 2: 1.0}
+        step_map = {0: 5, 1: 3, 2: 1}
+        scale = scale_map.get(precision, 0.75)
+        step = step_map.get(precision, 3)
+
+        # alphamax: 0=最锐利, 1=最平滑
+        alphamax = max(0.0, min(1.0, smoothness))
 
         # 调用 svg2wsd_core 中的彩色图像矢量化函数
-        # _parse_image_file_contour_color 实现了颜色量化+轮廓提取
+        # _parse_image_file_contour_color 实现了高精度彩色矢量化
         geo_paths, colors, bbox = svg2wsd_core._parse_image_file_contour_color(
             image_path,
             min_area=min_area,
-            step=3,  # 轮廓采样步长
-            n_colors=n_colors,
-            alphamax=smoothness,
+            step=step,       # 颜色精细度
+            scale=scale,     # 处理缩放比例（精度）
+            alphamax=alphamax,  # 曲线锐利度
+            smooth_level=1,   # 颜色平滑
+            dilate_size=2,    # 消除色块缝隙
         )
 
         # 将原始路径数据转换为 CanvasData 格式
