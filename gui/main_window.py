@@ -774,10 +774,13 @@ class MainWindow:
             font=('Microsoft YaHei UI', 10, 'bold'),
         ).pack(anchor='w', pady=(0, 4))
 
-        # 字母识别开关
+        # 字母识别和自动标注（一行排列）
+        func_switch_frame = tk.Frame(content, bg=get_color('card'))
+        func_switch_frame.pack(fill='x', pady=2)
+
         self.letter_recog_var = tk.BooleanVar(value=True)
         self.letter_recog_cb = tk.Checkbutton(
-            content,
+            func_switch_frame,
             text='字母识别',
             variable=self.letter_recog_var,
             bg=get_color('card'),
@@ -787,12 +790,11 @@ class MainWindow:
             activebackground=get_color('card'),
             command=self._on_param_changed,
         )
-        self.letter_recog_cb.pack(anchor='w', pady=2)
+        self.letter_recog_cb.pack(side='left', padx=(0, 20))
 
-        # 自动标注开关
         self.auto_label_var = tk.BooleanVar(value=True)
         self.auto_label_cb = tk.Checkbutton(
-            content,
+            func_switch_frame,
             text='自动标注',
             variable=self.auto_label_var,
             bg=get_color('card'),
@@ -802,7 +804,7 @@ class MainWindow:
             activebackground=get_color('card'),
             command=self._on_param_changed,
         )
-        self.auto_label_cb.pack(anchor='w', pady=2)
+        self.auto_label_cb.pack(side='left')
 
         # 对称性检测
         tk.Label(
@@ -885,14 +887,17 @@ class MainWindow:
         self.geo_color_mode = tk.StringVar(value='line_art')
 
         geo_modes = [
-            ('黑白线稿', 'line_art'),
             ('实际颜色', 'actual_color'),
-            ('彩色自动填充', 'color_fill'),
+            ('黑白线稿', 'line_art'),
+            ('彩色填充', 'color_fill'),
         ]
+
+        color_mode_frame = tk.Frame(content, bg=get_color('card'))
+        color_mode_frame.pack(fill='x', pady=2)
 
         for text, value in geo_modes:
             rb = tk.Radiobutton(
-                content,
+                color_mode_frame,
                 text=text,
                 variable=self.geo_color_mode,
                 value=value,
@@ -904,7 +909,7 @@ class MainWindow:
                 activeforeground=get_color('accent'),
                 command=self._on_param_changed,
             )
-            rb.pack(anchor='w', pady=2)
+            rb.pack(side='left', padx=(0, 16))
 
     def _build_output_settings_card(self, parent):
         """构建输出设置卡片"""
