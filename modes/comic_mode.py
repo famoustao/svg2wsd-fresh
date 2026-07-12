@@ -111,7 +111,7 @@ class ComicMode:
         #   img_threshold: 二值化阈值
         #   img_turdsize: 最小区域面积（potrace turdsize）
         #   alphamax: 平滑度参数 (0=尖锐, 1=平滑)
-        geo_paths, text_annotations = svg2wsd_core._parse_image_file(
+        geo_paths, colors, bbox = svg2wsd_core._parse_image_file(
             image_path,
             threshold=threshold,
             turdsize=min_area,
@@ -119,7 +119,7 @@ class ComicMode:
         )
 
         # 将原始路径数据转换为 CanvasData 格式
-        canvas_data = self._geo_paths_to_canvas_data(geo_paths, text_annotations, image_path)
+        canvas_data = self._geo_paths_to_canvas_data(geo_paths, [], image_path)
 
         return canvas_data
 
@@ -154,7 +154,7 @@ class ComicMode:
 
         # 调用 svg2wsd_core 中的彩色图像矢量化函数
         # _parse_image_file_contour_color 实现了颜色量化+轮廓提取
-        geo_paths, text_annotations = svg2wsd_core._parse_image_file_contour_color(
+        geo_paths, colors, bbox = svg2wsd_core._parse_image_file_contour_color(
             image_path,
             min_area=min_area,
             step=3,  # 轮廓采样步长
@@ -163,7 +163,7 @@ class ComicMode:
         )
 
         # 将原始路径数据转换为 CanvasData 格式
-        canvas_data = self._geo_paths_to_canvas_data(geo_paths, text_annotations, image_path)
+        canvas_data = self._geo_paths_to_canvas_data(geo_paths, [], image_path, fill_colors=colors)
 
         return canvas_data
 
@@ -202,7 +202,7 @@ class ComicMode:
 
         # 第一步：提取线稿
         # 使用黑白线稿模式的基础矢量化
-        geo_paths, _ = svg2wsd_core._parse_image_file(
+        geo_paths, colors, bbox = svg2wsd_core._parse_image_file(
             image_path,
             threshold=threshold,
             turdsize=min_area,
