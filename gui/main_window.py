@@ -1904,14 +1904,17 @@ class MainWindow:
             params.update({
                 'min_area': self.geo_min_area_scale.get(),
                 'approx_accuracy': self.geo_approx_scale.get() / 1000.0,
-                'hough_sensitivity': self.geo_hough_scale.get(),
+                'hough_circle_sensitivity': self.geo_hough_scale.get(),
                 'circle_count': self.circle_count_var.get(),
-                'letter_recognition': self.letter_recog_var.get(),
+                'enable_ocr': self.letter_recog_var.get(),
                 'auto_label': self.auto_label_var.get(),
-                'symmetry_axis': self.sym_axis_var.get(),
-                'symmetry_rotate': self.sym_rotate_var.get(),
-                'symmetry_center': self.sym_center_var.get(),
-                'symmetry_rightangle': self.sym_rightangle_var.get(),
+                'detect_symmetry': True,
+                'symmetry_params': {
+                    'detect_axis': self.sym_axis_var.get(),
+                    'detect_rotation': self.sym_rotate_var.get(),
+                    'detect_center': self.sym_center_var.get(),
+                    'detect_right_angle': self.sym_rightangle_var.get(),
+                },
                 'color_mode': self.geo_color_mode.get(),
             })
 

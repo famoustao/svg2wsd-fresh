@@ -476,9 +476,14 @@ class GeometryMode:
                 )
                 if isinstance(recognize_result, list):
                     letter_annotations = recognize_result
+                    has_letter_recog = len(letter_annotations) > 0
                 elif isinstance(recognize_result, dict):
-                    letter_annotations = recognize_result.get('annotations', [])
-                has_letter_recog = len(letter_annotations) > 0
+                    # 尝试从不同的键中获取标注数据
+                    for key in ['annotations', 'merged_annotations', 'text_annotations']:
+                        if key in recognize_result and isinstance(recognize_result[key], list):
+                            letter_annotations = recognize_result[key]
+                            has_letter_recog = len(letter_annotations) > 0
+                            break
             except Exception:
                 letter_annotations = []
                 has_letter_recog = False
@@ -489,10 +494,10 @@ class GeometryMode:
                 import cv2
                 # 转换为灰度图
                 gray = cv2.cvtColor(img_color, cv2.COLOR_BGR2GRAY)
-                # 自适应阈值增强
+                # 自适应阈值增强（反色，文字为白色）
                 thresh = cv2.adaptiveThreshold(
                     gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-                    cv2.THRESH_BINARY, 11, 2
+                    cv2.THRESH_BINARY_INV, 11, 2
                 )
 
                 # 尝试使用 pytesseract
@@ -544,18 +549,18 @@ class GeometryMode:
                     )
                     # 按面积排序，找可能的文字区域
                     contours = sorted(contours, key=cv2.contourArea, reverse=True)
-                    for i, cnt in enumerate(contours[:10]):  # 最多找10个
+                    for i, cnt in enumerate(contours[:20]):  # 最多找20个
                         area = cv2.contourArea(cnt)
-                        if area < 50 or area > 5000:  # 文字大小范围
+                        if area < 30 or area > 5000:  # 文字大小范围
                             continue
                         x, y, w, h = cv2.boundingRect(cnt)
                         aspect_ratio = w / h if h > 0 else 1
-                        if 0.2 < aspect_ratio < 5:  # 文字的宽高比范围
+                        if 0.15 < aspect_ratio < 8:  # 文字的宽高比范围
                             letter_annotations.append({
                                 'text': f'字{i+1}',
                                 'x': float(x + w / 2),
                                 'y': float(y + h / 2),
-                                'font_size': float(max(h, w)),
+                                'font_size': float(max(h, w) * 0.6),
                                 'superscript': False,
                                 'subscript': False,
                                 'associated': False,
@@ -566,14 +571,39 @@ class GeometryMode:
         # 2. 将识别结果转换为 TextAnnotation 列表
         for letter in letter_annotations:
             if isinstance(letter, dict):
+                # 从 bbox 计算中心坐标
+                x, y = 0, 0
+                font_size = 12.0
+                if 'bbox' in letter and isinstance(letter['bbox'], (tuple, list)) and len(letter['bbox']) >= 4:
+                    bx, by, bw, bh = letter['bbox'][:4]
+                    x = float(bx + bw / 2)
+                    y = float(by + bh / 2)
+                    font_size = float(max(bh, bw) * 0.6)
+                else:
+                    # 尝试从 x, y 字段获取
+                    x = float(letter.get('x', 0))
+                    y = float(letter.get('y', 0))
+                    font_size = float(letter.get('font_size', 12))
+
+                # 获取文字内容
+                text = letter.get('text', '')
+                if not text and 'char' in letter:
+                    text = letter['char']
+                if not text and 'main_char' in letter:
+                    text = letter['main_char']
+
+                superscript = letter.get('superscript', False)
+                subscript = letter.get('subscript', False)
+                associated = letter.get('associated', False)
+
                 ann = TextAnnotation(
-                    text=letter.get('text', ''),
-                    x=letter.get('x', 0),
-                    y=letter.get('y', 0),
-                    font_size=letter.get('font_size', 12),
-                    superscript=letter.get('superscript', False),
-                    subscript=letter.get('subscript', False),
-                    associated=letter.get('associated', False),
+                    text=str(text),
+                    x=x,
+                    y=y,
+                    font_size=font_size,
+                    superscript=bool(superscript),
+                    subscript=bool(subscript),
+                    associated=bool(associated),
                 )
                 annotations.append(ann)
 
