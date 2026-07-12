@@ -1243,10 +1243,11 @@ class MainWindow:
 
     def _update_preview(self):
         """
-        执行预览更新（后台线程处理，避免UI卡死）
+        执行预览更新
 
         从当前文件和参数生成预览数据，更新 WSD 预览面板。
-        使用 TaskWorker 在后台线程处理，UI 只显示进度条。
+        - SVG 文件：直接在主线程处理（解析很快，无需后台）
+        - 图片文件：使用 TaskWorker 后台线程，UI 显示进度条
         """
         if self._current_file_index < 0:
             return
@@ -1254,7 +1255,6 @@ class MainWindow:
         # 如果已有任务在运行，先取消
         if self._task_worker is not None and self._task_worker.is_alive():
             self._task_worker.cancel()
-            # 不等它结束，直接启动新任务（旧任务会自动退出）
 
         file_info = self._files[self._current_file_index]
         filepath = file_info['path']
@@ -1262,13 +1262,29 @@ class MainWindow:
         mode_type = 'comic' if self._current_mode == 'comic' else 'geo'
         sub_mode = self.comic_color_mode.get() if self._current_mode == 'comic' else None
 
+        # SVG 文件解析很快，直接在主线程处理，不经过后台线程
+        ext = os.path.splitext(filepath)[1].lower()
+        if ext == '.svg':
+            self._update_status(f'正在生成预览: {file_info["name"]}...')
+            try:
+                if mode_type == 'geo':
+                    from modes.geo_mode import GeometryMode
+                    canvas_data = GeometryMode().process(filepath, params)
+                else:
+                    from modes.comic_mode import process as comic_process
+                    canvas_data = comic_process(filepath, sub_mode, params)
+                self._handle_preview_result(canvas_data)
+            except Exception as e:
+                import traceback
+                self._update_status(f'预览失败: {e}')
+            return
+
         self._update_status(f'正在生成预览: {file_info["name"]}...')
         self._show_action_progress('正在处理图像...')
 
-        # 后台任务函数
+        # 后台任务函数（仅图片使用）
         def preview_task(progress_callback=None, cancel_check=None):
             try:
-                # 报告初始进度
                 if progress_callback:
                     progress_callback(10, '加载图像...')
 
