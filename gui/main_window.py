@@ -165,10 +165,8 @@ class CardFrame(ttk.Frame):
                 fg=get_color('primary'),
                 font=('Microsoft YaHei UI', 11, 'bold'),
                 anchor='w',
-                padx=12,
-                pady=(10, 6),
             )
-            self._title_label.pack(fill='x')
+            self._title_label.pack(fill='x', padx=12, pady=(10, 6))
 
             # 标题下方分隔线
             self._separator = tk.Frame(
