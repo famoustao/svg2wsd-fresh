@@ -12,8 +12,15 @@
 """
 
 import os
+import sys
 from typing import Optional
-from .data_model import CanvasData, Shape, TextAnnotation, ShapeType
+
+# 确保项目根目录在路径中
+_project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _project_root not in sys.path:
+    sys.path.insert(0, _project_root)
+
+from core.data_model import CanvasData, Shape, TextAnnotation, ShapeType
 
 
 # 支持的文件扩展名映射

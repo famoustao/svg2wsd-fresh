@@ -10,12 +10,12 @@ import os
 import sys
 from typing import List, Optional, Tuple
 
-from .data_model import CanvasData, Shape, ShapeType, TextAnnotation
-
-# 确保项目根目录在路径中，用于导入 wsd_pure_builder 等模块
+# 确保项目根目录在路径中
 _project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _project_root not in sys.path:
     sys.path.insert(0, _project_root)
+
+from core.data_model import CanvasData, Shape, ShapeType, TextAnnotation
 
 # 延迟导入 wsd_pure_builder 中的构建函数
 _wsb_loaded = False

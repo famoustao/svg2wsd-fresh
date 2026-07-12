@@ -22,8 +22,18 @@ jobs:
       - name: Install dependencies
         run: pip install pyinstaller pillow potracer numpy opencv-python
 
-      - name: Build v2 GUI EXE (新版)
-        run: pyinstaller --onefile --windowed --clean --name 图片转WSD app.py
+      - name: Build v2 GUI EXE (新版主程序)
+        run: |
+          pyinstaller --onefile --windowed --clean `
+            --name 图片转WSD `
+            --collect-all core `
+            --collect-all gui `
+            --collect-all modes `
+            --collect-all utils `
+            --hidden-import wsd_pure_builder `
+            --hidden-import svg2wsd_geo `
+            --hidden-import svg2wsd_core `
+            app.py
 
       - name: Build CLI EXE (旧版兼容)
         run: pyinstaller --onefile --clean --name svg2wsd svg2wsd.py
@@ -81,6 +91,10 @@ jobs:
             - 字母自动识别 + 自动标注
             - 对称性检测（轴对称、旋转对称、中心对称、直角）
             - 颜色模式：黑白线稿 / 实际颜色 / 彩色自动填充
+
+            ### 启动失败排查
+
+            如果双击后没有反应，请查看同目录下的 `svg2wsd_startup.log` 文件获取错误信息。
 
             ### 下载加速（国内用户）
 

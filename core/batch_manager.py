@@ -10,14 +10,20 @@
 """
 
 import os
+import sys
 import threading
 from enum import Enum
 from dataclasses import dataclass, field
 from typing import List, Optional, Callable, Dict, Any
 
-from .data_model import CanvasData
-from .importer import import_file
-from .exporter import export_wsd_single, export_wsd_multi
+# 确保项目根目录在路径中
+_project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _project_root not in sys.path:
+    sys.path.insert(0, _project_root)
+
+from core.data_model import CanvasData
+from core.importer import import_file
+from core.exporter import export_wsd_single, export_wsd_multi
 
 
 # ============================================================

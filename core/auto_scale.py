@@ -4,8 +4,16 @@
 负责将导入的图形自动缩放到目标画布尺寸内，保持比例并居中
 """
 
+import os
+import sys
 from typing import List, Tuple
-from .data_model import (
+
+# 确保项目根目录在路径中
+_project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _project_root not in sys.path:
+    sys.path.insert(0, _project_root)
+
+from core.data_model import (
     Shape, TextAnnotation, CanvasData,
     shapes_bbox, scale_shapes, translate_shapes,
     scale_annotations, translate_annotations
