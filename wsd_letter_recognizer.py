@@ -219,6 +219,7 @@ class LetterRecognizer:
         """识别单个字母图像
 
         改进版：增加图像归一化、多尺度匹配、投影特征等，提高识别准确率。
+        支持空心字母（线条型）的自动填充。
 
         Returns:
             (best_char, confidence)
@@ -226,8 +227,11 @@ class LetterRecognizer:
         if binary_img is None or binary_img.size == 0:
             return None, 0.0
 
+        # 预处理：如果是空心字母（线条型），先填充变实心
+        filled_img = self._fill_hollow_letter(binary_img)
+
         # 预处理：归一化到标准尺寸
-        norm_img = self._normalize_char_image(binary_img)
+        norm_img = self._normalize_char_image(filled_img)
         if norm_img is None or not np.any(norm_img > 0):
             return None, 0.0
 
@@ -369,6 +373,77 @@ class LetterRecognizer:
         confidence = max(0.0, min(1.0, confidence))
 
         return best_char, confidence
+
+    def _fill_hollow_letter(self, binary_img):
+        """填充空心字母（线条型字母）使其变为实心
+
+        对于由线条组成的空心字母（如几何图中的标注字母），
+        外轮廓的填充率很低，模板匹配效果差。
+        此方法通过形态学操作和洪水填充填充字母内部，提高识别率。
+
+        Args:
+            binary_img: 二值图像（前景为白色）
+
+        Returns:
+            填充后的二值图像
+        """
+        if binary_img is None or binary_img.size == 0:
+            return binary_img
+
+        h, w = binary_img.shape[:2]
+        if h < 5 or w < 5:
+            return binary_img
+
+        # 计算填充率
+        total_pixels = h * w
+        foreground = cv2.countNonZero(binary_img)
+        fill_ratio = foreground / max(1, total_pixels)
+
+        # 如果填充率已经很高（>0.4），说明是实心字母，不需要填充
+        if fill_ratio > 0.4:
+            return binary_img
+
+        # 如果填充率太低（<0.05），可能不是字母，直接返回
+        if fill_ratio < 0.05:
+            return binary_img
+
+        best_result = binary_img.copy()
+        best_fill = fill_ratio
+
+        # 方法1：洪水填充法（flood fill）- 最有效
+        # 从边界开始填充背景，剩下的前景就是填充后的字母内部
+        flood_img = binary_img.copy()
+        mask = np.zeros((h + 2, w + 2), np.uint8)
+        # 从四个角和边的中点开始填充背景
+        seed_points = [
+            (0, 0), (w-1, 0), (0, h-1), (w-1, h-1),
+            (w//2, 0), (w//2, h-1), (0, h//2), (w-1, h//2)
+        ]
+        for sx, sy in seed_points:
+            if 0 <= sx < w and 0 <= sy < h and flood_img[sy, sx] == 0:
+                cv2.floodFill(flood_img, mask, (sx, sy), 255)
+
+        # 反转：被填充的背景（白色）变成背景，字母内部（黑色）变成前景
+        inner = cv2.bitwise_not(flood_img)
+        # 与原始图像合并（保留原始的线条 + 填充内部）
+        filled = cv2.bitwise_or(binary_img, inner)
+
+        new_fill = cv2.countNonZero(filled) / max(1, total_pixels)
+        if new_fill > best_fill and new_fill < 0.9:
+            best_fill = new_fill
+            best_result = filled
+
+        # 方法2：形态学闭操作（辅助，处理有缺口的字母）
+        # 在洪水填充结果基础上做闭操作，填充小缺口
+        for ksize in [2, 3]:
+            kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (ksize, ksize))
+            closed = cv2.morphologyEx(best_result, cv2.MORPH_CLOSE, kernel)
+            new_fill = cv2.countNonZero(closed) / max(1, total_pixels)
+            if new_fill > best_fill and new_fill < 0.9:
+                best_fill = new_fill
+                best_result = closed
+
+        return best_result
 
     def _normalize_char_image(self, binary_img, target_size=64):
         """将字符图像归一化到标准尺寸和位置
@@ -2245,11 +2320,18 @@ def recognize_geo_annotations(img_color, min_confidence=0.3):
                             cw = int(data['width'][i] / scale)
                             ch = int(data['height'][i] / scale)
                             
+                            # 对于多字符，用单个字符的平均宽度来判断大小
+                            num_chars = len(text)
+                            if num_chars > 1:
+                                single_cw = cw / num_chars
+                            else:
+                                single_cw = cw
+                            
                             # 过滤掉太大的（可能是图形）
-                            if cw > w * 0.2 or ch > h * 0.2:
+                            if single_cw > w * 0.15 or ch > h * 0.2:
                                 continue
                             # 过滤掉太小的
-                            if cw < 5 or ch < 8:
+                            if single_cw < 5 or ch < 8:
                                 continue
                             
                             # 分离多字符
@@ -2299,6 +2381,110 @@ def recognize_geo_annotations(img_color, min_confidence=0.3):
                     'cy': y + ch / 2,
                     'bbox': det['bbox'],
                     'source': 'ocr',
+                })
+    
+    # ========== 方法1b：候选区域OCR ==========
+    # 对每个候选区域单独做OCR，排除周围几何图形的干扰
+    if ocr_available:
+        try:
+            text_candidates = detect_text_candidates_from_image(img_color, min_area=15)
+            whitelist = '-c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'
+            
+            for tc in text_candidates:
+                bx, by, bw, bh = tc['bbox']
+                
+                # 从原图裁剪（加一点边距）
+                pad = max(3, int(min(bw, bh) * 0.2))
+                x1 = max(0, bx - pad)
+                y1 = max(0, by - pad)
+                x2 = min(w, bx + bw + pad)
+                y2 = min(h, by + bh + pad)
+                
+                roi_gray = gray[y1:y2, x1:x2]
+                if roi_gray.size == 0:
+                    continue
+                
+                # 放大后识别
+                for scale in [2.0, 3.0]:
+                    scaled = cv2.resize(roi_gray, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
+                    _, binary = cv2.threshold(scaled, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+                    
+                    for psm in [7, 10]:
+                        try:
+                            data = pytesseract.image_to_data(
+                                binary, lang='eng',
+                                output_type=pytesseract.Output.DICT,
+                                config=f'--psm {psm} --oem 3 {whitelist}'
+                            )
+                            for i in range(len(data['text'])):
+                                text = data['text'][i].strip()
+                                if not text or not text.isalnum():
+                                    continue
+                                conf = int(data['conf'][i]) / 100.0
+                                if conf < min_confidence * 0.5:
+                                    continue
+                                
+                                # 坐标转换回原图
+                                char_x = x1 + int(data['left'][i] / scale)
+                                char_y = y1 + int(data['top'][i] / scale)
+                                char_w = int(data['width'][i] / scale)
+                                char_h = int(data['height'][i] / scale)
+                                
+                                # 过滤太大或太小的
+                                if char_w > w * 0.15 or char_h > h * 0.2:
+                                    continue
+                                if char_w < 5 or char_h < 8:
+                                    continue
+                                
+                                # 只处理单个字符
+                                if len(text) == 1:
+                                    bucket_key = (char_x // 5, char_y // 5)
+                                    if (bucket_key not in all_ocr_detections or 
+                                        conf > all_ocr_detections[bucket_key]['confidence']):
+                                        all_ocr_detections[bucket_key] = {
+                                            'char': text.upper(),
+                                            'confidence': conf,
+                                            'bbox': (char_x, char_y, char_w, char_h),
+                                            'source': 'ocr_roi',
+                                        }
+                                # 多字符的话也分开
+                                elif len(text) <= 3:
+                                    single_w = char_w / len(text)
+                                    for j, ch in enumerate(text):
+                                        if not ch.isalnum():
+                                            continue
+                                        cx = char_x + int(j * single_w)
+                                        bucket_key = (cx // 5, char_y // 5)
+                                        if (bucket_key not in all_ocr_detections or 
+                                            conf > all_ocr_detections[bucket_key]['confidence']):
+                                            all_ocr_detections[bucket_key] = {
+                                                'char': ch.upper(),
+                                                'confidence': conf,
+                                                'bbox': (cx, char_y, int(single_w), char_h),
+                                                'source': 'ocr_roi',
+                                            }
+                        except Exception:
+                            continue
+        except Exception:
+            pass
+        
+        # 重新添加OCR结果（包含候选区域的）
+        # 先清空之前的，重新添加（因为all_ocr_detections已经更新了）
+        letters = []
+        for det in all_ocr_detections.values():
+            if det['confidence'] >= min_confidence * 0.7:
+                x, y, cw, ch = det['bbox']
+                letters.append({
+                    'char': det['char'],
+                    'confidence': det['confidence'],
+                    'x': x,
+                    'y': y,
+                    'w': cw,
+                    'h': ch,
+                    'cx': x + cw / 2,
+                    'cy': y + ch / 2,
+                    'bbox': det['bbox'],
+                    'source': det['source'],
                 })
     
     # ========== 方法2：模板匹配识别 ==========
@@ -2552,7 +2738,7 @@ def _verify_letters_by_shape(gray_img, letters):
             elif hole_count >= 1 and lr_ratio > 0.7 and tb_ratio > 0.7 and mid_width >= top_width * 0.8:
                 new_char = 'B'
         
-        # O vs C vs 0 vs D vs Q vs G:
+        # O vs C vs 0 vs D vs Q vs G vs 6:
         # 关键区分特征：
         #   D: 左侧非常直(left_straightness小)，左右不对称，高宽比大
         #   O: 左右都不直，高度对称，圆度高
@@ -2560,7 +2746,8 @@ def _verify_letters_by_shape(gray_img, letters):
         #   C: 右边开口，右侧密度低，圆度低
         #   Q: 底部有尾巴，底部宽度比顶部小，左侧不直
         #   G: 底部有一横，右下侧有突出
-        if char in ('O', 'C', '0', 'D', 'Q', 'G'):
+        #   6: 底部圆，顶部有缺口（数字6，几何图中通常是G或C）
+        if char in ('O', 'C', '0', 'D', 'Q', 'G', '6'):
             lr_ratio = min(left_density, right_density) / max(left_density, right_density)
             tb_ratio = bottom_width / max(1, top_width)
             
@@ -2578,10 +2765,17 @@ def _verify_letters_by_shape(gray_img, letters):
             # 优先级4: G - 底部有一横（圆度低但左右密度相近，底部有突出）
             elif circularity < 0.3 and lr_ratio > 0.9 and bottom_width >= top_width:
                 new_char = 'G'
-            # 优先级5: 0 - 偏高瘦但左右对称（数字0）
+            # 优先级5: 6 - 底部圆顶部窄（数字6，几何图中优先当作字母G）
+            elif char == '6' and tb_ratio > 1.2 and bottom_width > top_width:
+                # 几何图中标注通常是字母，6很可能是G或C
+                if right_density < left_density * 0.7:
+                    new_char = 'C'  # 右边有开口，更像C
+                else:
+                    new_char = 'G'  # 更像G
+            # 优先级6: 0 - 偏高瘦但左右对称（数字0）
             elif aspect > 1.3 and lr_ratio > 0.9 and left_straightness > 0.05:
                 new_char = '0'
-            # 优先级6: O - 高圆度，左右对称，两侧都不直
+            # 优先级7: O - 高圆度，左右对称，两侧都不直
             elif circularity > 0.5 and lr_ratio > 0.85 and left_straightness > 0.05:
                 new_char = 'O'
         

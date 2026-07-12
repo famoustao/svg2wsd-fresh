@@ -466,7 +466,7 @@ class GeometryMode:
     def _extract_shape_color(self, img_color: np.ndarray,
                               points: List[Tuple[float, float]],
                               sample_points: int = 10,
-                              search_radius: int = 4) -> Optional[Tuple[int, int, int]]:
+                              search_radius: int = 8) -> Optional[Tuple[int, int, int]]:
         """
         从彩色图像中提取形状的线条颜色
 
@@ -517,9 +517,10 @@ class GeometryMode:
                 sx = x1 + dx * t
                 sy = y1 + dy * t
 
-                # 沿法线方向搜索最暗的像素（最可能是线条中心）
+                # 沿法线方向搜索线条像素
+                # 策略：先找饱和度高的（彩色线条），如果没有，再找最暗的（黑色线条）
                 best_color = None
-                min_brightness = 256.0
+                best_score = -float('inf')
 
                 for d in range(-search_radius, search_radius + 1):
                     px = int(sx + nx * d)
@@ -527,12 +528,30 @@ class GeometryMode:
 
                     if 0 <= px < w and 0 <= py < h:
                         b, g, r = img_color[py, px]
-                        brightness = (int(b) + int(g) + int(r)) / 3.0
-                        if brightness < min_brightness:
-                            min_brightness = brightness
-                            best_color = (int(b), int(g), int(r))
+                        bi, gi, ri = int(b), int(g), int(r)
+                        brightness = (bi + gi + ri) / 3.0
+                        
+                        # 排除接近白色的背景
+                        if brightness > 245:
+                            continue
+                        
+                        # 计算饱和度
+                        max_val = max(bi, gi, ri)
+                        min_val = min(bi, gi, ri)
+                        if max_val > 0:
+                            saturation = (max_val - min_val) / max_val
+                        else:
+                            saturation = 0
+                        
+                        # 综合评分：饱和度高的优先，其次是暗的
+                        # 饱和度权重更大，确保彩色线条能被正确识别
+                        score = saturation * 100 - brightness * 0.3
+                        
+                        if score > best_score:
+                            best_score = score
+                            best_color = (bi, gi, ri)
 
-                if best_color is not None and min_brightness < 240:  # 排除接近白色的背景
+                if best_color is not None:
                     colors.append(best_color)
 
         if not colors:
@@ -549,14 +568,54 @@ class GeometryMode:
                     colors_arr, 2, None, criteria, 3, cv2.KMEANS_PP_CENTERS
                 )
 
-                # 找出更暗的那个聚类（更可能是线条颜色）
-                brightness_0 = np.sum(centers[0])
-                brightness_1 = np.sum(centers[1])
+                # 计算两个聚类的信息
+                cluster_info = []
+                for idx in range(2):
+                    cb, cg, cr = centers[idx]
+                    cbi, cgi, cri = int(cb), int(cg), int(cr)
+                    count = np.sum(labels == idx)
+                    brightness = (cbi + cgi + cri) / 3.0
+                    max_val = max(cbi, cgi, cri)
+                    min_val = min(cbi, cgi, cri)
+                    if max_val > 0:
+                        saturation = (max_val - min_val) / max_val
+                    else:
+                        saturation = 0
+                    cluster_info.append({
+                        'idx': idx,
+                        'count': count,
+                        'brightness': brightness,
+                        'saturation': saturation,
+                        'color': (cbi, cgi, cri),
+                    })
 
-                if brightness_0 < brightness_1:
-                    line_color = tuple(int(c) for c in centers[0])
+                # 选择线条颜色的策略：
+                # 1. 如果一个聚类的样本数明显更多（>2倍），选它（主色）
+                # 2. 否则，如果饱和度差异大，选饱和度高的（彩色线条）
+                # 3. 否则，选更暗的（黑色线条）
+                count_ratio = max(cluster_info[0]['count'], cluster_info[1]['count']) / \
+                              max(1, min(cluster_info[0]['count'], cluster_info[1]['count']))
+                
+                if count_ratio > 2.0:
+                    # 样本数差异大，选样本数多的（主色）
+                    if cluster_info[0]['count'] > cluster_info[1]['count']:
+                        line_color = cluster_info[0]['color']
+                    else:
+                        line_color = cluster_info[1]['color']
                 else:
-                    line_color = tuple(int(c) for c in centers[1])
+                    sat_diff = abs(cluster_info[0]['saturation'] - cluster_info[1]['saturation'])
+                    if sat_diff > 0.2:
+                        # 饱和度差异大，选饱和度高的（彩色线条）
+                        if cluster_info[0]['saturation'] > cluster_info[1]['saturation']:
+                            line_color = cluster_info[0]['color']
+                        else:
+                            line_color = cluster_info[1]['color']
+                    else:
+                        # 饱和度都低，选更暗的（黑色/灰色线条）
+                        if cluster_info[0]['brightness'] < cluster_info[1]['brightness']:
+                            line_color = cluster_info[0]['color']
+                        else:
+                            line_color = cluster_info[1]['color']
 
                 return line_color
             except Exception:
@@ -638,29 +697,19 @@ class GeometryMode:
                            shapes: List[Shape],
                            params: Dict[str, Any]) -> List[TextAnnotation]:
         """
-        字母识别与自动标注
+        字母识别与自动标注（全图OCR + 几何关键点过滤）
 
-        使用 OCR 或模板匹配识别图像中的字母，
-        并将字母关联到对应的几何形状，
-        同时删除字母形状的线条（避免重复绘制）。
-
-        处理流程:
-          1. 检测文字候选区域
-          2. OCR/模板匹配识别字母（优先使用增强版OCR）
-          3. 检测上下标格式
-          4. 将字母关联到几何形状的最近关键点
-          5. 优化标注位置（放在形状外侧）
-          6. 删除字母形状的线条（从 shapes 中移除）
+        策略：
+        1. 全图OCR识别（多种预处理提高召回率）
+        2. 提取几何关键点（顶点、端点、圆心）
+        3. 将OCR结果关联到最近的关键点
+        4. 过滤掉离关键点太远的结果（减少误识别）
+        5. 优化标注位置
 
         参数:
-            img_color: 彩色图像（BGR）
-            shapes: 已识别的几何形状列表（可能被修改）
+            img_color: 彩色图像 (BGR)
+            shapes: 已检测的几何形状列表
             params: 参数字典
-                - enable_ocr: 是否启用字母识别，默认 True
-                - min_confidence: 最小识别置信度，默认 0.3
-                - lang: OCR 语言，默认 'chi_sim+eng'
-                - auto_label: 是否自动标注，默认 True
-                - remove_letter_lines: 是否删除字母线条，默认 True
 
         返回:
             List[TextAnnotation]: 识别到的文字标注列表
@@ -673,181 +722,653 @@ class GeometryMode:
         if not enable_ocr:
             return []
 
-        _ensure_geo_loaded()
+        import cv2
+
         annotations = []
+        h_img, w_img = img_color.shape[:2]
 
-        # 1. 优先尝试增强版OCR识别（几何图专用）
-        letter_annotations = []
-        has_letter_recog = False
+        # 1. 提取几何关键点
+        # 优先使用线段端点（更可靠），多边形顶点次之
+        # 排除太小的多边形（可能是字母被误识别）
+        keypoints = []  # [(x, y, shape_idx)]
+        seen_points = set()
 
-        # 方法A：使用几何图专用的OCR识别（如果有）
-        if wsd_letter_recognizer is not None and hasattr(wsd_letter_recognizer, 'recognize_geo_annotations'):
-            try:
-                recog_confidence = min(min_confidence, 0.25)
-                geo_result = wsd_letter_recognizer.recognize_geo_annotations(
-                    img_color,
-                    min_confidence=recog_confidence,
-                )
-                if isinstance(geo_result, dict):
-                    merged = geo_result.get('merged_annotations', [])
-                    if merged and len(merged) > 0:
-                        letter_annotations = merged
-                        has_letter_recog = True
-            except Exception:
-                pass
+        for shape_idx, shape in enumerate(shapes):
+            shape_type = shape.type.value
+            points_to_check = []
 
-        # 方法B：使用标准字母识别器
-        if not has_letter_recog and wsd_letter_recognizer is not None and hasattr(wsd_letter_recognizer, 'recognize_letters_from_image'):
-            try:
-                # 使用更低的置信度阈值，提高召回率
-                recog_confidence = min(min_confidence, 0.2)
-                recognize_result = wsd_letter_recognizer.recognize_letters_from_image(
-                    img_color,
-                    shapes=shapes,
-                    img_size=img_color.shape[:2][::-1],
-                    min_confidence=recog_confidence,
-                )
-                if isinstance(recognize_result, list):
-                    letter_annotations = recognize_result
-                    has_letter_recog = len(letter_annotations) > 0
-                elif isinstance(recognize_result, dict):
-                    # 尝试从不同的键中获取标注数据
-                    for key in ['merged_annotations', 'annotations', 'text_annotations']:
-                        if key in recognize_result and isinstance(recognize_result[key], list):
-                            letter_annotations = recognize_result[key]
-                            has_letter_recog = len(letter_annotations) > 0
-                            break
-                    # 如果没有合并标注，尝试从字符识别结果构建
-                    if not has_letter_recog and 'char_recognitions' in recognize_result:
-                        char_recs = recognize_result['char_recognitions']
-                        if isinstance(char_recs, list) and len(char_recs) > 0:
-                            for cr in char_recs:
-                                if isinstance(cr, dict) and cr.get('confidence', 0) >= recog_confidence:
-                                    letter_annotations.append(cr)
-                            has_letter_recog = len(letter_annotations) > 0
-            except Exception:
-                letter_annotations = []
-                has_letter_recog = False
+            if shape_type in ('line', 'polyline', 'arc'):
+                # 线段端点最可靠
+                points_to_check = shape.points
+            elif shape_type in ('polygon', 'triangle', 'rectangle'):
+                # 多边形：检查是否太小（可能是字母被误识别）
+                points = shape.points
+                if len(points) >= 3:
+                    # 计算多边形的边界框
+                    xs = [p[0] for p in points]
+                    ys = [p[1] for p in points]
+                    bw = max(xs) - min(xs)
+                    bh = max(ys) - min(ys)
+                    # 太小的多边形可能是字母，跳过
+                    if bw > 40 and bh > 40 and len(points) <= 6:
+                        points_to_check = points
+            elif shape_type == 'circle':
+                points_to_check = [shape.points[0]]
 
-        # 方法C：直接使用 pytesseract OCR（增强版预处理）
-        if not has_letter_recog and enable_ocr:
-            letter_annotations = self._ocr_recognize_letters(img_color, min_confidence)
-            has_letter_recog = len(letter_annotations) > 0
+            for p in points_to_check:
+                px, py = int(p[0]), int(p[1])
+                key = (px // 8, py // 8)
+                if key not in seen_points:
+                    seen_points.add(key)
+                    keypoints.append((p[0], p[1], shape_idx))
 
-        # 2. 将识别结果转换为 TextAnnotation 列表
-        for letter in letter_annotations:
-            if not isinstance(letter, dict):
-                continue
+        if not keypoints:
+            return []
 
-            # 从 bbox 计算坐标
-            x, y = 0.0, 0.0
-            font_size = 12.0
-            superscript = False
-            subscript = False
+        # 2. 估计典型字母大小和搜索半径
+        # 使用关键点之间的距离来估计字母大小
+        if len(keypoints) >= 2:
+            dists = []
+            for i in range(len(keypoints)):
+                for j in range(i + 1, len(keypoints)):
+                    d = np.sqrt((keypoints[i][0] - keypoints[j][0])**2 + 
+                                (keypoints[i][1] - keypoints[j][1])**2)
+                    if d > 30:  # 排除太近的点
+                        dists.append(d)
+            if dists:
+                # 取所有距离的中位数，字母大小约为最小距离的1/3
+                dists.sort()
+                median_dist = dists[len(dists)//2]
+                min_dist = dists[0]
+                # 字母大小估计：最小距离的1/3到1/2
+                typical_letter_size = max(16, int(min_dist * 0.4))
+            else:
+                typical_letter_size = 24
+        else:
+            typical_letter_size = 24
 
-            if 'bbox' in letter and isinstance(letter['bbox'], (tuple, list)) and len(letter['bbox']) >= 4:
-                bx, by, bw, bh = letter['bbox'][:4]
-                # 计算中心x位置
-                x = float(bx + bw / 2)
-                # y位置使用基线（约在60%-70%高度处，英文字母基线位置）
-                y = float(by + bh * 0.65)
-                font_size = float(bh * 0.8)  # 字号约等于字高
-            elif 'x' in letter and 'y' in letter:
-                x = float(letter['x'])
-                y = float(letter['y'])
-                font_size = float(letter.get('font_size', 12))
+        # 搜索半径：字母大小的3倍（字母通常标在端点外侧，距离较远）
+        search_radius = typical_letter_size * 3.0
 
-            # 获取文字内容
-            text = ''
-            for key in ['text', 'char', 'main_char', 'full_text']:
-                val = letter.get(key, '')
-                if val and isinstance(val, str) and len(val) > 0:
-                    text = val
-                    break
+        # 3. 全图OCR识别（多种预处理）
+        all_ocr_results = []
+        gray = cv2.cvtColor(img_color, cv2.COLOR_BGR2GRAY)
 
-            # 获取上标下标信息
-            sub_text = None
-            super_text = None
-            for key in ['subscript', 'is_subscript']:
-                val = letter.get(key)
-                if val:
-                    if isinstance(val, str):
-                        sub_text = val
-                    subscript = True
-                    break
-            for key in ['superscript', 'is_superscript']:
-                val = letter.get(key)
-                if val:
-                    if isinstance(val, str):
-                        super_text = val
-                    superscript = True
-                    break
+        try:
+            import pytesseract
+            whitelist = '-c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'
 
-            # 如果有sub或sup字段，也合并到text中
-            if sub_text and isinstance(sub_text, str) and len(sub_text) > 0:
-                subscript = True
-                text = f'{text}_{sub_text}'
-            if super_text and isinstance(super_text, str) and len(super_text) > 0:
-                superscript = True
-                text = f'{text}^{super_text}'
+            preprocess_configs = [
+                (2.0, 'otsu'),
+                (3.0, 'otsu'),
+                (4.0, 'otsu'),
+                (2.0, 'adaptive'),
+                (3.0, 'adaptive'),
+            ]
 
-            associated = letter.get('associated', False)
+            for scale, thresh_method in preprocess_configs:
+                try:
+                    scaled = cv2.resize(gray, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
 
-            if text and len(text) > 0:
+                    if thresh_method == 'otsu':
+                        _, binary = cv2.threshold(
+                            scaled, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU
+                        )
+                    else:
+                        binary = cv2.adaptiveThreshold(
+                            scaled, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                            cv2.THRESH_BINARY_INV, 15, 5
+                        )
+
+                    # 多种PSM模式
+                    for psm in [6, 7, 11, 13]:
+                        try:
+                            data = pytesseract.image_to_data(
+                                binary, lang='eng',
+                                output_type=pytesseract.Output.DICT,
+                                config=f'--psm {psm} --oem 3 {whitelist}'
+                            )
+                            for i in range(len(data['text'])):
+                                text = data['text'][i].strip()
+                                if not text or not text.isalnum():
+                                    continue
+                                conf = int(data['conf'][i]) / 100.0
+                                if conf < min_confidence * 0.5:
+                                    continue
+
+                                # 坐标转换回原图
+                                x = int(data['left'][i] / scale)
+                                y = int(data['top'][i] / scale)
+                                cw = int(data['width'][i] / scale)
+                                ch = int(data['height'][i] / scale)
+
+                                # 过滤太大的
+                                if ch > h_img * 0.2:
+                                    continue
+                                # 过滤太小的
+                                if ch < 8:
+                                    continue
+
+                                # 分离多字符
+                                if len(text) == 1:
+                                    all_ocr_results.append({
+                                        'char': text.upper(),
+                                        'confidence': conf,
+                                        'bbox': (x, y, cw, ch),
+                                    })
+                                elif len(text) <= 5:
+                                    # 多字符的话平均分配宽度
+                                    single_w = cw / len(text)
+                                    for j, ch_char in enumerate(text):
+                                        if ch_char.isalnum():
+                                            cx = x + int(j * single_w)
+                                            all_ocr_results.append({
+                                                'char': ch_char.upper(),
+                                                'confidence': conf,
+                                                'bbox': (cx, y, int(single_w), ch),
+                                            })
+                        except Exception:
+                            continue
+                except Exception:
+                    continue
+        except ImportError:
+            pass
+
+        if not all_ocr_results:
+            return []
+
+        # 4. 将OCR结果关联到最近的关键点，过滤掉太远的
+        filtered = []
+        used_keypoints = set()
+
+        # 按置信度排序
+        all_ocr_results.sort(key=lambda x: x['confidence'], reverse=True)
+
+        for ocr_res in all_ocr_results:
+            bx, by, bw, bh = ocr_res['bbox']
+            cx = bx + bw / 2
+            cy = by + bh / 2
+
+            # 找最近的关键点
+            min_dist = float('inf')
+            nearest_kp_idx = -1
+
+            for kp_idx, (kx, ky, shape_idx) in enumerate(keypoints):
+                dist = np.sqrt((cx - kx)**2 + (cy - ky)**2)
+                if dist < min_dist:
+                    min_dist = dist
+                    nearest_kp_idx = kp_idx
+
+            # 必须在关键点附近
+            if min_dist <= search_radius * 1.5:
+                # 同一个关键点只保留置信度最高的一个字母
+                kp_key = nearest_kp_idx
+                if kp_key not in used_keypoints:
+                    used_keypoints.add(kp_key)
+                    filtered.append({
+                        **ocr_res,
+                        'kp_idx': nearest_kp_idx,
+                        'shape_idx': keypoints[nearest_kp_idx][2],
+                        'dist_to_kp': min_dist,
+                    })
+
+        # 5. 进一步去重（同一个位置只保留一个）
+        deduped = []
+        used_positions = set()
+        bucket_size = max(8, typical_letter_size // 2)
+
+        for item in filtered:
+            bx, by, bw, bh = item['bbox']
+            cx = bx + bw / 2
+            cy = by + bh / 2
+            pos_key = (int(cx) // bucket_size, int(cy) // bucket_size)
+            if pos_key not in used_positions:
+                used_positions.add(pos_key)
+                deduped.append(item)
+
+        # 6. 转换为 TextAnnotation
+        for item in deduped:
+            bx, by, bw, bh = item['bbox']
+            x = float(bx + bw / 2)
+            y = float(by + bh * 0.65)
+            font_size = float(bh * 0.8)
+            text = item['char']
+
+            # 只保留大写字母
+            if text and len(text) == 1 and text.isupper() and text.isalpha():
                 ann = TextAnnotation(
-                    text=str(text),
+                    text=text,
                     x=x,
                     y=y,
                     font_size=font_size,
-                    superscript=bool(superscript),
-                    subscript=bool(subscript),
-                    associated=bool(associated),
+                    superscript=False,
+                    subscript=False,
+                    associated=False,
                 )
-                # 保存原始bbox用于后续位置优化
-                ann._orig_bbox = letter.get('bbox')
+                ann._orig_bbox = item['bbox']
+                ann._kp_idx = item.get('kp_idx', -1)
                 annotations.append(ann)
 
-        # 3. 在几何形状顶点附近搜索遗漏的字母
-        # 有些字母和几何线条连在一起，无法通过轮廓检测分离
-        if auto_label and shapes and enable_ocr:
-            extra_letter_dicts = self._detect_letters_near_vertices(
-                img_color, shapes, annotations, min_confidence
+        # 6.5. 关键点增强识别：对没有字母的关键点，擦除线条后再做OCR
+        # （解决字母与几何线条连在一起导致识别失败的问题）
+        if auto_label and shapes and len(annotations) < len(keypoints):
+            enhanced = self._enhance_ocr_at_keypoints(
+                img_color, shapes, keypoints, annotations, min_confidence
             )
-            if extra_letter_dicts:
-                # 转换为 TextAnnotation 对象
-                for letter in extra_letter_dicts:
-                    if not isinstance(letter, dict):
-                        continue
-                    bx, by, bw, bh = letter.get('bbox', (0, 0, 10, 10))
-                    x = float(bx + bw / 2)
-                    y = float(by + bh * 0.65)
-                    font_size = float(bh * 0.8)
-                    text = str(letter.get('text', letter.get('char', '')))
-                    if text:
-                        ann = TextAnnotation(
-                            text=text,
-                            x=x,
-                            y=y,
-                            font_size=font_size,
-                            superscript=False,
-                            subscript=False,
-                            associated=False,
-                        )
-                        ann._orig_bbox = letter.get('bbox')
-                        annotations.append(ann)
+            annotations.extend(enhanced)
 
-        # 4. 自动关联字母到几何形状，并优化标注位置
+        # 6.6. 最终去重（同一个位置只保留一个标注）
+        if len(annotations) > 1:
+            deduped_final = []
+            used_pos = set()
+            bucket = max(8, typical_letter_size // 2 if 'typical_letter_size' in dir() else 12)
+            for ann in annotations:
+                pos_key = (int(ann.x) // bucket, int(ann.y) // bucket)
+                if pos_key not in used_pos:
+                    used_pos.add(pos_key)
+                    deduped_final.append(ann)
+            annotations = deduped_final
+
+        # 7. 自动关联字母到几何形状，并优化标注位置
         if auto_label and shapes and annotations:
-            h_img, w_img = img_color.shape[:2]
             annotations = self._associate_and_position_annotations(
                 annotations, shapes, (w_img, h_img)
             )
 
-        # 5. 删除字母形状的线条
+        # 8. 删除字母形状的线条
         if remove_letter_lines and annotations:
             self._remove_letter_shapes(shapes, annotations)
 
         return annotations
+
+    def _enhance_ocr_at_keypoints(self, img_color, shapes, keypoints, existing_annotations, min_confidence):
+        """
+        在关键点附近增强OCR识别：擦除几何线条后再识别字母
+        
+        解决字母与几何线条连在一起（如三角形顶点的A）导致OCR失败的问题。
+        """
+        import cv2
+        
+        enhanced = []
+        h_img, w_img = img_color.shape[:2]
+        gray = cv2.cvtColor(img_color, cv2.COLOR_BGR2GRAY)
+        
+        # 找出已有标注关联的关键点
+        used_keypoint_indices = set()
+        for ann in existing_annotations:
+            if hasattr(ann, '_kp_idx'):
+                used_keypoint_indices.add(ann._kp_idx)
+        
+        # 估计典型字母大小
+        if existing_annotations:
+            sizes = [ann.font_size for ann in existing_annotations]
+            typical_letter_size = int(np.median(sizes))
+        else:
+            typical_letter_size = 24
+        
+        # 线条宽度估计
+        line_width = max(4, typical_letter_size // 4)
+        
+        try:
+            import pytesseract
+        except ImportError:
+            return enhanced
+        
+        whitelist = '-c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ'
+        
+        # 对每个未使用的关键点做增强识别
+        for kp_idx, (kx, ky, shape_idx) in enumerate(keypoints):
+            if kp_idx in used_keypoint_indices:
+                continue
+            
+            kx_int = int(kx)
+            ky_int = int(ky)
+            
+            # 检查这个关键点附近是否已有标注（防止重复）
+            has_nearby = False
+            for ann in existing_annotations:
+                dist = np.sqrt((ann.x - kx)**2 + (ann.y - ky)**2)
+                if dist < typical_letter_size * 2:
+                    has_nearby = True
+                    break
+            if has_nearby:
+                continue
+            
+            # 计算字母可能在的方向（外侧方向）
+            # 对于多边形顶点，字母通常在角平分线的外侧
+            offset_dir_x = 0
+            offset_dir_y = 0
+            
+            shape = shapes[shape_idx]
+            shape_type = shape.type.value
+            points = shape.points
+            
+            if shape_type in ('polygon', 'triangle', 'rectangle'):
+                # 找到该关键点对应的点索引
+                pt_idx = -1
+                for i, p in enumerate(points):
+                    if abs(p[0] - kx) < 5 and abs(p[1] - ky) < 5:
+                        pt_idx = i
+                        break
+                
+                if pt_idx >= 0:
+                    n = len(points)
+                    prev_idx = (pt_idx - 1) % n
+                    next_idx = (pt_idx + 1) % n
+                    prev_p = points[prev_idx]
+                    curr_p = points[pt_idx]
+                    next_p = points[next_idx]
+                    
+                    # 计算两条边的单位向量（指向顶点）
+                    v1_x = prev_p[0] - curr_p[0]
+                    v1_y = prev_p[1] - curr_p[1]
+                    v2_x = next_p[0] - curr_p[0]
+                    v2_y = next_p[1] - curr_p[1]
+                    
+                    len1 = np.sqrt(v1_x**2 + v1_y**2)
+                    len2 = np.sqrt(v2_x**2 + v2_y**2)
+                    if len1 > 0 and len2 > 0:
+                        v1_x /= len1
+                        v1_y /= len1
+                        v2_x /= len2
+                        v2_y /= len2
+                        
+                        # 角平分线方向（向内）
+                        bisec_x = v1_x + v2_x
+                        bisec_y = v1_y + v2_y
+                        bisec_len = np.sqrt(bisec_x**2 + bisec_y**2)
+                        
+                        if bisec_len > 0:
+                            # 外侧方向是角平分线的反方向
+                            offset_dir_x = -bisec_x / bisec_len
+                            offset_dir_y = -bisec_y / bisec_len
+            
+            elif shape_type == 'line':
+                # 线段端点：字母通常在线段延长线的外侧
+                pt_idx = -1
+                for i, p in enumerate(points):
+                    if abs(p[0] - kx) < 5 and abs(p[1] - ky) < 5:
+                        pt_idx = i
+                        break
+                
+                if pt_idx >= 0 and len(points) >= 2:
+                    other_idx = 1 - pt_idx
+                    dx = points[other_idx][0] - points[pt_idx][0]
+                    dy = points[other_idx][1] - points[pt_idx][1]
+                    length = np.sqrt(dx**2 + dy**2)
+                    if length > 0:
+                        # 外侧方向是从另一个点指向当前点的方向（延长线方向）
+                        offset_dir_x = -dx / length
+                        offset_dir_y = -dy / length
+            
+            # 如果没有计算出方向，默认向上
+            if offset_dir_x == 0 and offset_dir_y == 0:
+                offset_dir_y = -1.0
+            
+            # 在外侧方向上创建一个子ROI，专门用于字母识别
+            # 这样可以避免几何线条的干扰
+            letter_roi_size = int(typical_letter_size * 2.5)
+            letter_roi_center_x = kx_int + int(offset_dir_x * typical_letter_size * 0.5)
+            letter_roi_center_y = ky_int + int(offset_dir_y * typical_letter_size * 0.5)
+            
+            letter_roi_x = letter_roi_center_x - letter_roi_size // 2
+            letter_roi_y = letter_roi_center_y - letter_roi_size // 2
+            
+            # 确保在图像范围内
+            letter_roi_x = max(0, letter_roi_x)
+            letter_roi_y = max(0, letter_roi_y)
+            letter_roi_w = min(letter_roi_size, w_img - letter_roi_x)
+            letter_roi_h = min(letter_roi_size, h_img - letter_roi_y)
+            
+            if letter_roi_w < typical_letter_size or letter_roi_h < typical_letter_size:
+                continue
+            
+            # 提取字母ROI
+            letter_roi_gray = gray[letter_roi_y:letter_roi_y+letter_roi_h, 
+                                   letter_roi_x:letter_roi_x+letter_roi_w].copy()
+            
+            # 对字母ROI做OCR
+            best_char = None
+            best_conf = 0.0
+            best_bbox = None
+            
+            for scale in [2.0, 3.0, 4.0]:
+                try:
+                    scaled = cv2.resize(letter_roi_gray, None, fx=scale, fy=scale, 
+                                       interpolation=cv2.INTER_CUBIC)
+                    _, binary = cv2.threshold(
+                        scaled, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU
+                    )
+                    
+                    for psm in [7, 10, 11, 13]:
+                        try:
+                            data = pytesseract.image_to_data(
+                                binary, lang='eng',
+                                output_type=pytesseract.Output.DICT,
+                                config=f'--psm {psm} --oem 3 {whitelist}'
+                            )
+                            
+                            for i in range(len(data['text'])):
+                                text = data['text'][i].strip()
+                                if not text or not text.isalpha():
+                                    continue
+                                conf = int(data['conf'][i]) / 100.0
+                                if conf < min_confidence * 0.4:
+                                    continue
+                                
+                                x_local = int(data['left'][i] / scale)
+                                y_local = int(data['top'][i] / scale)
+                                cw_local = int(data['width'][i] / scale)
+                                ch_local = int(data['height'][i] / scale)
+                                
+                                if len(text) == 1 and text.isupper():
+                                    if conf > best_conf:
+                                        best_conf = conf
+                                        best_char = text
+                                        best_bbox = (x_local, y_local, cw_local, ch_local)
+                                elif len(text) > 1 and text.isupper():
+                                    # 多个字母：取最大/最居中的那个
+                                    char_w = cw_local / len(text)
+                                    for j, ch_char in enumerate(text):
+                                        cx = x_local + j * char_w + char_w / 2
+                                        cy = y_local + ch_local / 2
+                                        center_dist = np.sqrt(
+                                            (cx - letter_roi_w/2)**2 + 
+                                            (cy - letter_roi_h/2)**2
+                                        )
+                                        # 优先选居中且置信度高的
+                                        if conf > min_confidence * 0.3:
+                                            if best_char is None or (conf > best_conf * 0.7 and center_dist < letter_roi_w * 0.4):
+                                                best_conf = conf
+                                                best_char = ch_char
+                                                char_x = x_local + int(j * char_w)
+                                                best_bbox = (char_x, y_local, int(char_w), ch_local)
+                        except Exception:
+                            continue
+                except Exception:
+                    continue
+            
+            # 如果识别到了字母，添加到结果
+            if best_char and best_bbox:
+                x_local, y_local, cw_local, ch_local = best_bbox
+                
+                # 转换回原图坐标
+                x = float(letter_roi_x + x_local + cw_local / 2)
+                y = float(letter_roi_y + y_local + ch_local * 0.65)
+                font_size = float(ch_local * 0.8)
+                
+                # 验证：字母应该在关键点附近
+                dist_to_kp = np.sqrt((x - kx)**2 + (y - ky)**2)
+                if dist_to_kp > typical_letter_size * 3:
+                    continue
+                
+                # 字号校准：如果和典型字母大小差异太大，用典型值
+                if existing_annotations and (font_size < typical_letter_size * 0.6 or font_size > typical_letter_size * 1.5):
+                    font_size = float(typical_letter_size)
+                
+                ann = TextAnnotation(
+                    text=best_char,
+                    x=x,
+                    y=y,
+                    font_size=font_size,
+                    superscript=False,
+                    subscript=False,
+                    associated=False,
+                )
+                ann._orig_bbox = (letter_roi_x + x_local, letter_roi_y + y_local, cw_local, ch_local)
+                ann._kp_idx = kp_idx
+                ann._enhanced = True
+                enhanced.append(ann)
+        
+        return enhanced
+
+    def _ocr_single_char(self, roi_gray, bx, by, bw, bh, offset_x, offset_y, min_conf):
+        """对单个字符候选区域做OCR识别
+
+        参数:
+            roi_gray: 整个ROI的灰度图
+            bx, by, bw, bh: 字符在ROI中的位置和大小
+            offset_x, offset_y: ROI在原图中的偏移
+            min_conf: 最小置信度
+
+        返回:
+            (char, confidence): 识别到的字符和置信度
+        """
+        try:
+            import pytesseract
+        except ImportError:
+            return None, 0.0
+
+        import cv2
+
+        if roi_gray is None or roi_gray.size == 0:
+            return None, 0.0
+
+        roi_h, roi_w = roi_gray.shape
+        if bw < 5 or bh < 8:
+            return None, 0.0
+
+        # 裁剪字符区域（加一点边距）
+        pad = max(3, int(min(bw, bh) * 0.3))
+        cx1 = max(0, bx - pad)
+        cy1 = max(0, by - pad)
+        cx2 = min(roi_w, bx + bw + pad)
+        cy2 = min(roi_h, by + bh + pad)
+
+        char_roi = roi_gray[cy1:cy2, cx1:cx2]
+        if char_roi.size == 0:
+            return None, 0.0
+
+        best_char = None
+        best_conf = 0.0
+
+        whitelist = '-c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ'
+
+        # 多种缩放比例
+        for scale in [2.0, 3.0, 4.0]:
+            try:
+                scaled = cv2.resize(char_roi, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
+                _, binary = cv2.threshold(scaled, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+
+                # 多种PSM模式
+                for psm in [10, 7, 8]:
+                    try:
+                        data = pytesseract.image_to_data(
+                            binary, lang='eng',
+                            output_type=pytesseract.Output.DICT,
+                            config=f'--psm {psm} --oem 3 {whitelist}'
+                        )
+                        for i in range(len(data['text'])):
+                            text = data['text'][i].strip()
+                            if not text:
+                                continue
+                            conf = int(data['conf'][i]) / 100.0
+                            if conf < min_conf:
+                                continue
+                            # 只取单个大写字母
+                            if len(text) == 1 and text.isupper() and text.isalpha():
+                                if conf > best_conf:
+                                    best_conf = conf
+                                    best_char = text
+                    except Exception:
+                        continue
+            except Exception:
+                continue
+
+        return best_char, best_conf
+
+    def _ocr_roi(self, roi_gray, offset_x, offset_y, min_conf):
+        """对一个ROI区域做OCR识别
+
+        参数:
+            roi_gray: 灰度ROI图像
+            offset_x, offset_y: ROI在原图中的偏移
+            min_conf: 最小置信度
+
+        返回:
+            list: [(char, confidence, bbox), ...]
+        """
+        try:
+            import pytesseract
+        except ImportError:
+            return []
+
+        if roi_gray is None or roi_gray.size == 0:
+            return []
+
+        h, w = roi_gray.shape
+        if h < 10 or w < 10:
+            return []
+
+        import cv2
+        results = []
+        whitelist = '-c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'
+
+        # 多种缩放比例
+        for scale in [2.0, 3.0, 4.0]:
+            try:
+                scaled = cv2.resize(roi_gray, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
+                # OTSU二值化
+                _, binary = cv2.threshold(scaled, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+
+                # 多种PSM模式
+                for psm in [7, 10, 8]:
+                    try:
+                        data = pytesseract.image_to_data(
+                            binary, lang='eng',
+                            output_type=pytesseract.Output.DICT,
+                            config=f'--psm {psm} --oem 3 {whitelist}'
+                        )
+                        for i in range(len(data['text'])):
+                            text = data['text'][i].strip()
+                            if not text or not text.isalnum():
+                                continue
+                            conf = int(data['conf'][i]) / 100.0
+                            if conf < min_conf:
+                                continue
+
+                            # 坐标转换回原图
+                            x = offset_x + int(data['left'][i] / scale)
+                            y = offset_y + int(data['top'][i] / scale)
+                            cw = int(data['width'][i] / scale)
+                            ch = int(data['height'][i] / scale)
+
+                            # 只处理单个字符（或短字符串）
+                            if len(text) == 1:
+                                results.append((text.upper(), conf, (x, y, cw, ch)))
+                            elif len(text) <= 3:
+                                # 多字符的话分开
+                                single_w = cw / len(text)
+                                for j, ch_char in enumerate(text):
+                                    if ch_char.isalnum():
+                                        cx = x + int(j * single_w)
+                                        results.append((ch_char.upper(), conf, (cx, y, int(single_w), ch)))
+                    except Exception:
+                        continue
+            except Exception:
+                continue
+
+        return results
 
     def _detect_letters_near_vertices(self, img_color: np.ndarray,
                                        shapes: List[Shape],
@@ -1406,10 +1927,13 @@ class GeometryMode:
             ann.associated = True
             ann.associated_shape = id(shape)
 
-            # 计算偏移方向和距离
+            # 位置优化策略：
+            # 1. 保持字母的原始位置（因为OCR识别的位置就是它在图中的位置）
+            # 2. 只做微小调整，确保标注在形状外侧
+            # 3. 偏移距离 = 字母大小的 30%（微调，不是大移动）
             offset_dir_x = 0
             offset_dir_y = 0
-            offset_dist = default_offset
+            offset_dist = default_offset * 0.3  # 只做微调
 
             if shape_type in ('polygon', 'triangle', 'rectangle') and ptype == 'vertex':
                 # 多边形顶点：计算角平分线方向（向外）
@@ -1422,13 +1946,11 @@ class GeometryMode:
                     curr_p = points[pidx]
                     next_p = points[next_idx]
 
-                    # 两条边的方向向量（从顶点指向相邻顶点）
                     v1_x = prev_p[0] - curr_p[0]
                     v1_y = prev_p[1] - curr_p[1]
                     v2_x = next_p[0] - curr_p[0]
                     v2_y = next_p[1] - curr_p[1]
 
-                    # 归一化
                     len1 = np.sqrt(v1_x**2 + v1_y**2)
                     len2 = np.sqrt(v2_x**2 + v2_y**2)
                     if len1 > 0 and len2 > 0:
@@ -1437,33 +1959,27 @@ class GeometryMode:
                         v2_x /= len2
                         v2_y /= len2
 
-                        # 角平分线方向（两个边向量之和，指向内部）
                         bisec_x = v1_x + v2_x
                         bisec_y = v1_y + v2_y
                         bisec_len = np.sqrt(bisec_x**2 + bisec_y**2)
 
                         if bisec_len > 0:
-                            # 反向就是向外
                             offset_dir_x = -bisec_x / bisec_len
                             offset_dir_y = -bisec_y / bisec_len
 
             elif shape_type == 'circle' and ptype == 'center':
-                # 圆心：沿字母原始位置的径向向外
                 dx = orig_cx - kx
                 dy = orig_cy - ky
                 dist = np.sqrt(dx**2 + dy**2)
                 if dist > 0:
                     offset_dir_x = dx / dist
                     offset_dir_y = dy / dist
-                else:
-                    offset_dir_x = 1.0
-                    offset_dir_y = 0.0
-                # 圆的偏移量 = 半径 + 额外间距
                 radius = shape.extra.get('radius', 50)
-                offset_dist = radius + default_offset * 0.5
+                # 圆的标注放在圆周外侧
+                offset_dist = radius + default_offset * 0.3
 
             elif shape_type == 'line' and ptype == 'vertex':
-                # 线段端点：垂直于线段向外
+                # 线段端点：垂直于线段，选择字母所在的一侧
                 points = shape.points
                 if len(points) >= 2:
                     if pidx == 0:
@@ -1472,28 +1988,20 @@ class GeometryMode:
                         other_p = points[0]
                     curr_p = points[pidx]
 
-                    # 线段方向
                     line_dx = other_p[0] - curr_p[0]
                     line_dy = other_p[1] - curr_p[1]
                     line_len = np.sqrt(line_dx**2 + line_dy**2)
 
                     if line_len > 0:
-                        # 两个垂线方向
                         perp1_x = -line_dy / line_len
                         perp1_y = line_dx / line_len
 
-                        # 选择离字母更近的那个方向
-                        mid_x = (curr_p[0] + other_p[0]) / 2
-                        mid_y = (curr_p[1] + other_p[1]) / 2
-                        side1_x = mid_x + perp1_x * 10
-                        side1_y = mid_y + perp1_y * 10
-                        side2_x = mid_x - perp1_x * 10
-                        side2_y = mid_y - perp1_y * 10
+                        # 判断字母在哪一侧
+                        to_letter_x = orig_cx - kx
+                        to_letter_y = orig_cy - ky
+                        dot = perp1_x * to_letter_x + perp1_y * to_letter_y
 
-                        dist1 = np.sqrt((orig_cx - side1_x)**2 + (orig_cy - side1_y)**2)
-                        dist2 = np.sqrt((orig_cx - side2_x)**2 + (orig_cy - side2_y)**2)
-
-                        if dist1 < dist2:
+                        if dot >= 0:
                             offset_dir_x = perp1_x
                             offset_dir_y = perp1_y
                         else:
@@ -1509,10 +2017,11 @@ class GeometryMode:
                     offset_dir_x = dx / dist
                     offset_dir_y = dy / dist
 
-            # 计算最终位置
+            # 计算最终位置：从原始位置沿外侧方向微调
             if offset_dir_x != 0 or offset_dir_y != 0:
-                new_x = kx + offset_dir_x * offset_dist
-                new_y = ky + offset_dir_y * offset_dist
+                # 从原始位置向外微调，而不是从关键点开始偏移
+                new_x = orig_cx + offset_dir_x * offset_dist
+                new_y = orig_cy + offset_dir_y * offset_dist
 
                 # 确保在图像范围内
                 new_x = max(10, min(w_img - 10, new_x))
