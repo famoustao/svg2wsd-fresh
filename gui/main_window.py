@@ -1569,6 +1569,10 @@ class MainWindow:
         if isinstance(result, dict) and 'error' in result:
             self._update_status(f'预览失败: {result["error"]}')
             return
+        
+        # 应用用户选择的线条颜色（保持预览与导出一致）
+        self._apply_line_color_override(result)
+        
         # 正常结果
         self.preview_panel.set_canvas_data(result)
         if self._current_file_index >= 0:
@@ -1576,6 +1580,36 @@ class MainWindow:
             self._update_status(f'预览更新完成: {file_info["name"]}')
         else:
             self._update_status('预览更新完成')
+
+    def _apply_line_color_override(self, canvas_data):
+        """
+        对 CanvasData 应用用户选择的线条颜色覆盖
+        使预览颜色与导出颜色保持一致
+        """
+        line_color_none = self.line_color_none_var.get()
+        line_color_hex = self.line_color_var.get()
+        
+        # 如果勾选了"无色"，设置alpha=0（预览中用虚线或浅色表示透明）
+        # 由于tkinter canvas不支持透明线条，无色时用浅灰色虚线示意
+        if line_color_none:
+            # 预览中无色用浅灰虚线表示（tkinter不支持完全透明的线条）
+            # 实际导出时才是真正透明
+            for shape in canvas_data.shapes:
+                shape.line_color = (200, 200, 200)  # BGR: 浅灰
+            return
+        
+        # 解析 hex 颜色为 BGR
+        h = line_color_hex.lstrip('#')
+        if len(h) != 6:
+            return
+        r = int(h[0:2], 16)
+        g = int(h[2:4], 16)
+        b = int(h[4:6], 16)
+        bgr = (b, g, r)  # Shape.line_color 是 BGR 格式
+        
+        # 覆盖所有形状的线条颜色
+        for shape in canvas_data.shapes:
+            shape.line_color = bgr
 
     # ============================================================
     # 事件处理 - 画布设置
