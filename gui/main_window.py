@@ -15,7 +15,7 @@ import os
 import sys
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Tuple
 
 # 确保项目根目录在路径中
 _project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
