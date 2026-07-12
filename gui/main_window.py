@@ -403,7 +403,7 @@ class MainWindow:
         )
 
         # 初始化选项卡图标状态（第一个选中）
-        self.after(100, self._update_tab_icons)
+        self.root.after(100, self._update_tab_icons)
 
     # ============================================================
     # 左侧控制面板
