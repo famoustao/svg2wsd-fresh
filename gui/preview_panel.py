@@ -892,8 +892,8 @@ class PreviewPanel(ttk.Frame):
 
     def _build_ui(self):
         """构建界面"""
-        # 顶部：Notebook 选项卡
-        self.notebook = ttk.Notebook(self)
+        # 顶部：Notebook 选项卡（扁平化小尺寸样式）
+        self.notebook = ttk.Notebook(self, style='Flat.TNotebook')
         self.notebook.pack(fill=tk.BOTH, expand=True)
 
         # --- 原图预览页 ---

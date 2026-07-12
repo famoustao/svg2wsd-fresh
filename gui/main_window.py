@@ -99,10 +99,29 @@ class ScrollableFrame(ttk.Frame):
     def _bind_mousewheel(self):
         """绑定鼠标滚轮滚动"""
         # Windows / macOS
-        self.canvas.bind_all('<MouseWheel>', self._on_mousewheel)
+        self.canvas.bind('<MouseWheel>', self._on_mousewheel)
         # Linux
-        self.canvas.bind_all('<Button-4>', self._on_mousewheel_linux_up)
-        self.canvas.bind_all('<Button-5>', self._on_mousewheel_linux_down)
+        self.canvas.bind('<Button-4>', self._on_mousewheel_linux_up)
+        self.canvas.bind('<Button-5>', self._on_mousewheel_linux_down)
+        # 让 scrollable_frame 也接收滚轮事件
+        self.scrollable_frame.bind('<MouseWheel>', self._on_mousewheel)
+        self.scrollable_frame.bind('<Button-4>', self._on_mousewheel_linux_up)
+        self.scrollable_frame.bind('<Button-5>', self._on_mousewheel_linux_down)
+
+    def bind_all_mousewheel(self):
+        """递归绑定 scrollable_frame 所有子控件的滚轮事件
+
+        应在所有子控件添加完成后调用。
+        """
+        self._bind_children_mousewheel(self.scrollable_frame)
+
+    def _bind_children_mousewheel(self, widget):
+        """递归绑定子控件的滚轮事件"""
+        for child in widget.winfo_children():
+            child.bind('<MouseWheel>', self._on_mousewheel, add='+')
+            child.bind('<Button-4>', self._on_mousewheel_linux_up, add='+')
+            child.bind('<Button-5>', self._on_mousewheel_linux_down, add='+')
+            self._bind_children_mousewheel(child)
 
     def _on_mousewheel(self, event):
         """鼠标滚轮滚动（Windows / macOS）"""
@@ -422,6 +441,9 @@ class MainWindow:
 
         # 初始显示漫画模式参数，隐藏几何模式参数
         self._geo_params_card.pack_forget()
+
+        # 绑定所有子控件的滚轮事件（必须在所有控件添加完成后调用）
+        self.scroll_frame.bind_all_mousewheel()
 
     def _build_file_list_card(self, parent):
         """构建文件列表卡片"""
@@ -863,7 +885,7 @@ class MainWindow:
             font=('Microsoft YaHei UI', 9),
         ).pack(side='left')
 
-        self.canvas_size_var = tk.StringVar(value='A4横向')
+        self.canvas_size_var = tk.StringVar(value='正方形')
         self.canvas_size_combo = ttk.Combobox(
             canvas_frame,
             textvariable=self.canvas_size_var,
@@ -1172,20 +1194,60 @@ class MainWindow:
         执行预览更新
 
         从当前文件和参数生成预览数据，更新 WSD 预览面板。
-        实际项目中应调用对应模式的处理函数，这里预留接口。
+        调用对应模式的处理函数，将结果通过 preview_panel.set_canvas_data() 显示。
         """
         if self._current_file_index < 0:
             return
 
         file_info = self._files[self._current_file_index]
+        filepath = file_info['path']
         self._update_status(f'正在生成预览: {file_info["name"]}...')
 
-        # 这里是预览更新的核心逻辑占位
-        # 实际项目中应调用 comic_mode 或 geo_mode 的处理函数
-        # 并将结果通过 preview_panel.set_canvas_data() 显示
         params = self._get_current_params()
-        # TODO: 调用实际处理逻辑
-        # self._update_status('预览更新完成')
+        mode_type = 'comic' if self._current_mode == 'comic' else 'geo'
+
+        # 后台处理预览（避免阻塞UI）
+        def preview_task():
+            try:
+                from core.batch_manager import BatchManager
+                mgr = BatchManager()
+                mgr.add_file(filepath)
+                result = mgr.process_all(
+                    mode_type=mode_type,
+                    params=params,
+                )
+                if result.get('success', 0) > 0 and mgr.files[0].result is not None:
+                    return mgr.files[0].result
+                return None
+            except Exception as e:
+                return {'error': str(e)}
+
+        def on_done(result):
+            if isinstance(result, dict) and 'error' in result:
+                self._update_status(f'预览失败: {result["error"]}')
+                return
+            if result is not None:
+                self.preview_panel.set_canvas_data(result)
+                self._update_status(f'预览更新完成: {file_info["name"]}')
+            else:
+                self._update_status('未能生成预览数据')
+
+        # 使用 TaskWorker 或直接在主线程简单处理（小图）
+        # 为了简单和稳定，这里直接同步处理（预览用，数据量小）
+        try:
+            if mode_type == 'geo':
+                from modes.geo_mode import GeometryMode
+                mode = GeometryMode()
+                canvas_data = mode.process(filepath, params)
+            else:  # comic
+                from modes.comic_mode import ComicMode
+                mode = ComicMode()
+                canvas_data = mode.process(filepath, params)
+
+            self.preview_panel.set_canvas_data(canvas_data)
+            self._update_status(f'预览更新完成: {file_info["name"]}')
+        except Exception as e:
+            self._update_status(f'预览失败: {str(e)}')
 
     # ============================================================
     # 事件处理 - 画布设置
@@ -1400,7 +1462,7 @@ class MainWindow:
                 progress_callback(80.0, '正在导出WSD文件...')
 
             # 2. 批量导出
-            canvas_size_mm = (297, 210)  # 默认A4横向
+            canvas_size_mm = self._get_canvas_size_mm()
             export_result = batch_mgr.export_all(
                 output_dir=output_dir,
                 format='wsd',
@@ -1570,6 +1632,26 @@ class MainWindow:
     def _update_status(self, text: str):
         """更新状态栏文字"""
         self.status_var.set(text)
+
+    def _get_canvas_size_mm(self) -> Tuple[float, float]:
+        """
+        获取当前画布尺寸（毫米）
+
+        Returns:
+            (width_mm, height_mm): 画布宽高
+        """
+        size = self.canvas_size_var.get()
+        if size == 'A4横向':
+            return (297.0, 210.0)
+        elif size == 'A4纵向':
+            return (210.0, 297.0)
+        elif size == 'A3':
+            return (420.0, 297.0)
+        elif size == '正方形':
+            return (200.0, 200.0)
+        else:
+            # 自定义 - 使用默认正方形
+            return (200.0, 200.0)
 
     # ============================================================
     # 主循环

@@ -970,10 +970,11 @@ class PureWSDBuilder:
         # 4. 块尾部（画布属性等）
         result.extend(self.block_tail)
 
-        # 5. FFFF 结束标记 + 文件大小字段
-        result.extend(b'\xff\xff\xff\xff')
-        file_size = len(result) + 4  # +4 是大小字段本身
+        # 5. 文件大小字段 + FFFF 结束标记
+        # 文件大小在 FFFF 之前4字节的位置
+        file_size = len(result) + 8  # +4 (大小字段) + 4 (FFFF)
         result.extend(struct.pack('<I', file_size))
+        result.extend(b'\xff\xff\xff\xff')
 
         return bytes(result)
 
