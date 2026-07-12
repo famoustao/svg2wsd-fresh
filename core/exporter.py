@@ -568,7 +568,8 @@ def _transform_annotation(annotation: TextAnnotation,
 def export_wsd_single(canvas_data: CanvasData,
                       output_path: str,
                       canvas_size_mm: Optional[Tuple[float, float]] = None,
-                      linewidth: int = 80) -> None:
+                      linewidth: int = 80,
+                      line_color_override: Optional[str] = None) -> None:
     """
     单画布导出为单个 WSD 文件
 
@@ -592,6 +593,7 @@ def export_wsd_single(canvas_data: CanvasData,
         output_path: 输出 WSD 文件路径
         canvas_size_mm: 画布尺寸 (宽mm, 高mm)，None=默认正方形(140x140)
         linewidth: 线宽（WSD单位），默认 80（0.2mm）
+        line_color_override: 线条颜色覆盖（十六进制，如 '#ff0000'），None 则使用原始颜色
 
     返回:
         None（直接写入文件）
@@ -605,6 +607,16 @@ def export_wsd_single(canvas_data: CanvasData,
     # 计算坐标变换（像素 -> WSD单位，等比缩放居中）
     scale, offset_x, offset_y = _fit_canvas_to_wsd(canvas_data, canvas_size_mm)
 
+    # 解析覆盖颜色（hex -> BGR tuple）
+    override_bgr = None
+    if line_color_override:
+        h = line_color_override.lstrip('#')
+        if len(h) == 6:
+            r = int(h[0:2], 16)
+            g = int(h[2:4], 16)
+            b = int(h[4:6], 16)
+            override_bgr = (b, g, r)  # OpenCV BGR 顺序
+
     # 创建构建器（纯二进制，内置骨架）
     builder = PureWSDBuilder()
 
@@ -616,6 +628,9 @@ def export_wsd_single(canvas_data: CanvasData,
     for shape in canvas_data.shapes:
         # 坐标变换
         transformed = _transform_shape(shape, scale, offset_x, offset_y)
+        # 应用覆盖颜色
+        if override_bgr is not None:
+            transformed.line_color = override_bgr
         rec = _shape_to_path_record(transformed, linewidth=linewidth)
         if rec is not None:
             builder.add_path(rec)
@@ -642,7 +657,8 @@ def export_wsd_single(canvas_data: CanvasData,
 
 def export_wsd_multi(canvas_list: List[CanvasData],
                      output_path: str,
-                     canvas_size_mm: Optional[Tuple[float, float]] = None) -> None:
+                     canvas_size_mm: Optional[Tuple[float, float]] = None,
+                     line_color_override: Optional[str] = None) -> None:
     """
     多个画布导出到同一个 WSD 文件的不同画布
 
@@ -673,7 +689,8 @@ def export_wsd_multi(canvas_list: List[CanvasData],
     #   3. 正确设置画布间的索引和偏移
 
     # 临时：导出第一个画布
-    export_wsd_single(canvas_list[0], output_path, canvas_size_mm)
+    export_wsd_single(canvas_list[0], output_path, canvas_size_mm,
+                      line_color_override=line_color_override)
 
 
 # ============================================================

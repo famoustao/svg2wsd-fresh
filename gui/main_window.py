@@ -873,7 +873,7 @@ class MainWindow:
 
         content = self._output_card.content
 
-        # 线宽 + 画布大小（一行排列）
+        # 线宽 + 线条颜色（一行排列）
         row1_frame = tk.Frame(content, bg=get_color('card'))
         row1_frame.pack(fill='x', pady=(0, 2))
 
@@ -895,6 +895,27 @@ class MainWindow:
             command=self._on_param_changed,
         )
         self.line_width_spin.pack(side='left', padx=(4, 12))
+
+        tk.Label(
+            row1_frame,
+            text='线条颜色:',
+            bg=get_color('card'),
+            fg=get_color('text'),
+            font=('Microsoft YaHei UI', 9),
+        ).pack(side='left')
+
+        self.line_color_var = tk.StringVar(value='#000000')
+        self._line_color_btn = tk.Button(
+            row1_frame,
+            text='  黑色  ',
+            bg='#000000',
+            fg='#ffffff',
+            font=('Microsoft YaHei UI', 8),
+            relief='flat',
+            width=8,
+            command=self._on_pick_line_color,
+        )
+        self._line_color_btn.pack(side='left', padx=(4, 0))
 
         tk.Label(
             row1_frame,
@@ -995,7 +1016,18 @@ class MainWindow:
         )
         self.progress_label.pack(side='right', padx=(0, 4))
 
-        # 状态文字
+        # 当前文件状态文字（进度条左侧）
+        self.status_file_var = tk.StringVar(value='待处理')
+        self.status_file_label = tk.Label(
+            status_bar,
+            textvariable=self.status_file_var,
+            bg=get_color('primary'),
+            fg='#a0d2ff',
+            font=('Microsoft YaHei UI', 9),
+        )
+        self.status_file_label.pack(side='right', padx=(0, 8))
+
+        # 状态文字（左侧）
         self.status_var = tk.StringVar(value='就绪')
         self.status_label = tk.Label(
             status_bar,
@@ -1654,6 +1686,23 @@ class MainWindow:
             command=on_ok,
         ).pack(side='right')
 
+    def _on_pick_line_color(self):
+        """选择线条颜色"""
+        from tkinter import colorchooser
+        current = self.line_color_var.get()
+        result = colorchooser.askcolor(color=current, title='选择线条颜色')
+        if result and result[1]:
+            hex_color = result[1]
+            self.line_color_var.set(hex_color)
+            # 更新按钮显示
+            self._line_color_btn.config(bg=hex_color)
+            # 根据亮度决定文字颜色
+            rgb = result[0]
+            brightness = (rgb[0] * 299 + rgb[1] * 587 + rgb[2] * 114) / 1000
+            text_color = '#000000' if brightness > 128 else '#ffffff'
+            self._line_color_btn.config(fg=text_color)
+            self._on_param_changed()
+
     def _on_canvas_size_changed(self, event):
         """画布大小下拉框变化"""
         size = self.canvas_size_var.get()
@@ -1731,7 +1780,7 @@ class MainWindow:
                 if progress_callback:
                     progress = ((current_idx - 1) / total) * 100 * 0.8  # 处理占80%进度
                     fname = os.path.basename(file_item.filepath)
-                    status_text = '处理中' if file_item.is_processing else '已完成'
+                    status_text = '正在解析' if file_item.is_processing else '已解析'
                     progress_callback(progress, f'{status_text}: {fname} ({current_idx}/{total})')
 
             # 1. 批量处理
@@ -1750,12 +1799,14 @@ class MainWindow:
 
             # 2. 批量导出
             canvas_size_mm = self._get_canvas_size_mm()
+            line_color = params.get('line_color')
             export_result = batch_mgr.export_all(
                 output_dir=output_dir,
                 format='wsd',
                 merge_mode=export_mode,
                 merge_name='合并输出.wsd',
                 canvas_size_mm=canvas_size_mm,
+                line_color=line_color,
             )
 
             if progress_callback:
@@ -1783,6 +1834,8 @@ class MainWindow:
             if msg_type == MessageType.PROGRESS:
                 progress, message = data
                 self._update_status_bar_progress(progress, message)
+                # 同步更新文件列表中的状态
+                self._sync_file_status_from_batch()
             elif msg_type == MessageType.MESSAGE:
                 self._update_status(str(data))
             elif msg_type == MessageType.RESULT:
@@ -1814,6 +1867,17 @@ class MainWindow:
         self.progress_label.config(text=f'{int(progress)}%')
         if message:
             self._update_status(message)
+        
+        # 根据进度更新文件状态文字（右下角）
+        if progress <= 0:
+            file_status = '待处理'
+        elif progress < 80:
+            file_status = '正在解析'
+        elif progress < 100:
+            file_status = '已解析'
+        else:
+            file_status = '已导出'
+        self.status_file_var.set(file_status)
 
     def _handle_finished_task(self):
         """处理任务结束（恢复按钮等）"""
@@ -1837,7 +1901,7 @@ class MainWindow:
             # 更新Treeview中的状态
             for i, item in enumerate(self.file_tree.get_children()):
                 if i < proc.get('success', 0):
-                    self.file_tree.set(item, 'status', '已完成')
+                    self.file_tree.set(item, 'status', '已导出')
                 elif i < proc.get('success', 0) + proc.get('failed', 0):
                     self.file_tree.set(item, 'status', '失败')
 
@@ -1853,6 +1917,32 @@ class MainWindow:
             # 兼容旧格式
             for i, item in enumerate(self.file_tree.get_children()):
                 self.file_tree.set(item, 'status', '已完成')
+
+    def _sync_file_status_from_batch(self):
+        """从 batch_manager 同步文件状态到文件列表"""
+        try:
+            items = self.file_tree.get_children()
+            for i, item in enumerate(items):
+                if i < len(self._batch_manager._files):
+                    file_item = self._batch_manager._files[i]
+                    if file_item.is_processing:
+                        status_text = '正在解析'
+                    elif file_item.is_done:
+                        # 区分已解析和已导出
+                        # 如果已经导出过，状态为已导出；否则为已解析
+                        if file_item.result is not None and hasattr(file_item, '_exported') and file_item._exported:
+                            status_text = '已导出'
+                        elif file_item.result is not None:
+                            status_text = '已解析'
+                        else:
+                            status_text = '已完成'
+                    elif file_item.is_failed:
+                        status_text = '失败'
+                    else:
+                        status_text = '待处理'
+                    self.file_tree.set(item, 'status', status_text)
+        except Exception:
+            pass
 
     def _open_folder(self, path: str):
         """打开文件夹"""
@@ -1887,6 +1977,7 @@ class MainWindow:
         params = {
             'mode': self._current_mode,
             'line_width': self.line_width_var.get(),
+            'line_color': self.line_color_var.get(),
             'canvas_size': self.canvas_size_var.get(),
             'export_mode': self.export_mode_var.get(),
         }
