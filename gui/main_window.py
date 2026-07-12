@@ -206,10 +206,10 @@ class CardFrame(ttk.Frame):
                 text=title,
                 bg=get_color('card'),
                 fg=get_color('primary'),
-                font=('Microsoft YaHei UI', 11, 'bold'),
+                font=('Microsoft YaHei UI', 10, 'bold'),
                 anchor='w',
             )
-            self._title_label.pack(fill='x', padx=12, pady=(10, 6))
+            self._title_label.pack(fill='x', padx=10, pady=(6, 4))
 
             # 标题下方分隔线
             self._separator = tk.Frame(
@@ -217,11 +217,11 @@ class CardFrame(ttk.Frame):
                 bg=get_color('border'),
                 height=1,
             )
-            self._separator.pack(fill='x', padx=12)
+            self._separator.pack(fill='x', padx=10)
 
         # 内容容器（供外部使用）
         self.content = tk.Frame(self._inner, bg=get_color('card'))
-        self.content.pack(fill='both', expand=True, padx=12, pady=10)
+        self.content.pack(fill='both', expand=True, padx=10, pady=6)
 
 
 # ============================================================
@@ -278,7 +278,7 @@ class LabeledScale(ttk.Frame):
             variable=self._var,
             command=self._on_scale_changed,
         )
-        self._scale.pack(fill='x', pady=(2, 0))
+        self._scale.pack(fill='x')
 
     def _on_scale_changed(self, value):
         """滑块值变化时更新数值显示"""
@@ -437,16 +437,13 @@ class MainWindow:
         left_panel.pack(side='left', fill='y')
         left_panel.pack_propagate(False)
 
-        # 可滚动内容区域
-        self.scroll_frame = ScrollableFrame(left_panel)
-        self.scroll_frame.pack(fill='both', expand=True)
-
-        # 获取内容容器
-        content = self.scroll_frame.scrollable_frame
+        # 内容区域
+        content = tk.Frame(left_panel, bg=get_color('background'))
+        content.pack(fill='both', expand=True)
 
         # 内边距容器
         inner = ttk.Frame(content, style='TFrame')
-        inner.pack(fill='both', expand=True, padx=(4, 0), pady=4)
+        inner.pack(fill='both', expand=True, padx=(4, 4), pady=4)
 
         # 1. 文件列表区
         self._build_file_list_card(inner)
@@ -463,19 +460,16 @@ class MainWindow:
         # 初始显示漫画模式参数，隐藏几何模式参数
         self._geo_params_card.pack_forget()
 
-        # 绑定所有子控件的滚轮事件（必须在所有控件添加完成后调用）
-        self.scroll_frame.bind_all_mousewheel()
-
     def _build_file_list_card(self, parent):
         """构建文件列表卡片"""
         self._file_card = CardFrame(parent, title='📁 文件列表')
-        self._file_card.pack(fill='x', pady=4)
+        self._file_card.pack(fill='x', pady=2)
 
         content = self._file_card.content
 
         # 第一行按钮：添加、移除、清空
         btn_frame1 = tk.Frame(content, bg=get_color('card'))
-        btn_frame1.pack(fill='x', pady=(0, 8))
+        btn_frame1.pack(fill='x', pady=(0, 6))
 
         self.add_file_btn = ttk.Button(
             btn_frame1,
@@ -503,7 +497,7 @@ class MainWindow:
 
         # 第二行按钮：更新预览、开始转换并导出
         btn_frame2 = tk.Frame(content, bg=get_color('card'))
-        btn_frame2.pack(fill='x', pady=(0, 10))
+        btn_frame2.pack(fill='x', pady=(0, 6))
 
         self.update_preview_btn = ttk.Button(
             btn_frame2,
@@ -528,7 +522,7 @@ class MainWindow:
             tree_frame,
             columns=('status',),
             show='tree headings',
-            height=5,
+            height=4,
             selectmode='browse',
         )
         self.file_tree.heading('#0', text='文件名')
@@ -570,7 +564,7 @@ class MainWindow:
     def _build_comic_params_card(self, parent):
         """构建漫画模式参数卡片"""
         self._comic_params_card = CardFrame(parent, title='🎨 漫画模式参数')
-        self._comic_params_card.pack(fill='x', pady=4)
+        self._comic_params_card.pack(fill='x', pady=2)
 
         content = self._comic_params_card.content
 
@@ -584,7 +578,7 @@ class MainWindow:
         ]
 
         color_mode_frame = tk.Frame(content, bg=get_color('card'))
-        color_mode_frame.pack(fill='x', pady=2)
+        color_mode_frame.pack(fill='x', pady=(0, 4))
 
         for text, value in modes:
             rb = tk.Radiobutton(
@@ -611,7 +605,7 @@ class MainWindow:
             value=128,
             command=lambda v: self._on_param_changed(),
         )
-        self.threshold_scale.pack(fill='x', pady=(8, 4))
+        self.threshold_scale.pack(fill='x', pady=2)
 
         # 最小区域滑块
         self.min_area_scale = LabeledScale(
@@ -622,7 +616,7 @@ class MainWindow:
             value=2,
             command=lambda v: self._on_param_changed(),
         )
-        self.min_area_scale.pack(fill='x', pady=4)
+        self.min_area_scale.pack(fill='x', pady=2)
 
         # 平滑度滑块
         self.smoothness_scale = LabeledScale(
@@ -633,11 +627,11 @@ class MainWindow:
             value=3,
             command=lambda v: self._on_param_changed(),
         )
-        self.smoothness_scale.pack(fill='x', pady=4)
+        self.smoothness_scale.pack(fill='x', pady=2)
 
         # 颜色数量（实际颜色模式时显示）
         self.color_count_frame = tk.Frame(content, bg=get_color('card'))
-        self.color_count_frame.pack(fill='x', pady=4)
+        self.color_count_frame.pack(fill='x', pady=2)
 
         tk.Label(
             self.color_count_frame,
@@ -660,7 +654,7 @@ class MainWindow:
 
         # 配色方案（彩色填充模式时显示）
         self.color_scheme_frame = tk.Frame(content, bg=get_color('card'))
-        self.color_scheme_frame.pack(fill='x', pady=4)
+        self.color_scheme_frame.pack(fill='x', pady=2)
 
         tk.Label(
             self.color_scheme_frame,
@@ -692,6 +686,7 @@ class MainWindow:
         """构建几何模式参数卡片"""
         self._geo_params_card = CardFrame(parent, title='📐 几何模式参数')
         # 初始不显示，根据模式切换
+        self._geo_params_card.pack(fill='x', pady=2)
 
         content = self._geo_params_card.content
 
@@ -705,7 +700,7 @@ class MainWindow:
         ]
 
         color_mode_frame = tk.Frame(content, bg=get_color('card'))
-        color_mode_frame.pack(fill='x', pady=(0, 8))
+        color_mode_frame.pack(fill='x', pady=(0, 2))
 
         for text, value in geo_modes:
             rb = tk.Radiobutton(
@@ -732,7 +727,7 @@ class MainWindow:
             value=100,
             command=lambda v: self._on_param_changed(),
         )
-        self.geo_min_area_scale.pack(fill='x', pady=4)
+        self.geo_min_area_scale.pack(fill='x', pady=2)
 
         # 近似精度
         self.geo_approx_scale = LabeledScale(
@@ -743,7 +738,7 @@ class MainWindow:
             value=20,
             command=lambda v: self._on_param_changed(),
         )
-        self.geo_approx_scale.pack(fill='x', pady=4)
+        self.geo_approx_scale.pack(fill='x', pady=2)
 
         # 霍夫灵敏度
         self.geo_hough_scale = LabeledScale(
@@ -754,14 +749,14 @@ class MainWindow:
             value=100,
             command=lambda v: self._on_param_changed(),
         )
-        self.geo_hough_scale.pack(fill='x', pady=4)
+        self.geo_hough_scale.pack(fill='x', pady=2)
 
-        # 圆数量
-        circle_frame = tk.Frame(content, bg=get_color('card'))
-        circle_frame.pack(fill='x', pady=(6, 2))
+        # 圆数量 + 字母识别 + 自动标注（一行排列）
+        row1_frame = tk.Frame(content, bg=get_color('card'))
+        row1_frame.pack(fill='x', pady=(4, 2))
 
         tk.Label(
-            circle_frame,
+            row1_frame,
             text='圆数量:',
             bg=get_color('card'),
             fg=get_color('text'),
@@ -770,63 +765,54 @@ class MainWindow:
 
         self.circle_count_var = tk.IntVar(value=1)
         self.circle_count_spin = ttk.Spinbox(
-            circle_frame,
+            row1_frame,
             from_=0,
             to=20,
             textvariable=self.circle_count_var,
-            width=8,
+            width=6,
             command=self._on_param_changed,
         )
-        self.circle_count_spin.pack(side='left', padx=8)
-
-        # 分隔线
-        tk.Frame(content, bg=get_color('border'), height=1).pack(
-            fill='x', pady=8,
-        )
-
-        # 字母识别和自动标注（一行排列）
-        func_switch_frame = tk.Frame(content, bg=get_color('card'))
-        func_switch_frame.pack(fill='x', pady=2)
+        self.circle_count_spin.pack(side='left', padx=(4, 16))
 
         self.letter_recog_var = tk.BooleanVar(value=True)
         self.letter_recog_cb = tk.Checkbutton(
-            func_switch_frame,
+            row1_frame,
             text='字母识别',
             variable=self.letter_recog_var,
             bg=get_color('card'),
             fg=get_color('text'),
-            font=('Microsoft YaHei UI', 10),
+            font=('Microsoft YaHei UI', 9),
             selectcolor=get_color('card'),
             activebackground=get_color('card'),
             command=self._on_param_changed,
         )
-        self.letter_recog_cb.pack(side='left', padx=(0, 20))
+        self.letter_recog_cb.pack(side='left', padx=(0, 12))
 
         self.auto_label_var = tk.BooleanVar(value=True)
         self.auto_label_cb = tk.Checkbutton(
-            func_switch_frame,
+            row1_frame,
             text='自动标注',
             variable=self.auto_label_var,
             bg=get_color('card'),
             fg=get_color('text'),
-            font=('Microsoft YaHei UI', 10),
+            font=('Microsoft YaHei UI', 9),
             selectcolor=get_color('card'),
             activebackground=get_color('card'),
             command=self._on_param_changed,
         )
         self.auto_label_cb.pack(side='left')
 
-        # 对称性检测
+        # 对称性检测（一行排列）
+        sym_frame = tk.Frame(content, bg=get_color('card'))
+        sym_frame.pack(fill='x', pady=(2, 0))
+
         tk.Label(
-            content,
-            text='对称性检测:',
+            sym_frame,
+            text='对称性:',
             bg=get_color('card'),
             fg=get_color('text'),
             font=('Microsoft YaHei UI', 9),
-        ).pack(anchor='w', pady=(6, 2))
-
-        sym_frame = tk.Frame(content, bg=get_color('card'))
-        sym_frame.pack(fill='x', padx=8)
+        ).pack(side='left')
 
         self.sym_axis_var = tk.BooleanVar(value=True)
         tk.Checkbutton(
@@ -839,7 +825,7 @@ class MainWindow:
             selectcolor=get_color('card'),
             activebackground=get_color('card'),
             command=self._on_param_changed,
-        ).grid(row=0, column=0, sticky='w', padx=(0, 12), pady=2)
+        ).pack(side='left', padx=(4, 8))
 
         self.sym_rotate_var = tk.BooleanVar(value=False)
         tk.Checkbutton(
@@ -852,7 +838,7 @@ class MainWindow:
             selectcolor=get_color('card'),
             activebackground=get_color('card'),
             command=self._on_param_changed,
-        ).grid(row=0, column=1, sticky='w', padx=(0, 12), pady=2)
+        ).pack(side='left', padx=(0, 8))
 
         self.sym_center_var = tk.BooleanVar(value=False)
         tk.Checkbutton(
@@ -865,7 +851,7 @@ class MainWindow:
             selectcolor=get_color('card'),
             activebackground=get_color('card'),
             command=self._on_param_changed,
-        ).grid(row=1, column=0, sticky='w', padx=(0, 12), pady=2)
+        ).pack(side='left', padx=(0, 8))
 
         self.sym_rightangle_var = tk.BooleanVar(value=True)
         tk.Checkbutton(
@@ -878,22 +864,22 @@ class MainWindow:
             selectcolor=get_color('card'),
             activebackground=get_color('card'),
             command=self._on_param_changed,
-        ).grid(row=1, column=1, sticky='w', padx=(0, 12), pady=2)
+        ).pack(side='left', padx=(0, 8))
 
     def _build_output_settings_card(self, parent):
         """构建输出设置卡片"""
         self._output_card = CardFrame(parent, title='⚙️ 输出设置')
-        self._output_card.pack(fill='x', pady=4)
+        self._output_card.pack(fill='x', pady=2)
 
         content = self._output_card.content
 
-        # 线宽设置
-        line_width_frame = tk.Frame(content, bg=get_color('card'))
-        line_width_frame.pack(fill='x', pady=2)
+        # 线宽 + 画布大小（一行排列）
+        row1_frame = tk.Frame(content, bg=get_color('card'))
+        row1_frame.pack(fill='x', pady=(0, 2))
 
         tk.Label(
-            line_width_frame,
-            text='线宽 (WSD):',
+            row1_frame,
+            text='线宽:',
             bg=get_color('card'),
             fg=get_color('text'),
             font=('Microsoft YaHei UI', 9),
@@ -901,22 +887,18 @@ class MainWindow:
 
         self.line_width_var = tk.IntVar(value=80)
         self.line_width_spin = ttk.Spinbox(
-            line_width_frame,
+            row1_frame,
             from_=10,
             to=500,
             textvariable=self.line_width_var,
-            width=8,
+            width=6,
             command=self._on_param_changed,
         )
-        self.line_width_spin.pack(side='left', padx=8)
-
-        # 画布大小
-        canvas_frame = tk.Frame(content, bg=get_color('card'))
-        canvas_frame.pack(fill='x', pady=6)
+        self.line_width_spin.pack(side='left', padx=(4, 12))
 
         tk.Label(
-            canvas_frame,
-            text='画布大小:',
+            row1_frame,
+            text='画布:',
             bg=get_color('card'),
             fg=get_color('text'),
             font=('Microsoft YaHei UI', 9),
@@ -924,13 +906,13 @@ class MainWindow:
 
         self.canvas_size_var = tk.StringVar(value='正方形')
         self.canvas_size_combo = ttk.Combobox(
-            canvas_frame,
+            row1_frame,
             textvariable=self.canvas_size_var,
             values=['A4横向', 'A4纵向', 'A3', '正方形', '自定义'],
             state='readonly',
-            width=10,
+            width=8,
         )
-        self.canvas_size_combo.pack(side='left', padx=8)
+        self.canvas_size_combo.pack(side='left', padx=4)
         self.canvas_size_combo.bind(
             '<<ComboboxSelected>>',
             self._on_canvas_size_changed,
@@ -956,7 +938,7 @@ class MainWindow:
             state='readonly',
             width=12,
         )
-        export_mode_combo.pack(side='left', padx=8)
+        export_mode_combo.pack(side='left', padx=4)
 
     def _build_action_buttons_card(self, parent):
         """构建操作按钮卡片（已弃用，按钮移至文件列表卡片）"""
