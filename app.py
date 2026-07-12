@@ -46,36 +46,13 @@ def _log_error(msg):
 def main():
     """主入口函数"""
     try:
-        import tkinter as tk
         from gui.main_window import MainWindow
-        from utils.version import get_version_string
 
-        # 创建根窗口
-        root = tk.Tk()
-
-        # 设置窗口标题
-        root.title(get_version_string())
-
-        # 窗口大小和位置
-        root.geometry("1200x780")
-        root.minsize(900, 600)
-
-        # 创建主窗口
-        app = MainWindow(root)
-        app.pack(fill=tk.BOTH, expand=True)
-
-        # 居中显示
-        root.update_idletasks()
-        w = root.winfo_width()
-        h = root.winfo_height()
-        sw = root.winfo_screenwidth()
-        sh = root.winfo_screenheight()
-        x = (sw - w) // 2
-        y = (sh - h) // 2
-        root.geometry(f"{w}x{h}+{x}+{y}")
+        # 创建主窗口（MainWindow内部自己创建Tk根窗口）
+        app = MainWindow()
 
         # 启动主循环
-        root.mainloop()
+        app.run()
 
     except ImportError as e:
         err_msg = f"启动失败：缺少依赖模块\n错误: {e}\n{traceback.format_exc()}"
