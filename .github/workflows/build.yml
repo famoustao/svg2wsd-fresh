@@ -43,6 +43,13 @@ jobs:
             --collect-all gui `
             --collect-all modes `
             --collect-all utils `
+            --hidden-import potrace `
+            --hidden-import PIL `
+            --hidden-import PIL.Image `
+            --hidden-import PIL.ImageTk `
+            --hidden-import PIL.ImageDraw `
+            --hidden-import cv2 `
+            --hidden-import numpy `
             --hidden-import wsd_pure_builder `
             --hidden-import svg2wsd_geo `
             --hidden-import svg2wsd_core `
@@ -55,10 +62,27 @@ jobs:
             app.py
 
       - name: Build CLI EXE (旧版兼容)
-        run: pyinstaller --onefile --clean --name svg2wsd svg2wsd.py
+        run: |
+          pyinstaller --onefile --clean `
+            --name svg2wsd `
+            --hidden-import potrace `
+            --hidden-import PIL `
+            --hidden-import PIL.Image `
+            --hidden-import cv2 `
+            --hidden-import numpy `
+            svg2wsd.py
 
       - name: Build old GUI EXE (旧版兼容)
-        run: pyinstaller --onefile --windowed --clean --name svg2wsd_gui svg2wsd_gui.py
+        run: |
+          pyinstaller --onefile --windowed --clean `
+            --name svg2wsd_gui `
+            --hidden-import potrace `
+            --hidden-import PIL `
+            --hidden-import PIL.Image `
+            --hidden-import PIL.ImageTk `
+            --hidden-import cv2 `
+            --hidden-import numpy `
+            svg2wsd_gui.py
 
       - name: Copy template and samples
         run: |
