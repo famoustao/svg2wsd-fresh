@@ -75,6 +75,36 @@ class ComicMode:
         self.mode_type = MODE_LINE_ART
         self.params = {}
 
+    def process(self, image_path: str, params: Optional[Dict[str, Any]] = None) -> CanvasData:
+        """
+        处理图像，返回矢量化的 CanvasData
+
+        根据当前 mode_type 和参数，调用对应的处理方法。
+
+        参数:
+            image_path: 输入图像文件路径
+            params: 参数字典（可选，若未提供则使用 self.params）
+
+        返回:
+            CanvasData: 处理后的画布数据
+        """
+        if params is None:
+            params = self.params
+        else:
+            self.params = params
+
+        # 从参数中获取 mode_type，如果没有则使用当前设置
+        mode_type = params.get('color_mode', self.mode_type)
+
+        if mode_type == MODE_LINE_ART:
+            return self._process_line_art(image_path, params)
+        elif mode_type == MODE_ACTUAL_COLOR:
+            return self._process_actual_color(image_path, params)
+        elif mode_type == MODE_COLOR_FILL:
+            return self._process_color_fill(image_path, params)
+        else:
+            raise ValueError(f"不支持的漫画模式: {mode_type}")
+
     # --------------------------------------------------------
     # 黑白线稿模式
     # --------------------------------------------------------

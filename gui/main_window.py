@@ -25,7 +25,7 @@ if _project_root not in sys.path:
 # 导入同包内模块
 from gui.styles import setup_styles, get_color
 from gui.preview_panel import PreviewPanel
-from gui.task_worker import TaskWorker
+from gui.task_worker import TaskWorker, MessageType
 
 # 导入版本信息
 from utils.version import get_version_string
@@ -125,29 +125,41 @@ class ScrollableFrame(ttk.Frame):
 
     def _on_mousewheel(self, event):
         """鼠标滚轮滚动（Windows / macOS）"""
-        # 仅当鼠标在本控件上方时才滚动
-        if self._is_mouse_over(event):
+        # 使用全局坐标判断鼠标是否在滚动区域内
+        if self._is_mouse_over_global():
             delta = -1 if event.delta > 0 else 1
-            self.canvas.yview_scroll(delta, 'units')
+            # 调整滚动速度（每次滚动3个单位更流畅）
+            self.canvas.yview_scroll(delta * 3, 'units')
 
     def _on_mousewheel_linux_up(self, event):
         """Linux 滚轮向上"""
-        if self._is_mouse_over(event):
-            self.canvas.yview_scroll(-1, 'units')
+        if self._is_mouse_over_global():
+            self.canvas.yview_scroll(-3, 'units')
 
     def _on_mousewheel_linux_down(self, event):
         """Linux 滚轮向下"""
-        if self._is_mouse_over(event):
-            self.canvas.yview_scroll(1, 'units')
+        if self._is_mouse_over_global():
+            self.canvas.yview_scroll(3, 'units')
 
     def _is_mouse_over(self, event=None):
-        """判断鼠标是否在控件上方"""
+        """判断鼠标是否在控件上方（基于事件坐标，兼容旧代码）"""
+        return self._is_mouse_over_global()
+
+    def _is_mouse_over_global(self):
+        """使用全局坐标判断鼠标是否在滚动区域内"""
         try:
-            x = self.winfo_pointerx() - self.winfo_rootx()
-            y = self.winfo_pointery() - self.winfo_rooty()
-            return 0 <= x <= self.winfo_width() and 0 <= y <= self.winfo_height()
+            # 使用 Canvas 的坐标范围判断
+            x = self.winfo_pointerx() - self.canvas.winfo_rootx()
+            y = self.winfo_pointery() - self.canvas.winfo_rooty()
+            return (0 <= x <= self.canvas.winfo_width() and
+                    0 <= y <= self.canvas.winfo_height())
         except Exception:
             return True
+
+    def update_scroll_region(self):
+        """手动更新滚动区域（内容变化后调用）"""
+        self.canvas.update_idletasks()
+        self.canvas.configure(scrollregion=self.canvas.bbox('all'))
 
 
 # ============================================================
@@ -948,6 +960,23 @@ class MainWindow:
         )
         self.convert_btn.pack(fill='x', pady=4)
 
+        # 进度条（默认隐藏）
+        self._progress_var = tk.DoubleVar(value=0.0)
+        self._progress_bar = ttk.Progressbar(
+            content,
+            orient='horizontal',
+            mode='determinate',
+            variable=self._progress_var,
+            maximum=100,
+        )
+        self._progress_label = ttk.Label(
+            content,
+            text='',
+            font=('Segoe UI', 9),
+            foreground=get_color('text_secondary'),
+            anchor='center',
+        )
+
     # ============================================================
     # 右侧预览面板
     # ============================================================
@@ -1034,6 +1063,9 @@ class MainWindow:
         # 更新选项卡图标（选中彩色，未选中灰色）
         self._update_tab_icons()
 
+        # 更新滚动区域（模式切换后内容高度变化）
+        self.root.after(50, self.scroll_frame.update_scroll_region)
+
         self._update_status(f'已切换到{"漫画模式" if current == 0 else "几何模式"}')
         self._on_param_changed()
 
@@ -1063,6 +1095,9 @@ class MainWindow:
             self.color_scheme_frame.pack(fill='x', pady=4)
         else:
             self.color_scheme_frame.pack_forget()
+
+        # 更新滚动区域（子模式切换后内容高度变化）
+        self.root.after(50, self.scroll_frame.update_scroll_region)
 
         self._on_param_changed()
 
@@ -1208,64 +1243,143 @@ class MainWindow:
 
     def _update_preview(self):
         """
-        执行预览更新
+        执行预览更新（后台线程处理，避免UI卡死）
 
         从当前文件和参数生成预览数据，更新 WSD 预览面板。
-        调用对应模式的处理函数，将结果通过 preview_panel.set_canvas_data() 显示。
+        使用 TaskWorker 在后台线程处理，UI 只显示进度条。
         """
         if self._current_file_index < 0:
             return
 
+        # 如果已有任务在运行，先取消
+        if self._task_worker is not None and self._task_worker.is_alive():
+            self._task_worker.cancel()
+            # 不等它结束，直接启动新任务（旧任务会自动退出）
+
         file_info = self._files[self._current_file_index]
         filepath = file_info['path']
-        self._update_status(f'正在生成预览: {file_info["name"]}...')
-
         params = self._get_current_params()
         mode_type = 'comic' if self._current_mode == 'comic' else 'geo'
+        sub_mode = self.comic_color_mode.get() if self._current_mode == 'comic' else None
 
-        # 后台处理预览（避免阻塞UI）
-        def preview_task():
+        self._update_status(f'正在生成预览: {file_info["name"]}...')
+        self._show_action_progress('正在处理图像...')
+
+        # 后台任务函数
+        def preview_task(progress_callback=None, cancel_check=None):
             try:
-                from core.batch_manager import BatchManager
-                mgr = BatchManager()
-                mgr.add_file(filepath)
-                result = mgr.process_all(
-                    mode_type=mode_type,
-                    params=params,
-                )
-                if result.get('success', 0) > 0 and mgr.files[0].result is not None:
-                    return mgr.files[0].result
-                return None
+                # 报告初始进度
+                if progress_callback:
+                    progress_callback(10, '加载图像...')
+
+                if cancel_check and cancel_check():
+                    return None
+
+                if mode_type == 'geo':
+                    from modes.geo_mode import GeometryMode
+                    if progress_callback:
+                        progress_callback(30, '几何模式处理中...')
+                    mode = GeometryMode()
+                    canvas_data = mode.process(filepath, params)
+                else:  # comic
+                    from modes.comic_mode import process as comic_process
+                    if progress_callback:
+                        progress_callback(30, f'漫画模式({sub_mode})处理中...')
+                    canvas_data = comic_process(filepath, sub_mode, params)
+
+                if progress_callback:
+                    progress_callback(90, '生成预览...')
+
+                if cancel_check and cancel_check():
+                    return None
+
+                return canvas_data
             except Exception as e:
-                return {'error': str(e)}
+                import traceback
+                return {'error': str(e), 'traceback': traceback.format_exc()}
 
-        def on_done(result):
-            if isinstance(result, dict) and 'error' in result:
-                self._update_status(f'预览失败: {result["error"]}')
+        # 创建并启动后台任务
+        self._task_worker = TaskWorker(preview_task)
+        self._task_worker.start()
+
+        # 启动轮询更新UI
+        self._poll_preview_messages()
+
+    def _show_action_progress(self, message: str = '处理中...'):
+        """显示操作卡片中的进度条和状态文字"""
+        self._progress_var.set(0.0)
+        self._progress_label.config(text=message)
+        self._progress_bar.pack(fill='x', pady=(8, 2))
+        self._progress_label.pack(fill='x', pady=(0, 4))
+        # 禁用操作按钮
+        self.update_preview_btn.config(state='disabled')
+        self.convert_btn.config(state='disabled')
+
+    def _hide_action_progress(self):
+        """隐藏操作卡片中的进度条，恢复按钮"""
+        self._progress_bar.pack_forget()
+        self._progress_label.pack_forget()
+        self.update_preview_btn.config(state='normal')
+        self.convert_btn.config(state='normal')
+
+    def _update_action_progress(self, value: float, message: str = ''):
+        """更新操作卡片中进度条数值和文字"""
+        self._progress_var.set(value)
+        if message:
+            self._progress_label.config(text=message)
+
+    def _poll_preview_messages(self):
+        """轮询预览后台任务消息，更新UI"""
+        if self._task_worker is None:
+            return
+
+        messages = self._task_worker.poll_messages()
+        for msg_type, data in messages:
+            if msg_type == MessageType.PROGRESS:
+                progress, message = data
+                self._update_action_progress(progress, message)
+            elif msg_type == MessageType.MESSAGE:
+                self._update_status(str(data))
+            elif msg_type == MessageType.RESULT:
+                # 任务完成，处理预览结果
+                self._handle_preview_result(data)
+                self._task_worker = None
+                self._hide_action_progress()
+                return  # 不再继续轮询
+            elif msg_type == MessageType.ERROR:
+                error_info = data
+                err_msg = str(error_info.get('exception', error_info.get('error', '未知错误')))
+                self._update_status(f'预览失败: {err_msg}')
+                self._task_worker = None
+                self._hide_action_progress()
                 return
-            if result is not None:
-                self.preview_panel.set_canvas_data(result)
-                self._update_status(f'预览更新完成: {file_info["name"]}')
-            else:
-                self._update_status('未能生成预览数据')
+            elif msg_type == MessageType.FINISHED:
+                # 任务结束（无论成功失败）
+                if self._task_worker is not None:
+                    self._task_worker = None
+                    self._hide_action_progress()
+                return
 
-        # 使用 TaskWorker 或直接在主线程简单处理（小图）
-        # 为了简单和稳定，这里直接同步处理（预览用，数据量小）
-        try:
-            if mode_type == 'geo':
-                from modes.geo_mode import GeometryMode
-                mode = GeometryMode()
-                canvas_data = mode.process(filepath, params)
-            else:  # comic
-                from modes.comic_mode import process as comic_process
-                # 漫画模式使用模块级 process 函数，需要传入子模式类型
-                sub_mode = self.comic_color_mode.get()
-                canvas_data = comic_process(filepath, sub_mode, params)
+        # 继续轮询
+        if self._task_worker is not None:
+            self.root.after(50, self._poll_preview_messages)
 
-            self.preview_panel.set_canvas_data(canvas_data)
+    def _handle_preview_result(self, result):
+        """处理预览结果"""
+        if result is None:
+            self._update_status('未能生成预览数据')
+            return
+        # 检查是否是错误结果
+        if isinstance(result, dict) and 'error' in result:
+            self._update_status(f'预览失败: {result["error"]}')
+            return
+        # 正常结果
+        self.preview_panel.set_canvas_data(result)
+        if self._current_file_index >= 0:
+            file_info = self._files[self._current_file_index]
             self._update_status(f'预览更新完成: {file_info["name"]}')
-        except Exception as e:
-            self._update_status(f'预览失败: {str(e)}')
+        else:
+            self._update_status('预览更新完成')
 
     # ============================================================
     # 事件处理 - 画布设置
@@ -1499,43 +1613,60 @@ class MainWindow:
             }
 
         self._task_worker = TaskWorker(conversion_task)
-        self._task_worker.progress_signal.connect(self._on_task_progress)
-        self._task_worker.result_signal.connect(self._on_task_result)
-        self._task_worker.error_signal.connect(self._on_task_error)
-        self._task_worker.finished_signal.connect(self._on_task_finished)
         self._task_worker.start()
 
-        # 启动轮询以更新UI（通过 after 调度）
-        self._poll_task()
+        # 启动轮询以更新UI
+        self._poll_conversion_messages()
 
-    def _poll_task(self):
-        """轮询后台任务状态并更新UI"""
+    def _poll_conversion_messages(self):
+        """轮询转换后台任务消息，更新UI"""
         if self._task_worker is None:
             return
 
-        # 处理所有待处理消息
         messages = self._task_worker.poll_messages()
-        # 信号已经通过回调处理，这里主要确保UI刷新
+        for msg_type, data in messages:
+            if msg_type == MessageType.PROGRESS:
+                progress, message = data
+                self._update_status_bar_progress(progress, message)
+            elif msg_type == MessageType.MESSAGE:
+                self._update_status(str(data))
+            elif msg_type == MessageType.RESULT:
+                # 任务完成，处理结果
+                self._handle_result(data)
+                self._task_worker = None
+                self._handle_finished_task()
+                return
+            elif msg_type == MessageType.ERROR:
+                error_info = data
+                self._handle_error(error_info)
+                self._task_worker = None
+                self._handle_finished_task()
+                return
+            elif msg_type == MessageType.FINISHED:
+                # 任务结束
+                if self._task_worker is not None:
+                    self._task_worker = None
+                    self._handle_finished_task()
+                return
 
-        if self._task_worker.is_alive():
-            # 继续轮询
-            self.root.after(100, self._poll_task)
+        # 继续轮询
+        if self._task_worker is not None:
+            self.root.after(50, self._poll_conversion_messages)
 
-    def _on_task_progress(self, progress: float, message: str):
-        """任务进度更新"""
-        # 确保在主线程中更新UI
-        self.root.after(0, lambda: self._update_progress(progress, message))
-
-    def _update_progress(self, progress: float, message: str):
-        """更新进度条和状态"""
+    def _update_status_bar_progress(self, progress: float, message: str):
+        """更新状态栏进度条和状态"""
         self.progress_var.set(progress)
         self.progress_label.config(text=f'{int(progress)}%')
         if message:
             self._update_status(message)
 
-    def _on_task_result(self, progress: float, result):
-        """任务完成结果"""
-        self.root.after(0, lambda: self._handle_result(result))
+    def _handle_finished_task(self):
+        """处理任务结束（恢复按钮等）"""
+        self.convert_btn.configure(state='normal')
+        # 更新最终状态
+        if self._task_worker is None:
+            # 任务已完成或失败，在 _handle_result/_handle_error 中已更新状态
+            pass
 
     def _handle_result(self, result):
         """处理任务结果"""
@@ -1581,27 +1712,11 @@ class MainWindow:
         except Exception:
             pass
 
-    def _on_task_error(self, progress: float, error_info):
-        """任务错误"""
-        self.root.after(0, lambda: self._handle_error(error_info))
-
     def _handle_error(self, error_info):
         """处理任务错误"""
         exception = error_info.get('exception', '未知错误')
         messagebox.showerror('错误', f'转换失败: {str(exception)}')
         self._update_status(f'转换失败: {str(exception)}')
-
-    def _on_task_finished(self, progress: float, status):
-        """任务结束（无论成功失败）"""
-        self.root.after(0, lambda: self._handle_finished(status))
-
-    def _handle_finished(self, status):
-        """处理任务结束"""
-        self.convert_btn.configure(state='normal')
-        if status.value == 'finished':
-            self._update_status('转换完成')
-        elif status.value == 'cancelled':
-            self._update_status('任务已取消')
 
     # ============================================================
     # 辅助方法
