@@ -1240,9 +1240,10 @@ class MainWindow:
                 mode = GeometryMode()
                 canvas_data = mode.process(filepath, params)
             else:  # comic
-                from modes.comic_mode import ComicMode
-                mode = ComicMode()
-                canvas_data = mode.process(filepath, params)
+                from modes.comic_mode import process as comic_process
+                # 漫画模式使用模块级 process 函数，需要传入子模式类型
+                sub_mode = self.comic_color_mode.get()
+                canvas_data = comic_process(filepath, sub_mode, params)
 
             self.preview_panel.set_canvas_data(canvas_data)
             self._update_status(f'预览更新完成: {file_info["name"]}')
