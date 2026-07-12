@@ -1,1 +1,37 @@
+# Python
 __pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+dist/
+build/
+*.egg
+
+# PyInstaller
+*.spec
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# 测试文件
+test_*.py
+analyze_positions.py
+search_pos_table.py
+
+# 临时文件
+*.tmp
+*.log
+*.bak
+
+# 虚拟环境
+venv/
+env/
+.venv/

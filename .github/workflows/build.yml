@@ -22,13 +22,16 @@ jobs:
       - name: Install dependencies
         run: pip install pyinstaller pillow potracer numpy opencv-python
 
-      - name: Build CLI EXE
+      - name: Build v2 GUI EXE (新版)
+        run: pyinstaller --onefile --windowed --clean --name 图片转WSD app.py
+
+      - name: Build CLI EXE (旧版兼容)
         run: pyinstaller --onefile --clean --name svg2wsd svg2wsd.py
 
-      - name: Build GUI EXE
+      - name: Build old GUI EXE (旧版兼容)
         run: pyinstaller --onefile --windowed --clean --name svg2wsd_gui svg2wsd_gui.py
 
-      - name: Copy template
+      - name: Copy template and samples
         run: |
           xcopy /E /I template dist\template
           xcopy /E /I wsd_label_samples dist\wsd_label_samples
@@ -52,23 +55,41 @@ jobs:
           tag_name: continuous
           name: 最新构建
           body: |
-            ## svg2wsd 最新自动构建
-            
-            提交: `${{ github.sha }}`
-            
+            ## 图片转WSD 最新自动构建
+
+            **版本**: v2.0.0
+            **提交**: `${{ github.sha }}`
+            **构建时间**: ${{ github.event.head_commit.timestamp }}
+
+            ### 🆕 v2.0 新特性
+
+            - 全新架构：基于二进制构建器，完全脱离模板依赖
+            - 双模式选项卡：漫画模式 + 几何模式
+            - 美观GUI：卡片式布局，深蓝主题，现代化界面
+            - 批量处理：支持多文件导入导出，可合并到同一WSD的多画布
+            - 5种预览：原图/WSD/SVG/LaTeX/GGB，支持缩放拖拽
+            - 后台运行：多线程处理，进度条实时显示，UI不卡顿
+
+            ### 漫画模式
+            - 黑白线稿模式（阈值、最小区域、平滑度可调）
+            - 实际颜色模式（颜色矢量化，自动填充）
+            - 彩色模式（系统随机填充）
+
+            ### 几何模式
+            - 形状拟合：直线、三角形、四边形、圆、圆弧
+            - 霍夫变换检测 + 去重合并
+            - 字母自动识别 + 自动标注
+            - 对称性检测（轴对称、旋转对称、中心对称、直角）
+            - 颜色模式：黑白线稿 / 实际颜色 / 彩色自动填充
+
             ### 下载加速（国内用户）
-            
+
             在下载链接前加上镜像地址即可加速：
-            
+
             ```
             https://ghproxy.com/原始下载链接
             ```
-            
-            或使用：
-            ```
-            https://mirror.ghproxy.com/原始下载链接
-            ```
-            
+
             例：
             `https://ghproxy.com/https://github.com/famoustao/svg2wsd/releases/download/continuous/${{ env.ZIP_NAME }}`
           prerelease: true
