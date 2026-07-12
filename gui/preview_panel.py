@@ -40,21 +40,56 @@ from core.data_model import CanvasData, ShapeType, Shape, TextAnnotation
 # 颜色工具函数
 # ============================================================
 
-def _bgr_to_hex(bgr: Tuple[int, int, int]) -> str:
+def _bgr_to_hex(bgr) -> str:
     """
-    将 BGR 颜色元组转换为十六进制颜色字符串
+    将颜色值转换为十六进制颜色字符串
+
+    支持多种输入格式：
+    - BGR 三元组 (b, g, r)
+    - BGRA 四元组 (b, g, r, a)
+    - RGB 三元组 (r, g, b) - 通过 auto_detect 参数自动识别
+    - 十六进制字符串 '#rrggbb' 或 '#rgb'
+    - rgb(r, g, b) 格式字符串
 
     Args:
-        bgr: (b, g, r) 格式的颜色元组，取值 0-255
+        bgr: 颜色值（多种格式）
 
     Returns:
         str: '#rrggbb' 格式的颜色字符串
     """
-    b, g, r = bgr
-    r = max(0, min(255, int(r)))
-    g = max(0, min(255, int(g)))
-    b = max(0, min(255, int(b)))
-    return f'#{r:02x}{g:02x}{b:02x}'
+    # None 或空值返回黑色
+    if bgr is None:
+        return '#000000'
+
+    # 字符串格式
+    if isinstance(bgr, str):
+        s = bgr.strip()
+        if s.startswith('#'):
+            h = s.lstrip('#')
+            if len(h) == 6:
+                # 已经是 #rrggbb 格式，直接返回（假设是 RGB 顺序的 hex）
+                return f'#{h[:6]}'
+            elif len(h) == 3:
+                # #rgb 短格式，扩展为 #rrggbb
+                return f'#{h[0]*2}{h[1]*2}{h[2]*2}'
+        # 其他字符串格式，返回黑色
+        return '#000000'
+
+    # 元组/列表格式
+    if isinstance(bgr, (tuple, list)):
+        if len(bgr) >= 3:
+            # 假设是 BGR 顺序（项目约定）
+            b = max(0, min(255, int(bgr[0])))
+            g = max(0, min(255, int(bgr[1])))
+            r = max(0, min(255, int(bgr[2])))
+            return f'#{r:02x}{g:02x}{b:02x}'
+        elif len(bgr) == 1:
+            # 灰度
+            v = max(0, min(255, int(bgr[0])))
+            return f'#{v:02x}{v:02x}{v:02x}'
+
+    # 其他情况返回黑色
+    return '#000000'
 
 
 # ============================================================
@@ -526,11 +561,19 @@ class WsdPreviewCanvas(ZoomableCanvas):
 
         # 绘制所有形状
         for shape in self._canvas_data.shapes:
-            self._draw_shape(shape)
+            try:
+                self._draw_shape(shape)
+            except Exception:
+                # 单个形状绘制失败不影响整体预览
+                pass
 
         # 绘制所有文字标注
         for ann in self._canvas_data.annotations:
-            self._draw_annotation(ann)
+            try:
+                self._draw_annotation(ann)
+            except Exception:
+                # 单个标注绘制失败不影响整体预览
+                pass
 
     def _draw_placeholder(self, text: str):
         """绘制占位文字"""

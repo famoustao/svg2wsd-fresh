@@ -310,7 +310,7 @@ class ComicMode:
                       每4个点为一段三次贝塞尔曲线 (p0, c1, c2, p3)
             text_annotations: 文字标注列表
             image_path: 源图像路径
-            fill_colors: 填充颜色列表（可选，BGR 格式）
+            fill_colors: 填充颜色列表（可选，BGR 元组或 hex 字符串）
             is_stroke: 描边标记列表（可选，True 表示该路径是描边）
             stroke_widths: 描边宽度列表（可选）
 
@@ -319,6 +319,63 @@ class ComicMode:
         """
         canvas_data = CanvasData()
         canvas_data.source_file = image_path
+
+        # 颜色格式归一化：各种 SVG 颜色格式 -> BGR 元组
+        def _to_bgr(color):
+            if color is None:
+                return None
+            if isinstance(color, (tuple, list)):
+                return tuple(int(c) for c in color[:3])
+            if isinstance(color, str):
+                s = color.strip().lower()
+                # 十六进制颜色
+                if s.startswith('#'):
+                    h = s.lstrip('#')
+                    if len(h) == 6:
+                        # #rrggbb -> (b, g, r)
+                        r = int(h[0:2], 16)
+                        g = int(h[2:4], 16)
+                        b = int(h[4:6], 16)
+                        return (b, g, r)
+                    elif len(h) == 3:
+                        # #rgb -> (b, g, r)
+                        r = int(h[0]*2, 16)
+                        g = int(h[1]*2, 16)
+                        b = int(h[2]*2, 16)
+                        return (b, g, r)
+                # rgb(r, g, b) 格式
+                if s.startswith('rgb(') and s.endswith(')'):
+                    try:
+                        parts = s[4:-1].split(',')
+                        if len(parts) == 3:
+                            r = int(parts[0].strip())
+                            g = int(parts[1].strip())
+                            b = int(parts[2].strip())
+                            return (b, g, r)
+                    except (ValueError, IndexError):
+                        pass
+                # 常见命名颜色
+                _named_colors = {
+                    'black': (0, 0, 0),
+                    'white': (255, 255, 255),
+                    'red': (0, 0, 255),
+                    'green': (0, 128, 0),
+                    'blue': (255, 0, 0),
+                    'yellow': (0, 255, 255),
+                    'cyan': (255, 255, 0),
+                    'magenta': (255, 0, 255),
+                    'gray': (128, 128, 128),
+                    'grey': (128, 128, 128),
+                    'orange': (0, 165, 255),
+                    'purple': (128, 0, 128),
+                    'pink': (203, 192, 255),
+                    'brown': (42, 42, 165),
+                    'transparent': None,
+                    'none': None,
+                }
+                if s in _named_colors:
+                    return _named_colors[s]
+            return (0, 0, 0)
 
         # 转换路径记录为 Shape 对象
         # 每个子路径作为一个 BEZIER 类型的 Shape
@@ -333,11 +390,11 @@ class ComicMode:
             if is_stroke and i < len(is_stroke) and is_stroke[i]:
                 # 描边路径：颜色作为描边色
                 if fill_colors and i < len(fill_colors):
-                    line_color = fill_colors[i]
+                    line_color = _to_bgr(fill_colors[i])
             else:
                 # 填充路径：颜色作为填充色
                 if fill_colors and i < len(fill_colors):
-                    fill_color = fill_colors[i]
+                    fill_color = _to_bgr(fill_colors[i])
 
             # 描边宽度
             if stroke_widths and i < len(stroke_widths):
