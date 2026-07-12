@@ -322,6 +322,10 @@ class ComicMode:
         canvas_data = CanvasData()
         canvas_data.source_file = image_path
 
+        # 获取当前模式类型
+        mode_type = getattr(self, 'mode_type', MODE_ACTUAL_COLOR)
+        params = getattr(self, 'params', {})
+
         # 颜色格式归一化：各种 SVG 颜色格式 -> BGR 元组
         def _to_bgr(color):
             if color is None:
@@ -382,24 +386,60 @@ class ComicMode:
         # 转换路径记录为 Shape 对象
         # 每个子路径作为一个 BEZIER 类型的 Shape
         all_points = []
+        count = len(geo_paths)
+
+        # 预计算彩色填充模式的颜色
+        color_fill_colors = None
+        if mode_type == MODE_COLOR_FILL and count > 0:
+            scheme_name = params.get('color_scheme', 'rainbow')
+            color_fill_colors = self._generate_color_scheme(scheme_name, count)
+
         for i, path_points in enumerate(geo_paths):
             # path_points 是 [(x,y), ...] 贝塞尔曲线点列表
             fill_color = None
             line_color = (0, 0, 0)
             line_width = 1.0
 
-            # 处理颜色：SVG 中 colors 通常是描边色
-            if is_stroke and i < len(is_stroke) and is_stroke[i]:
-                # 描边路径：颜色作为描边色
-                if fill_colors and i < len(fill_colors):
-                    line_color = _to_bgr(fill_colors[i])
-            else:
-                # 填充路径：颜色作为填充色
-                if fill_colors and i < len(fill_colors):
-                    fill_color = _to_bgr(fill_colors[i])
+            # 根据模式类型设置颜色
+            if mode_type == MODE_LINE_ART:
+                # 线稿模式：统一黑色描边，无填充
+                line_color = (0, 0, 0)
+                fill_color = None
+                # 描边路径保持描边，填充路径也转为描边（线稿都是线条）
+                if not (is_stroke and i < len(is_stroke) and is_stroke[i]):
+                    # 填充路径转为描边，需要设置合理的线宽
+                    line_width = 1.0
 
-            # 描边宽度
-            if stroke_widths and i < len(stroke_widths):
+            elif mode_type == MODE_ACTUAL_COLOR:
+                # 实际颜色模式：使用 SVG 原始颜色
+                if is_stroke and i < len(is_stroke) and is_stroke[i]:
+                    # 描边路径：颜色作为描边色
+                    if fill_colors and i < len(fill_colors):
+                        line_color = _to_bgr(fill_colors[i])
+                else:
+                    # 填充路径：颜色作为填充色
+                    if fill_colors and i < len(fill_colors):
+                        fill_color = _to_bgr(fill_colors[i])
+
+            elif mode_type == MODE_COLOR_FILL:
+                # 彩色填充模式：使用配色方案填充，黑色描边
+                line_color = (0, 0, 0)
+                if color_fill_colors and i < len(color_fill_colors):
+                    fill_color = color_fill_colors[i]
+                else:
+                    fill_color = (200, 200, 200)  # 默认灰色
+
+            else:
+                # 其他模式：默认处理
+                if is_stroke and i < len(is_stroke) and is_stroke[i]:
+                    if fill_colors and i < len(fill_colors):
+                        line_color = _to_bgr(fill_colors[i])
+                else:
+                    if fill_colors and i < len(fill_colors):
+                        fill_color = _to_bgr(fill_colors[i])
+
+            # 描边宽度（SVG 中明确指定的描边宽度优先）
+            if stroke_widths and i < len(stroke_widths) and stroke_widths[i]:
                 line_width = float(stroke_widths[i])
 
             shape = Shape(
@@ -468,8 +508,10 @@ class ComicMode:
 
         if scheme == 'rainbow':
             # 彩虹色
-            return [svg2wsd_core.rainbow_color_bgr(i, max(count, 1))
+            colors_bytes = [svg2wsd_core.rainbow_color_bgr(i, max(count, 1))
                     for i in range(count)]
+            # bytes -> BGR 元组
+            return [(c[0], c[1], c[2]) for c in colors_bytes]
         elif scheme == 'pastel':
             # 柔和色（低饱和度）
             colors = []

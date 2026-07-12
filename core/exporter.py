@@ -176,18 +176,29 @@ def _annotation_to_dict(annotation: TextAnnotation) -> Optional[dict]:
 
 
 # ============================================================
-# 内部工具函数（兼容 PureWSDBuilder，保留用于参考）
+# 内部工具函数（基于 esShapePath 格式，支持颜色）
 # ============================================================
+
+def _bgr_to_bgra_bytes(bgr, alpha=255):
+    """BGR 元组 -> BGRA 4字节"""
+    if bgr is None:
+        return None
+    b, g, r = bgr[0], bgr[1], bgr[2]
+    return bytes([int(b) & 0xff, int(g) & 0xff, int(r) & 0xff, alpha & 0xff])
+
+
+def _bgr_to_bgr_bytes(bgr):
+    """BGR 元组 -> BGR 3字节"""
+    if bgr is None:
+        return None
+    return bytes([int(bgr[0]) & 0xff, int(bgr[1]) & 0xff, int(bgr[2]) & 0xff])
+
 
 def _shape_to_path_record(shape: Shape, linewidth: int = 80) -> Optional[bytes]:
     """
-    将 Shape 对象转换为对应的 WSD 路径记录
+    将 Shape 对象转换为对应的 WSD 路径记录（esShapePath 格式，支持颜色）
 
-    根据 Shape 的类型，调用不同的构建函数：
-      - 折线/多边形/直线/三角形/矩形 → build_polyline_record
-      - 圆 → build_circle_record
-      - 圆弧 → build_arc_record
-      - 贝塞尔曲线 → build_bezier_path 或 build_combo_path
+    使用 build_combo_path 构建所有形状，支持线条颜色和填充颜色。
 
     参数:
         shape: Shape 对象
@@ -198,55 +209,83 @@ def _shape_to_path_record(shape: Shape, linewidth: int = 80) -> Optional[bytes]:
     """
     _ensure_wsb_loaded()
 
+    # 颜色转换
+    line_color_bgra = _bgr_to_bgra_bytes(shape.line_color)
+    fill_color_bgr = _bgr_to_bgr_bytes(shape.fill_color)
+
+    # 根据形状类型构建 segments_list
+    segments_list = []
+
     if shape.type in (ShapeType.LINE, ShapeType.POLYLINE):
         # 直线和折线：开放折线
         if len(shape.points) < 2:
             return None
-        return build_polyline_record(
-            shape.points,
-            closed=False,
-            linewidth=linewidth
-        )
+        pts = [(int(p[0]), int(p[1])) for p in shape.points]
+        segments_list.append([('line', pts)])
 
     elif shape.type in (ShapeType.POLYGON, ShapeType.TRIANGLE, ShapeType.RECTANGLE):
         # 多边形/三角形/矩形：闭合多边形
         if len(shape.points) < 3:
             return None
-        return build_polyline_record(
-            shape.points,
-            closed=True,
-            linewidth=linewidth
-        )
+        pts = [(int(p[0]), int(p[1])) for p in shape.points]
+        # 确保闭合
+        if pts[0] != pts[-1]:
+            pts = pts + [pts[0]]
+        segments_list.append([('gon', pts)])
 
     elif shape.type == ShapeType.CIRCLE:
-        # 圆形
+        # 圆形：用贝塞尔曲线近似圆
         if not shape.points:
             return None
         cx, cy = shape.points[0]
-        radius = shape.extra.get('radius', 50)
-        return build_circle_record(
-            cx=cx,
-            cy=cy,
-            radius=radius,
-            linewidth=linewidth
-        )
+        r = shape.extra.get('radius', 50)
+        # 用 4 段贝塞尔曲线近似圆（标准近似）
+        k = 0.5522847498
+        pts = [
+            # 上半部分（从右到左）
+            (cx + r, cy),
+            (cx + r, cy - r * k),
+            (cx + r * k, cy - r),
+            (cx, cy - r),
+            # 左上
+            (cx - r * k, cy - r),
+            (cx - r, cy - r * k),
+            (cx - r, cy),
+            # 下半部分（从左到右）
+            (cx - r, cy + r * k),
+            (cx - r * k, cy + r),
+            (cx, cy + r),
+            # 右下
+            (cx + r * k, cy + r),
+            (cx + r, cy + r * k),
+            (cx + r, cy),
+        ]
+        # 转换为 4 段贝塞尔曲线
+        bezier_segs = []
+        bezier_segs.append(('bezier', [pts[0], pts[1], pts[2], pts[3]]))
+        bezier_segs.append(('bezier', [pts[3], pts[4], pts[5], pts[6]]))
+        bezier_segs.append(('bezier', [pts[6], pts[7], pts[8], pts[9]]))
+        bezier_segs.append(('bezier', [pts[9], pts[10], pts[11], pts[12]]))
+        segments_list.append(bezier_segs)
 
     elif shape.type == ShapeType.ARC:
-        # 圆弧
+        # 圆弧：用贝塞尔曲线近似
         if not shape.points:
             return None
         cx, cy = shape.points[0]
-        radius = shape.extra.get('radius', 50)
+        r = shape.extra.get('radius', 50)
         start_angle = shape.extra.get('start_angle', 0.0)
         end_angle = shape.extra.get('end_angle', 3.14159)
-        return build_arc_record(
-            cx=cx,
-            cy=cy,
-            radius=radius,
-            start_angle=start_angle,
-            end_angle=end_angle,
-            linewidth=linewidth
-        )
+        # 简化：用多段直线近似圆弧
+        import math
+        n_segs = max(8, int(abs(end_angle - start_angle) / 0.2))
+        pts = []
+        for i in range(n_segs + 1):
+            t = start_angle + (end_angle - start_angle) * i / n_segs
+            x = cx + r * math.cos(t)
+            y = cy + r * math.sin(t)
+            pts.append((int(x), int(y)))
+        segments_list.append([('line', pts)])
 
     elif shape.type == ShapeType.BEZIER:
         # 贝塞尔曲线
@@ -255,62 +294,81 @@ def _shape_to_path_record(shape: Shape, linewidth: int = 80) -> Optional[bytes]:
             return None
         # 4个点为单段贝塞尔
         if len(pts) == 4:
-            return build_bezier_path(
-                p0=pts[0],
-                p1=pts[1],
-                p2=pts[2],
-                p3=pts[3],
-                linewidth=linewidth
-            )
+            segments_list.append([('bezier', [
+                (pts[0][0], pts[0][1]),
+                (pts[1][0], pts[1][1]),
+                (pts[2][0], pts[2][1]),
+                (pts[3][0], pts[3][1]),
+            ])])
         # 多个控制点：构建连续贝塞尔链
         elif len(pts) >= 4:
-            segments = []
+            bez_segs = []
             i = 0
             while i + 3 < len(pts):
-                segments.append([pts[i], pts[i + 1], pts[i + 2], pts[i + 3]])
-                i += 3  # 下一段从 p3 开始（即当前段的终点）
-            if segments:
-                return build_bezier_chain(
-                    segments,
-                    linewidth=linewidth
-                )
-        return None
-
-    elif shape.type == ShapeType.COMPOUND:
-        # 复合图形：使用 build_combo_path
-        # extra 中应包含 segments_list 信息
-        segments_list = shape.extra.get('segments_list', [])
-        if segments_list:
-            return build_combo_path(
-                segments_list,
-                linewidth=linewidth
-            )
-        return None
+                bez_segs.append(('bezier', [
+                    (pts[i][0], pts[i][1]),
+                    (pts[i+1][0], pts[i+1][1]),
+                    (pts[i+2][0], pts[i+2][1]),
+                    (pts[i+3][0], pts[i+3][1]),
+                ]))
+                i += 3
+            if bez_segs:
+                segments_list.append(bez_segs)
+        else:
+            return None
 
     elif shape.type == ShapeType.ELLIPSE:
-        # 椭圆：暂用多边形近似
+        # 椭圆：用贝塞尔曲线近似
         if not shape.points:
             return None
         cx, cy = shape.points[0]
         rx = shape.extra.get('rx', 50)
         ry = shape.extra.get('ry', 30)
         rotation = shape.extra.get('rotation', 0.0)
-        # 用多边形近似椭圆
         import math
-        n_pts = 36
-        ellipse_pts = []
-        for i in range(n_pts):
-            angle = 2 * math.pi * i / n_pts
-            x = cx + rx * math.cos(angle) * math.cos(rotation) - ry * math.sin(angle) * math.sin(rotation)
-            y = cy + rx * math.cos(angle) * math.sin(rotation) + ry * math.sin(angle) * math.cos(rotation)
-            ellipse_pts.append((x, y))
-        return build_polyline_record(
-            ellipse_pts,
-            closed=True,
-            linewidth=linewidth
-        )
+        k = 0.5522847498
+        cos_r = math.cos(rotation)
+        sin_r = math.sin(rotation)
 
-    return None
+        def rotate(x, y):
+            return (cx + x * cos_r - y * sin_r,
+                    cy + x * sin_r + y * cos_r)
+
+        # 4 段贝塞尔近似椭圆
+        p0 = rotate(rx, 0)
+        p1_1 = rotate(rx, -ry * k)
+        p2_1 = rotate(rx * k, -ry)
+        p3 = rotate(0, -ry)
+        p4_1 = rotate(-rx * k, -ry)
+        p5_1 = rotate(-rx, -ry * k)
+        p6 = rotate(-rx, 0)
+        p7_1 = rotate(-rx, ry * k)
+        p8_1 = rotate(-rx * k, ry)
+        p9 = rotate(0, ry)
+        p10_1 = rotate(rx * k, ry)
+        p11_1 = rotate(rx, ry * k)
+        p12 = rotate(rx, 0)
+
+        bez_segs = [
+            ('bezier', [p0, p1_1, p2_1, p3]),
+            ('bezier', [p3, p4_1, p5_1, p6]),
+            ('bezier', [p6, p7_1, p8_1, p9]),
+            ('bezier', [p9, p10_1, p11_1, p12]),
+        ]
+        segments_list.append(bez_segs)
+
+    else:
+        return None
+
+    if not segments_list:
+        return None
+
+    return build_combo_path(
+        segments_list,
+        line_color_bgra=line_color_bgra,
+        linewidth=linewidth,
+        fill_color_bgra=fill_color_bgr,
+    )
 
 
 def _annotation_to_text_record(annotation: TextAnnotation) -> Optional[bytes]:

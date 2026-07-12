@@ -707,20 +707,61 @@ class GeometryMode:
             canvas_data = CanvasData()
             canvas_data.source_file = image_path
 
+            # 获取颜色模式
+            color_mode = params.get('color_mode', COLOR_MODE_LINE_ART)
+            count = len(subpaths)
+
+            # 预计算彩色填充模式的颜色
+            color_fill_colors = None
+            if color_mode == COLOR_MODE_COLOR_FILL and count > 0:
+                import colorsys
+                color_fill_colors = []
+                for i in range(count):
+                    hue = (i * 360 / max(count, 1)) % 360
+                    h = hue / 360.0
+                    r, g, b = colorsys.hsv_to_rgb(h, 0.8, 0.95)
+                    color_fill_colors.append((int(b*255), int(g*255), int(r*255)))
+
             all_points = []
             for i, path_points in enumerate(subpaths):
                 fill_color = None
                 line_color = (0, 0, 0)
                 line_width = 1.0
 
-                if is_stroke and i < len(is_stroke) and is_stroke[i]:
-                    if colors and i < len(colors):
-                        line_color = _to_bgr(colors[i])
-                else:
-                    if colors and i < len(colors):
-                        fill_color = _to_bgr(colors[i])
+                # 根据颜色模式设置颜色
+                if color_mode == COLOR_MODE_LINE_ART:
+                    # 线稿模式：黑色描边，无填充
+                    line_color = (0, 0, 0)
+                    fill_color = None
 
-                if stroke_widths and i < len(stroke_widths):
+                elif color_mode == COLOR_MODE_ACTUAL:
+                    # 实际颜色模式：使用 SVG 原始颜色
+                    if is_stroke and i < len(is_stroke) and is_stroke[i]:
+                        if colors and i < len(colors):
+                            line_color = _to_bgr(colors[i])
+                    else:
+                        if colors and i < len(colors):
+                            fill_color = _to_bgr(colors[i])
+
+                elif color_mode == COLOR_MODE_COLOR_FILL:
+                    # 彩色填充模式：彩虹色填充，黑色描边
+                    line_color = (0, 0, 0)
+                    if color_fill_colors and i < len(color_fill_colors):
+                        fill_color = color_fill_colors[i]
+                    else:
+                        fill_color = (200, 200, 200)
+
+                else:
+                    # 默认：SVG 原始颜色
+                    if is_stroke and i < len(is_stroke) and is_stroke[i]:
+                        if colors and i < len(colors):
+                            line_color = _to_bgr(colors[i])
+                    else:
+                        if colors and i < len(colors):
+                            fill_color = _to_bgr(colors[i])
+
+                # 描边宽度（SVG 中明确指定的优先）
+                if stroke_widths and i < len(stroke_widths) and stroke_widths[i]:
                     line_width = float(stroke_widths[i])
 
                 shape = Shape(
