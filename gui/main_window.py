@@ -695,14 +695,33 @@ class MainWindow:
 
         content = self._geo_params_card.content
 
-        # 形状拟合参数
-        tk.Label(
-            content,
-            text='形状拟合',
-            bg=get_color('card'),
-            fg=get_color('primary'),
-            font=('Microsoft YaHei UI', 10, 'bold'),
-        ).pack(anchor='w', pady=(0, 4))
+        # 颜色模式（一行排列）
+        self.geo_color_mode = tk.StringVar(value='line_art')
+
+        geo_modes = [
+            ('实际颜色', 'actual_color'),
+            ('黑白线稿', 'line_art'),
+            ('彩色填充', 'color_fill'),
+        ]
+
+        color_mode_frame = tk.Frame(content, bg=get_color('card'))
+        color_mode_frame.pack(fill='x', pady=(0, 8))
+
+        for text, value in geo_modes:
+            rb = tk.Radiobutton(
+                color_mode_frame,
+                text=text,
+                variable=self.geo_color_mode,
+                value=value,
+                bg=get_color('card'),
+                fg=get_color('text'),
+                font=('Microsoft YaHei UI', 10),
+                selectcolor=get_color('card'),
+                activebackground=get_color('card'),
+                activeforeground=get_color('accent'),
+                command=self._on_param_changed,
+            )
+            rb.pack(side='left', padx=(0, 16))
 
         # 最小面积
         self.geo_min_area_scale = LabeledScale(
@@ -713,7 +732,7 @@ class MainWindow:
             value=100,
             command=lambda v: self._on_param_changed(),
         )
-        self.geo_min_area_scale.pack(fill='x', pady=2)
+        self.geo_min_area_scale.pack(fill='x', pady=4)
 
         # 近似精度
         self.geo_approx_scale = LabeledScale(
@@ -724,7 +743,7 @@ class MainWindow:
             value=20,
             command=lambda v: self._on_param_changed(),
         )
-        self.geo_approx_scale.pack(fill='x', pady=2)
+        self.geo_approx_scale.pack(fill='x', pady=4)
 
         # 霍夫灵敏度
         self.geo_hough_scale = LabeledScale(
@@ -735,7 +754,7 @@ class MainWindow:
             value=100,
             command=lambda v: self._on_param_changed(),
         )
-        self.geo_hough_scale.pack(fill='x', pady=2)
+        self.geo_hough_scale.pack(fill='x', pady=4)
 
         # 圆数量
         circle_frame = tk.Frame(content, bg=get_color('card'))
@@ -764,15 +783,6 @@ class MainWindow:
         tk.Frame(content, bg=get_color('border'), height=1).pack(
             fill='x', pady=8,
         )
-
-        # 功能开关
-        tk.Label(
-            content,
-            text='功能开关',
-            bg=get_color('card'),
-            fg=get_color('primary'),
-            font=('Microsoft YaHei UI', 10, 'bold'),
-        ).pack(anchor='w', pady=(0, 4))
 
         # 字母识别和自动标注（一行排列）
         func_switch_frame = tk.Frame(content, bg=get_color('card'))
@@ -869,47 +879,6 @@ class MainWindow:
             activebackground=get_color('card'),
             command=self._on_param_changed,
         ).grid(row=1, column=1, sticky='w', padx=(0, 12), pady=2)
-
-        # 分隔线
-        tk.Frame(content, bg=get_color('border'), height=1).pack(
-            fill='x', pady=8,
-        )
-
-        # 颜色模式
-        tk.Label(
-            content,
-            text='颜色模式',
-            bg=get_color('card'),
-            fg=get_color('primary'),
-            font=('Microsoft YaHei UI', 10, 'bold'),
-        ).pack(anchor='w', pady=(0, 4))
-
-        self.geo_color_mode = tk.StringVar(value='line_art')
-
-        geo_modes = [
-            ('实际颜色', 'actual_color'),
-            ('黑白线稿', 'line_art'),
-            ('彩色填充', 'color_fill'),
-        ]
-
-        color_mode_frame = tk.Frame(content, bg=get_color('card'))
-        color_mode_frame.pack(fill='x', pady=2)
-
-        for text, value in geo_modes:
-            rb = tk.Radiobutton(
-                color_mode_frame,
-                text=text,
-                variable=self.geo_color_mode,
-                value=value,
-                bg=get_color('card'),
-                fg=get_color('text'),
-                font=('Microsoft YaHei UI', 10),
-                selectcolor=get_color('card'),
-                activebackground=get_color('card'),
-                activeforeground=get_color('accent'),
-                command=self._on_param_changed,
-            )
-            rb.pack(side='left', padx=(0, 16))
 
     def _build_output_settings_card(self, parent):
         """构建输出设置卡片"""
