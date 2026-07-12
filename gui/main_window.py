@@ -915,7 +915,16 @@ class MainWindow:
             width=8,
             command=self._on_pick_line_color,
         )
-        self._line_color_btn.pack(side='left', padx=(4, 0))
+        self._line_color_btn.pack(side='left', padx=(4, 8))
+
+        self.line_color_none_var = tk.BooleanVar(value=False)
+        self._line_color_none_chk = ttk.Checkbutton(
+            row1_frame,
+            text='无色',
+            variable=self.line_color_none_var,
+            command=self._on_line_color_none_toggled,
+        )
+        self._line_color_none_chk.pack(side='left')
 
         tk.Label(
             row1_frame,
@@ -1703,6 +1712,16 @@ class MainWindow:
             self._line_color_btn.config(fg=text_color)
             self._on_param_changed()
 
+    def _on_line_color_none_toggled(self):
+        """线条颜色无色复选框切换"""
+        is_none = self.line_color_none_var.get()
+        if is_none:
+            # 无色：禁用颜色按钮
+            self._line_color_btn.config(state='disabled')
+        else:
+            self._line_color_btn.config(state='normal')
+        self._on_param_changed()
+
     def _on_canvas_size_changed(self, event):
         """画布大小下拉框变化"""
         size = self.canvas_size_var.get()
@@ -1799,7 +1818,9 @@ class MainWindow:
 
             # 2. 批量导出
             canvas_size_mm = self._get_canvas_size_mm()
+            line_color_none = params.get('line_color_none', False)
             line_color = params.get('line_color')
+            line_alpha = 0 if line_color_none else 255
             export_result = batch_mgr.export_all(
                 output_dir=output_dir,
                 format='wsd',
@@ -1807,6 +1828,7 @@ class MainWindow:
                 merge_name='合并输出.wsd',
                 canvas_size_mm=canvas_size_mm,
                 line_color=line_color,
+                line_alpha=line_alpha,
             )
 
             if progress_callback:
@@ -1978,6 +2000,7 @@ class MainWindow:
             'mode': self._current_mode,
             'line_width': self.line_width_var.get(),
             'line_color': self.line_color_var.get(),
+            'line_color_none': self.line_color_none_var.get(),
             'canvas_size': self.canvas_size_var.get(),
             'export_mode': self.export_mode_var.get(),
         }

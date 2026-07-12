@@ -466,7 +466,8 @@ class BatchManager:
                    merge_mode: str = 'separate',
                    merge_name: str = 'output.wsd',
                    canvas_size_mm: Optional[tuple] = None,
-                   line_color: Optional[str] = None) -> Dict[str, int]:
+                   line_color: Optional[str] = None,
+                   line_alpha: int = 255) -> Dict[str, int]:
         """
         批量导出所有已处理完成的文件
 
@@ -482,6 +483,7 @@ class BatchManager:
             merge_name:    合并模式下的输出文件名（仅 merge 模式有效）
             canvas_size_mm: 画布尺寸 (宽mm, 高mm)，None 时使用默认尺寸
             line_color:    线条颜色覆盖（十六进制，如 '#ff0000'），None 则使用原始颜色
+            line_alpha:    线条透明度（0-255），默认255（不透明），0为完全透明（无色）
 
         返回:
             dict: 导出统计结果，包含以下键：
@@ -527,7 +529,8 @@ class BatchManager:
                 if format_lower == 'wsd':
                     output_path = os.path.join(output_dir, merge_name)
                     export_wsd_multi(canvas_list, output_path, canvas_size_mm,
-                                     line_color_override=line_color)
+                                     line_color_override=line_color,
+                                     line_alpha=line_alpha)
                 else:
                     # 其他格式暂未实现
                     raise NotImplementedError(
@@ -555,7 +558,8 @@ class BatchManager:
                             file_item.result,
                             output_path,
                             canvas_size_mm,
-                            line_color_override=line_color
+                            line_color_override=line_color,
+                            line_alpha=line_alpha,
                         )
                     elif format_lower == 'svg':
                         output_filename = base_name + '.svg'

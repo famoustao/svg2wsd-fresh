@@ -194,7 +194,7 @@ def _bgr_to_bgr_bytes(bgr):
     return bytes([int(bgr[0]) & 0xff, int(bgr[1]) & 0xff, int(bgr[2]) & 0xff])
 
 
-def _shape_to_path_record(shape: Shape, linewidth: int = 80) -> Optional[bytes]:
+def _shape_to_path_record(shape: Shape, linewidth: int = 80, line_alpha: int = 255) -> Optional[bytes]:
     """
     将 Shape 对象转换为对应的 WSD 路径记录（esShapePath 格式，支持颜色）
 
@@ -203,6 +203,7 @@ def _shape_to_path_record(shape: Shape, linewidth: int = 80) -> Optional[bytes]:
     参数:
         shape: Shape 对象
         linewidth: 线宽（WSD单位）
+        line_alpha: 线条透明度（0-255），默认255（不透明），0为完全透明（无色）
 
     返回:
         bytes: 路径记录的二进制数据，无法转换时返回 None
@@ -210,7 +211,7 @@ def _shape_to_path_record(shape: Shape, linewidth: int = 80) -> Optional[bytes]:
     _ensure_wsb_loaded()
 
     # 颜色转换
-    line_color_bgra = _bgr_to_bgra_bytes(shape.line_color)
+    line_color_bgra = _bgr_to_bgra_bytes(shape.line_color, alpha=line_alpha)
     fill_color_bgr = _bgr_to_bgr_bytes(shape.fill_color)
 
     # 根据形状类型构建 segments_list
@@ -569,7 +570,8 @@ def export_wsd_single(canvas_data: CanvasData,
                       output_path: str,
                       canvas_size_mm: Optional[Tuple[float, float]] = None,
                       linewidth: int = 80,
-                      line_color_override: Optional[str] = None) -> None:
+                      line_color_override: Optional[str] = None,
+                      line_alpha: int = 255) -> None:
     """
     单画布导出为单个 WSD 文件
 
@@ -594,6 +596,7 @@ def export_wsd_single(canvas_data: CanvasData,
         canvas_size_mm: 画布尺寸 (宽mm, 高mm)，None=默认正方形(140x140)
         linewidth: 线宽（WSD单位），默认 80（0.2mm）
         line_color_override: 线条颜色覆盖（十六进制，如 '#ff0000'），None 则使用原始颜色
+        line_alpha: 线条透明度（0-255），默认255（不透明），0为完全透明（无色）
 
     返回:
         None（直接写入文件）
@@ -631,7 +634,7 @@ def export_wsd_single(canvas_data: CanvasData,
         # 应用覆盖颜色
         if override_bgr is not None:
             transformed.line_color = override_bgr
-        rec = _shape_to_path_record(transformed, linewidth=linewidth)
+        rec = _shape_to_path_record(transformed, linewidth=linewidth, line_alpha=line_alpha)
         if rec is not None:
             builder.add_path(rec)
 
@@ -658,7 +661,8 @@ def export_wsd_single(canvas_data: CanvasData,
 def export_wsd_multi(canvas_list: List[CanvasData],
                      output_path: str,
                      canvas_size_mm: Optional[Tuple[float, float]] = None,
-                     line_color_override: Optional[str] = None) -> None:
+                     line_color_override: Optional[str] = None,
+                     line_alpha: int = 255) -> None:
     """
     多个画布导出到同一个 WSD 文件的不同画布
 
@@ -690,7 +694,8 @@ def export_wsd_multi(canvas_list: List[CanvasData],
 
     # 临时：导出第一个画布
     export_wsd_single(canvas_list[0], output_path, canvas_size_mm,
-                      line_color_override=line_color_override)
+                      line_color_override=line_color_override,
+                      line_alpha=line_alpha)
 
 
 # ============================================================
