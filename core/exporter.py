@@ -515,17 +515,19 @@ def export_wsd_single(canvas_data: CanvasData,
     单画布导出为单个 WSD 文件
 
     将 CanvasData 中的 Shape 和 TextAnnotation 转换为对应的 WSD 记录，
-    使用 FlexibleWSDGenerator（基于模板）构建完整的 WSD 文件。
+    使用 PureWSDBuilder（纯二进制构建，内置骨架，无需外部模板）构建完整的 WSD 文件。
 
     形状类型映射:
-      - 折线/多边形/直线/三角形/矩形 → create_polygon
-      - 圆 → create_circle
-      - 圆弧 → 用圆近似（最多4个点的限制）
+      - 折线/多边形/直线/三角形/矩形 → build_polyline_record
+      - 圆 → build_circle_record
+      - 圆弧 → build_arc_record
+      - 贝塞尔曲线 → build_bezier_path / build_bezier_chain
+      - 椭圆 → 多边形近似
 
     文字标注映射:
-      - 普通文字 → normal
-      - 下标 → subscript
-      - 上标 → superscript
+      - 普通文字 → TEXT_NORMAL
+      - 下标 → TEXT_SUBSCRIPT
+      - 上标 → TEXT_SUPERSCRIPT
 
     参数:
         canvas_data: CanvasData 画布数据
@@ -536,7 +538,7 @@ def export_wsd_single(canvas_data: CanvasData,
     返回:
         None（直接写入文件）
     """
-    from wsd_template_gen import FlexibleWSDGenerator
+    _ensure_wsb_loaded()
 
     # 确定画布尺寸
     if canvas_size_mm is None:
@@ -545,46 +547,31 @@ def export_wsd_single(canvas_data: CanvasData,
     # 计算坐标变换（像素 -> WSD单位，等比缩放居中）
     scale, offset_x, offset_y = _fit_canvas_to_wsd(canvas_data, canvas_size_mm)
 
-    # 创建生成器
-    gen = FlexibleWSDGenerator()
+    # 创建构建器（纯二进制，内置骨架）
+    builder = PureWSDBuilder()
 
     # 设置画布尺寸
     w_wsd, h_wsd = _get_canvas_size_wsd(canvas_size_mm)
-    if hasattr(gen, 'set_canvas_size'):
-        gen.set_canvas_size(w_wsd, h_wsd)
-    else:
-        # 手动修改画布尺寸（在block_tail中）
-        import struct
-        for i in range(len(gen.block_tail) - 8):
-            tw = struct.unpack_from('<I', gen.block_tail, i)[0]
-            th = struct.unpack_from('<I', gen.block_tail, i + 4)[0]
-            if 10000 < tw < 100000 and 10000 < th < 100000:
-                gen.block_tail = bytearray(gen.block_tail)
-                struct.pack_into('<I', gen.block_tail, i, int(w_wsd))
-                struct.pack_into('<I', gen.block_tail, i + 4, int(h_wsd))
-                gen.block_tail = bytes(gen.block_tail)
-                break
+    builder.set_canvas_size(int(w_wsd), int(h_wsd))
 
-    # 构建路径记录列表（坐标变换后）
-    path_records = []
+    # 构建路径记录（坐标变换后）
     for shape in canvas_data.shapes:
         # 坐标变换
         transformed = _transform_shape(shape, scale, offset_x, offset_y)
-        rec = _shape_with_gen(transformed, gen, linewidth=linewidth)
+        rec = _shape_to_path_record(transformed, linewidth=linewidth)
         if rec is not None:
-            path_records.append(rec)
+            builder.add_path(rec)
 
-    # 构建文字标注列表（坐标变换后）
-    text_annotations = []
+    # 构建文字记录（坐标变换后）
     for annotation in canvas_data.annotations:
         # 坐标变换
         transformed = _transform_annotation(annotation, scale, offset_x, offset_y)
-        ann = _annotation_to_dict(transformed)
-        if ann is not None:
-            text_annotations.append(ann)
+        rec = _annotation_to_text_record(transformed)
+        if rec is not None:
+            builder.add_text(rec)
 
     # 构建 WSD 文件
-    wsd_data = gen.build(path_records, text_annotations)
+    wsd_data = builder.build()
 
     # 确保输出目录存在
     out_dir = os.path.dirname(output_path)
