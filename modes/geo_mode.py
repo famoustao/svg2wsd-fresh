@@ -634,6 +634,56 @@ class GeometryMode:
 
         self.params = params
 
+        # 判断是否为 SVG 文件
+        ext = os.path.splitext(image_path)[1].lower()
+        if ext == '.svg':
+            # SVG 文件直接解析路径，不做几何识别
+            _ensure_geo_loaded()
+            try:
+                from svg2wsd_core import _parse_svg_file
+            except ImportError:
+                import svg2wsd_core
+                _parse_svg_file = svg2wsd_core._parse_svg_file
+
+            subpaths, colors, bbox, is_stroke, stroke_widths, path_group_ids = _parse_svg_file(image_path)
+
+            canvas_data = CanvasData()
+            canvas_data.source_file = image_path
+
+            all_points = []
+            for i, path_points in enumerate(subpaths):
+                fill_color = None
+                line_color = (0, 0, 0)
+                line_width = 1.0
+
+                if is_stroke and i < len(is_stroke) and is_stroke[i]:
+                    if colors and i < len(colors):
+                        line_color = colors[i]
+                else:
+                    if colors and i < len(colors):
+                        fill_color = colors[i]
+
+                if stroke_widths and i < len(stroke_widths):
+                    line_width = float(stroke_widths[i])
+
+                shape = Shape(
+                    type=ShapeType.BEZIER,
+                    points=list(path_points),
+                    line_color=line_color,
+                    fill_color=fill_color,
+                    line_width=line_width,
+                    extra={}
+                )
+                canvas_data.shapes.append(shape)
+                all_points.extend(path_points)
+
+            if all_points:
+                xs = [p[0] for p in all_points]
+                ys = [p[1] for p in all_points]
+                canvas_data.bbox = (min(xs), min(ys), max(xs), max(ys))
+
+            return canvas_data
+
         # 1. 读取图像
         img_color = cv2.imread(image_path)
         if img_color is None:

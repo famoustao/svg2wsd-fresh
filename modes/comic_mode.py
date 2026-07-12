@@ -299,7 +299,9 @@ class ComicMode:
 
     def _geo_paths_to_canvas_data(self, geo_paths, text_annotations,
                                   image_path: str,
-                                  fill_colors=None) -> CanvasData:
+                                  fill_colors=None,
+                                  is_stroke=None,
+                                  stroke_widths=None) -> CanvasData:
         """
         将原始路径数据转换为 CanvasData 格式
 
@@ -308,7 +310,9 @@ class ComicMode:
                       每4个点为一段三次贝塞尔曲线 (p0, c1, c2, p3)
             text_annotations: 文字标注列表
             image_path: 源图像路径
-            fill_colors: 填充颜色列表（可选）
+            fill_colors: 填充颜色列表（可选，BGR 格式）
+            is_stroke: 描边标记列表（可选，True 表示该路径是描边）
+            stroke_widths: 描边宽度列表（可选）
 
         返回:
             CanvasData: 统一格式的画布数据
@@ -322,15 +326,29 @@ class ComicMode:
         for i, path_points in enumerate(geo_paths):
             # path_points 是 [(x,y), ...] 贝塞尔曲线点列表
             fill_color = None
-            if fill_colors and i < len(fill_colors):
-                fill_color = fill_colors[i]
+            line_color = (0, 0, 0)
+            line_width = 1.0
+
+            # 处理颜色：SVG 中 colors 通常是描边色
+            if is_stroke and i < len(is_stroke) and is_stroke[i]:
+                # 描边路径：颜色作为描边色
+                if fill_colors and i < len(fill_colors):
+                    line_color = fill_colors[i]
+            else:
+                # 填充路径：颜色作为填充色
+                if fill_colors and i < len(fill_colors):
+                    fill_color = fill_colors[i]
+
+            # 描边宽度
+            if stroke_widths and i < len(stroke_widths):
+                line_width = float(stroke_widths[i])
 
             shape = Shape(
                 type=ShapeType.BEZIER,
                 points=list(path_points),  # 直接用贝塞尔点列表
-                line_color=(0, 0, 0),
+                line_color=line_color,
                 fill_color=fill_color,
-                line_width=1.0,
+                line_width=line_width,
                 extra={}
             )
             canvas_data.shapes.append(shape)
@@ -453,9 +471,10 @@ def process(image_path: str, mode_type: str, params: Optional[Dict[str, Any]] = 
 
     根据指定的子模式和参数，对输入图像进行矢量化处理，
     返回统一的 CanvasData 格式结果。
+    支持 SVG 和图片格式输入。
 
     参数:
-        image_path: 输入图像文件路径
+        image_path: 输入图像文件路径（SVG 或图片）
         mode_type: 子模式类型
             'line_art' - 黑白线稿模式
             'actual_color' - 实际颜色模式
@@ -476,6 +495,24 @@ def process(image_path: str, mode_type: str, params: Optional[Dict[str, Any]] = 
     # 默认参数
     if params is None:
         params = {}
+
+    # 确保 core 已加载（需要 SVG_EXTENSIONS 等常量）
+    _ensure_core_loaded()
+
+    # 判断文件类型
+    ext = os.path.splitext(image_path)[1].lower()
+    svg_extensions = {'.svg'}
+
+    # SVG 文件直接解析，不经过图像处理流程
+    if ext in svg_extensions:
+        subpaths, colors, bbox, is_stroke, stroke_widths, path_group_ids = svg2wsd_core._parse_svg_file(image_path)
+        processor = ComicMode()
+        processor.mode_type = mode_type
+        processor.params = params
+        return processor._geo_paths_to_canvas_data(subpaths, [], image_path,
+                                                   fill_colors=colors,
+                                                   is_stroke=is_stroke,
+                                                   stroke_widths=stroke_widths)
 
     # 创建处理器
     processor = ComicMode()
