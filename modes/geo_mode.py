@@ -729,7 +729,10 @@ class GeometryMode:
                     line_color=line_color,
                     fill_color=fill_color,
                     line_width=line_width,
-                    extra={}
+                    extra={
+                        'path_group_id': path_group_ids[i] if path_group_ids and i < len(path_group_ids) else i,
+                        'subpath_index': i,
+                    }
                 )
                 canvas_data.shapes.append(shape)
                 all_points.extend(path_points)

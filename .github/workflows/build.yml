@@ -59,6 +59,8 @@ jobs:
             --hidden-import wsd_parser `
             --hidden-import wsd_text `
             --hidden-import tikz_utils `
+            --hidden-import cairosvg `
+            --hidden-import cairocffi `
             app.py
 
       - name: Copy template and samples

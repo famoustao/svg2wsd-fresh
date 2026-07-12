@@ -1198,10 +1198,33 @@ class MainWindow:
         self._update_status(f'加载预览: {file_info["name"]}')
 
         # 尝试加载原图预览
+        ext = os.path.splitext(filepath)[1].lower()
         try:
             from PIL import Image
-            img = Image.open(filepath)
-            self.preview_panel.set_image(img)
+            if ext == '.svg':
+                # SVG 文件：使用 cairosvg 渲染为图片
+                import io
+                try:
+                    import cairosvg
+                    png_data = cairosvg.svg2png(url=filepath)
+                    img = Image.open(io.BytesIO(png_data))
+                    # RGBA 转 RGB（白色背景）
+                    if img.mode == 'RGBA':
+                        background = Image.new('RGB', img.size, (255, 255, 255))
+                        background.paste(img, mask=img.split()[3])
+                        img = background
+                    elif img.mode != 'RGB':
+                        img = img.convert('RGB')
+                    self.preview_panel.set_image(img)
+                except ImportError:
+                    # cairosvg 不可用，跳过原图预览
+                    pass
+                except Exception:
+                    # 渲染失败，跳过原图预览
+                    pass
+            else:
+                img = Image.open(filepath)
+                self.preview_panel.set_image(img)
         except Exception as e:
             self._update_status(f'加载预览失败: {str(e)}')
 

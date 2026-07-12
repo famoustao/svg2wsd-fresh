@@ -4,6 +4,7 @@ pillow>=9.0.0
 potracer>=0.0.1
 numpy>=1.20.0
 opencv-python>=4.5.0
+cairosvg>=2.7.0
 
 # 打包工具（仅构建时需要）
 pyinstaller>=5.0.0

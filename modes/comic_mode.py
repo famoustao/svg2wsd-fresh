@@ -301,7 +301,8 @@ class ComicMode:
                                   image_path: str,
                                   fill_colors=None,
                                   is_stroke=None,
-                                  stroke_widths=None) -> CanvasData:
+                                  stroke_widths=None,
+                                  path_group_ids=None) -> CanvasData:
         """
         将原始路径数据转换为 CanvasData 格式
 
@@ -313,6 +314,7 @@ class ComicMode:
             fill_colors: 填充颜色列表（可选，BGR 元组或 hex 字符串）
             is_stroke: 描边标记列表（可选，True 表示该路径是描边）
             stroke_widths: 描边宽度列表（可选）
+            path_group_ids: 路径组ID列表（可选，用于复合路径/孔洞识别）
 
         返回:
             CanvasData: 统一格式的画布数据
@@ -406,7 +408,10 @@ class ComicMode:
                 line_color=line_color,
                 fill_color=fill_color,
                 line_width=line_width,
-                extra={}
+                extra={
+                    'path_group_id': path_group_ids[i] if path_group_ids and i < len(path_group_ids) else i,
+                    'subpath_index': i,
+                }
             )
             canvas_data.shapes.append(shape)
             all_points.extend(path_points)
@@ -569,7 +574,8 @@ def process(image_path: str, mode_type: str, params: Optional[Dict[str, Any]] = 
         return processor._geo_paths_to_canvas_data(subpaths, [], image_path,
                                                    fill_colors=colors,
                                                    is_stroke=is_stroke,
-                                                   stroke_widths=stroke_widths)
+                                                   stroke_widths=stroke_widths,
+                                                   path_group_ids=path_group_ids)
 
     # 创建处理器
     processor = ComicMode()

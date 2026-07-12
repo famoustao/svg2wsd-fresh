@@ -559,13 +559,33 @@ class WsdPreviewCanvas(ZoomableCanvas):
         # 绘制网格背景（淡灰色）
         self._draw_grid()
 
-        # 绘制所有形状
+        # 按 path_group_id 分组，处理复合路径（孔洞）
+        groups = {}
         for shape in self._canvas_data.shapes:
-            try:
-                self._draw_shape(shape)
-            except Exception:
-                # 单个形状绘制失败不影响整体预览
-                pass
+            gid = shape.extra.get('path_group_id', 0)
+            if gid not in groups:
+                groups[gid] = []
+            groups[gid].append(shape)
+
+        # 绘制每组形状
+        for gid, group_shapes in groups.items():
+            if len(group_shapes) == 1:
+                # 单路径，直接绘制
+                try:
+                    self._draw_shape(group_shapes[0])
+                except Exception:
+                    pass
+            else:
+                # 复合路径：第一个是外框，其余是孔洞
+                try:
+                    self._draw_compound_path(group_shapes)
+                except Exception:
+                    # 复合路径绘制失败，回退到逐个绘制
+                    for shape in group_shapes:
+                        try:
+                            self._draw_shape(shape)
+                        except Exception:
+                            pass
 
         # 绘制所有文字标注
         for ann in self._canvas_data.annotations:
@@ -856,6 +876,101 @@ class WsdPreviewCanvas(ZoomableCanvas):
                 joinstyle='round',
                 smooth=False,
             )
+
+    def _draw_compound_path(self, group_shapes: List[Shape]):
+        """
+        绘制复合路径（带孔洞）
+
+        第一个形状是外框，后续形状是孔洞。
+        先绘制外框填充，再绘制孔洞（白色填充覆盖），实现挖空效果。
+
+        Args:
+            group_shapes: 同一组的形状列表，第一项为外框，其余为孔洞
+        """
+        outer = group_shapes[0]
+        holes = group_shapes[1:]
+
+        color = _bgr_to_hex(outer.line_color)
+        fill = _bgr_to_hex(outer.fill_color) if outer.fill_color else None
+        width = max(1.0, self._to_canvas_size(outer.line_width))
+
+        # 采样外框为多边形
+        outer_poly = self._bezier_to_polygon(outer.points)
+        if len(outer_poly) < 3:
+            # 无法形成多边形，回退到单独绘制
+            for shape in group_shapes:
+                self._draw_shape(shape)
+            return
+
+        outer_coords = self._points_to_canvas(outer_poly)
+
+        if fill:
+            # 绘制外框填充
+            self.canvas.create_polygon(
+                *outer_coords,
+                outline=color,
+                fill=fill,
+                width=width,
+                joinstyle='round',
+            )
+
+            # 绘制孔洞（用白色填充盖住）
+            for hole_shape in holes:
+                hole_poly = self._bezier_to_polygon(hole_shape.points)
+                if len(hole_poly) >= 3:
+                    hole_coords = self._points_to_canvas(hole_poly)
+                    self.canvas.create_polygon(
+                        *hole_coords,
+                        fill='#ffffff',
+                        outline='',
+                        width=0,
+                    )
+        else:
+            # 无填充，只绘制外框轮廓
+            self.canvas.create_line(
+                *outer_coords,
+                fill=color,
+                width=width,
+                capstyle='round',
+                joinstyle='round',
+            )
+
+    def _bezier_to_polygon(self, points: List[Tuple[float, float]],
+                           samples: int = 20) -> List[Tuple[float, float]]:
+        """
+        将贝塞尔曲线采样为多边形顶点
+
+        Args:
+            points: 贝塞尔控制点列表，每4个点为一段 (p0, c1, c2, p3)
+            samples: 每段采样点数
+
+        Returns:
+            采样后的多边形顶点列表
+        """
+        if len(points) < 4:
+            return points
+
+        segments = []
+        i = 0
+        while i + 3 < len(points):
+            segments.append((points[i], points[i+1], points[i+2], points[i+3]))
+            i += 3
+
+        if not segments:
+            return points
+
+        all_sampled = []
+        for seg_idx, (p0, p1, p2, p3) in enumerate(segments):
+            for j in range(samples + 1):
+                if seg_idx > 0 and j == 0:
+                    continue
+                t = j / samples
+                mt = 1 - t
+                x = mt*mt*mt*p0[0] + 3*mt*mt*t*p1[0] + 3*mt*t*t*p2[0] + t*t*t*p3[0]
+                y = mt*mt*mt*p0[1] + 3*mt*mt*t*p1[1] + 3*mt*t*t*p2[1] + t*t*t*p3[1]
+                all_sampled.append((x, y))
+
+        return all_sampled
 
     def _draw_compound_shape(self, shape: Shape):
         """绘制复合图形（递归绘制子形状）"""
