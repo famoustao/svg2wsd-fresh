@@ -412,13 +412,26 @@ class BatchManager:
                         pass
 
                 try:
-                    # 1. 导入文件
-                    canvas_data = import_file(file_item.filepath)
+                    # 根据模式类型调用对应的处理器
+                    mode_type_lower = mode_type.lower()
 
-                    # 2. 应用模式处理
-                    canvas_data = self._apply_mode(canvas_data, mode_type, params)
+                    if mode_type_lower in ("none", "raw"):
+                        # 无模式：直接导入
+                        canvas_data = import_file(file_item.filepath)
+                    elif mode_type_lower == "geo":
+                        # 几何模式
+                        from modes.geo_mode import GeometryMode
+                        mode = GeometryMode()
+                        canvas_data = mode.process(file_item.filepath, params)
+                    elif mode_type_lower == "comic":
+                        # 漫画模式
+                        from modes.comic_mode import ComicMode
+                        mode = ComicMode()
+                        canvas_data = mode.process(file_item.filepath, params)
+                    else:
+                        raise ValueError(f"不支持的处理模式: {mode_type}")
 
-                    # 3. 标记为完成
+                    # 标记为完成
                     file_item.set_done(canvas_data)
                     success += 1
 
@@ -443,58 +456,6 @@ class BatchManager:
             "failed": failed,
             "skipped": skipped,
         }
-
-    def _apply_mode(self, canvas_data: CanvasData, mode_type: str,
-                    params: Dict[str, Any]) -> CanvasData:
-        """
-        应用指定模式处理画布数据
-
-        根据 mode_type 查找对应的模式处理器，对导入的画布数据
-        进行进一步处理（如几何识别、漫画处理等）。
-
-        参数:
-            canvas_data: 导入的画布数据
-            mode_type:   模式类型字符串
-            params:      模式参数字典
-
-        返回:
-            CanvasData: 处理后的画布数据
-
-        异常:
-            ValueError: 不支持的模式类型
-        """
-        mode_type_lower = mode_type.lower()
-
-        if mode_type_lower == "none" or mode_type_lower == "raw":
-            # 无模式：直接返回导入的原始数据
-            return canvas_data
-
-        elif mode_type_lower == "geo":
-            # 几何模式
-            try:
-                from ..modes.geo_mode import GeometryMode
-                mode = GeometryMode()
-                # TODO: 调用几何模式的处理方法
-                # 待几何模式完善 process 接口后对接
-                # canvas_data = mode.process(canvas_data, params)
-                return canvas_data
-            except ImportError:
-                # 模式模块不可用时，返回原始数据
-                return canvas_data
-
-        elif mode_type_lower == "comic":
-            # 漫画模式
-            try:
-                from ..modes.comic_mode import ComicMode
-                mode = ComicMode()
-                # TODO: 调用漫画模式的处理方法
-                # canvas_data = mode.process(canvas_data, params)
-                return canvas_data
-            except ImportError:
-                return canvas_data
-
-        else:
-            raise ValueError(f"不支持的处理模式: {mode_type}")
 
     # ========================================================
     # 批量导出

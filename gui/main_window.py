@@ -30,6 +30,9 @@ from gui.task_worker import TaskWorker
 # 导入版本信息
 from utils.version import get_version_string
 
+# 导入核心模块
+from core.batch_manager import BatchManager
+
 
 # ============================================================
 # 可滚动框架辅助类
@@ -304,6 +307,9 @@ class MainWindow:
         self._files: List[Dict[str, Any]] = []
         self._current_file_index: int = -1
 
+        # 批量管理器
+        self._batch_manager = BatchManager()
+
         # 当前模式（comic / geometry）
         self._current_mode: str = 'comic'
 
@@ -392,14 +398,6 @@ class MainWindow:
             command=self._on_import_clicked,
         )
         self.import_btn.pack(side='left', padx=4)
-
-        # 导出按钮
-        self.export_btn = ttk.Button(
-            toolbar,
-            text='📤 导出',
-            command=self._on_export_clicked,
-        )
-        self.export_btn.pack(side='left', padx=4)
 
         # 画布设置按钮
         self.canvas_setup_btn = ttk.Button(
@@ -961,11 +959,11 @@ class MainWindow:
         )
         self.update_preview_btn.pack(fill='x', pady=(0, 8))
 
-        # 开始转换按钮（主按钮，大尺寸）
+        # 开始转换并导出按钮（主按钮，大尺寸）
         self.convert_btn = ttk.Button(
             content,
-            text='📥 开始转换',
-            style='LargePrimary.TButton',
+            text='🚀 开始转换并导出',
+            style='Accent.TButton',
             command=self._on_start_convert,
         )
         self.convert_btn.pack(fill='x', pady=4)
@@ -1081,20 +1079,6 @@ class MainWindow:
     def _on_import_clicked(self):
         """导入按钮点击事件"""
         self._on_add_file()
-
-    def _on_export_clicked(self):
-        """导出按钮点击事件"""
-        if not self._files:
-            messagebox.showinfo('提示', '请先添加要转换的文件')
-            return
-
-        output_dir = filedialog.askdirectory(title='选择输出目录')
-        if not output_dir:
-            return
-
-        self._update_status(f'导出目录: {output_dir}')
-        # 触发转换导出
-        self._start_conversion(output_dir)
 
     def _on_add_file(self):
         """添加文件按钮"""
@@ -1379,10 +1363,7 @@ class MainWindow:
 
     def _on_batch_clicked(self):
         """批量处理按钮点击"""
-        if not self._files:
-            messagebox.showinfo('提示', '请先添加要处理的文件')
-            return
-        self._on_export_clicked()
+        self._on_start_convert()
 
     # ============================================================
     # 事件处理 - 帮助
@@ -1399,7 +1380,7 @@ class MainWindow:
     # ============================================================
 
     def _on_start_convert(self):
-        """开始转换按钮点击"""
+        """开始转换并导出按钮点击"""
         if not self._files:
             messagebox.showinfo('提示', '请先添加要转换的文件')
             return
@@ -1412,7 +1393,7 @@ class MainWindow:
 
     def _start_conversion(self, output_dir: str):
         """
-        启动转换任务（后台执行）
+        启动转换+导出任务（后台执行）
 
         Args:
             output_dir: 输出目录路径
@@ -1422,7 +1403,13 @@ class MainWindow:
             return
 
         params = self._get_current_params()
-        file_paths = [f['path'] for f in self._files]
+        mode_type = 'comic' if self._current_mode == 'comic' else 'geo'
+        export_mode = self.export_mode_var.get()  # separate 或 merge
+
+        # 同步文件列表到 batch_manager
+        self._batch_manager.clear()
+        for f in self._files:
+            self._batch_manager.add_file(f['path'])
 
         # 更新UI状态
         self.convert_btn.configure(state='disabled')
@@ -1430,22 +1417,51 @@ class MainWindow:
         self.progress_label.config(text='0%')
         self._update_status('正在处理...')
 
-        # 创建后台任务
-        # 这里使用一个模拟任务函数，实际项目中应替换为真实的转换逻辑
+        # 创建后台任务 - 真正的转换+导出逻辑
+        batch_mgr = self._batch_manager
+
         def conversion_task(progress_callback=None, cancel_check=None):
-            total = len(file_paths)
-            for i, path in enumerate(file_paths):
-                if cancel_check and cancel_check():
-                    return None
+            total = len(self._files)
+
+            def on_progress(current_idx, total_count, file_item):
                 if progress_callback:
-                    progress = (i / total) * 100
-                    progress_callback(progress, f'处理中: {os.path.basename(path)} ({i+1}/{total})')
-                # 模拟处理时间
-                import time
-                time.sleep(0.5)
+                    progress = ((current_idx - 1) / total) * 100 * 0.8  # 处理占80%进度
+                    fname = os.path.basename(file_item.filepath)
+                    status_text = '处理中' if file_item.is_processing else '已完成'
+                    progress_callback(progress, f'{status_text}: {fname} ({current_idx}/{total})')
+
+            # 1. 批量处理
+            process_result = batch_mgr.process_all(
+                mode_type=mode_type,
+                params=params,
+                progress_callback=on_progress,
+            )
+
+            if cancel_check and cancel_check():
+                return {'cancelled': True, 'output_dir': output_dir}
+
+            # 处理完成，更新进度到80%
             if progress_callback:
-                progress_callback(100, '处理完成')
-            return output_dir
+                progress_callback(80.0, '正在导出WSD文件...')
+
+            # 2. 批量导出
+            canvas_size_mm = (297, 210)  # 默认A4横向
+            export_result = batch_mgr.export_all(
+                output_dir=output_dir,
+                format='wsd',
+                merge_mode=export_mode,
+                merge_name='合并输出.wsd',
+                canvas_size_mm=canvas_size_mm,
+            )
+
+            if progress_callback:
+                progress_callback(100.0, '转换完成')
+
+            return {
+                'process': process_result,
+                'export': export_result,
+                'output_dir': output_dir,
+            }
 
         self._task_worker = TaskWorker(conversion_task)
         self._task_worker.progress_signal.connect(self._on_task_progress)
@@ -1488,9 +1504,47 @@ class MainWindow:
 
     def _handle_result(self, result):
         """处理任务结果"""
-        # 更新所有文件状态为已完成
-        for i, item in enumerate(self.file_tree.get_children()):
-            self.file_tree.set(item, 'status', '已完成')
+        if isinstance(result, dict) and result.get('cancelled'):
+            return
+
+        # 更新文件状态
+        if isinstance(result, dict) and 'process' in result:
+            proc = result['process']
+            exp = result.get('export', {})
+            output_dir = result.get('output_dir', '')
+
+            # 更新Treeview中的状态
+            for i, item in enumerate(self.file_tree.get_children()):
+                if i < proc.get('success', 0):
+                    self.file_tree.set(item, 'status', '已完成')
+                elif i < proc.get('success', 0) + proc.get('failed', 0):
+                    self.file_tree.set(item, 'status', '失败')
+
+            # 显示结果对话框
+            exported = exp.get('exported', 0)
+            total = exp.get('total', 0)
+            msg = f"处理完成！\n\n成功: {proc.get('success', 0)} 个\n失败: {proc.get('failed', 0)} 个\n已导出: {exported}/{total} 个文件\n\n输出目录: {output_dir}"
+
+            # 询问是否打开输出目录
+            if messagebox.askyesno('转换完成', msg + '\n\n是否打开输出目录？'):
+                self._open_folder(output_dir)
+        else:
+            # 兼容旧格式
+            for i, item in enumerate(self.file_tree.get_children()):
+                self.file_tree.set(item, 'status', '已完成')
+
+    def _open_folder(self, path: str):
+        """打开文件夹"""
+        import subprocess
+        try:
+            if sys.platform.startswith('win'):
+                os.startfile(path)
+            elif sys.platform == 'darwin':
+                subprocess.run(['open', path])
+            else:
+                subprocess.run(['xdg-open', path])
+        except Exception:
+            pass
 
     def _on_task_error(self, progress: float, error_info):
         """任务错误"""
