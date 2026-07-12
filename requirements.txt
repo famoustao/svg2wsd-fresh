@@ -1,7 +1,7 @@
 # 图片转WSD - 依赖清单
 # 核心依赖
 pillow>=9.0.0
-potracer>=0.1.0
+potracer>=0.0.1
 numpy>=1.20.0
 opencv-python>=4.5.0
 
