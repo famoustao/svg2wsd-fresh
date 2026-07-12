@@ -748,21 +748,71 @@ class WsdPreviewCanvas(ZoomableCanvas):
         绘制贝塞尔曲线
 
         tkinter Canvas 不直接支持贝塞尔曲线，
-        这里采用分段折线近似的方式绘制。
+        采用多段折线近似（采样点连线）。
         """
-        if len(shape.points) < 2:
+        pts = shape.points
+        if len(pts) < 4:
             return
-        # 使用二次/三次贝塞尔的近似采样
-        # 简化处理：直接用折线连接控制点（实际应用中应做贝塞尔插值）
-        coords = self._points_to_canvas(shape.points)
-        self.canvas.create_line(
-            *coords,
-            fill=color,
-            width=width,
-            dash=(4, 4),  # 虚线表示近似
-            capstyle='round',
-            joinstyle='round',
-        )
+
+        # 将连续的点列表解析为多段三次贝塞尔曲线
+        # 每4个点为一段：p0, c1, c2, p3
+        # 段与段之间，前一段的 p3 就是后一段的 p0
+        segments = []
+        i = 0
+        while i + 3 < len(pts):
+            segments.append((pts[i], pts[i+1], pts[i+2], pts[i+3]))
+            i += 3  # 下一段从 p3 开始
+
+        if not segments:
+            return
+
+        # 对每段贝塞尔曲线采样，生成平滑折线
+        samples_per_segment = 20
+        all_sampled = []
+
+        for seg_idx, (p0, p1, p2, p3) in enumerate(segments):
+            start_t = 0.0 if seg_idx == 0 else 1.0 / samples_per_segment
+            for j in range(samples_per_segment + 1):
+                if seg_idx > 0 and j == 0:
+                    continue  # 跳过重复的起点
+                t = j / samples_per_segment
+                # 三次贝塞尔公式
+                mt = 1 - t
+                x = mt*mt*mt*p0[0] + 3*mt*mt*t*p1[0] + 3*mt*t*t*p2[0] + t*t*t*p3[0]
+                y = mt*mt*mt*p0[1] + 3*mt*mt*t*p1[1] + 3*mt*t*t*p2[1] + t*t*t*p3[1]
+                all_sampled.append((x, y))
+
+        if len(all_sampled) < 2:
+            return
+
+        # 判断是否闭合（首尾点接近）
+        is_closed = False
+        if len(all_sampled) >= 3:
+            dx = all_sampled[0][0] - all_sampled[-1][0]
+            dy = all_sampled[0][1] - all_sampled[-1][1]
+            if abs(dx) < 1.0 and abs(dy) < 1.0:
+                is_closed = True
+
+        coords = self._points_to_canvas(all_sampled)
+
+        fill = shape.fill_color
+        if is_closed and fill:
+            self.canvas.create_polygon(
+                *coords,
+                outline=color,
+                fill=_bgr_to_hex(fill) if fill else '',
+                width=width,
+                smooth=False,
+            )
+        else:
+            self.canvas.create_line(
+                *coords,
+                fill=color,
+                width=width,
+                capstyle='round',
+                joinstyle='round',
+                smooth=False,
+            )
 
     def _draw_compound_shape(self, shape: Shape):
         """绘制复合图形（递归绘制子形状）"""
