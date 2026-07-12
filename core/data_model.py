@@ -335,9 +335,9 @@ def scale_annotations(annotations: List[TextAnnotation], scale: float,
         new_ann.x = ox + (ann.x - ox) * scale
         new_ann.y = oy + (ann.y - oy) * scale
         new_ann.font_size = ann.font_size * scale
-        # 关联参数也同步缩放
-        new_ann.assoc_f1 = ann.assoc_f1 * scale
-        new_ann.assoc_f2 = ann.assoc_f2 * scale
+        # 关联参数不缩放（f1/f2是比例值，0-1之间）
+        new_ann.assoc_f1 = ann.assoc_f1
+        new_ann.assoc_f2 = ann.assoc_f2
         result.append(new_ann)
 
     return result

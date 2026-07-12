@@ -552,11 +552,11 @@ def _transform_annotation(annotation: TextAnnotation,
     new_ann.y = annotation.y * scale + offset_y
     new_ann.font_size = max(6.0, annotation.font_size * scale)
 
-    # 关联参数也缩放
+    # 关联参数不缩放（f1/f2是比例值，0-1之间）
     if hasattr(annotation, 'assoc_f1'):
-        new_ann.assoc_f1 = annotation.assoc_f1 * scale if annotation.assoc_f1 else 0
+        new_ann.assoc_f1 = annotation.assoc_f1
     if hasattr(annotation, 'assoc_f2'):
-        new_ann.assoc_f2 = annotation.assoc_f2 * scale if annotation.assoc_f2 else 0
+        new_ann.assoc_f2 = annotation.assoc_f2
 
     return new_ann
 
