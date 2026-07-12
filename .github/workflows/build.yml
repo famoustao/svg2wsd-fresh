@@ -35,7 +35,7 @@ jobs:
           $date = Get-Date -Format "yyyyMMdd"
           echo "BUILD_DATE=$date" >> $env:GITHUB_OUTPUT
 
-      - name: Build v2 GUI EXE (新版主程序)
+      - name: Build GUI EXE
         run: |
           pyinstaller --onefile --windowed --clean `
             --name 图片转WSD `
@@ -60,29 +60,6 @@ jobs:
             --hidden-import wsd_text `
             --hidden-import tikz_utils `
             app.py
-
-      - name: Build CLI EXE (旧版兼容)
-        run: |
-          pyinstaller --onefile --clean `
-            --name svg2wsd `
-            --hidden-import potrace `
-            --hidden-import PIL `
-            --hidden-import PIL.Image `
-            --hidden-import cv2 `
-            --hidden-import numpy `
-            svg2wsd.py
-
-      - name: Build old GUI EXE (旧版兼容)
-        run: |
-          pyinstaller --onefile --windowed --clean `
-            --name svg2wsd_gui `
-            --hidden-import potrace `
-            --hidden-import PIL `
-            --hidden-import PIL.Image `
-            --hidden-import PIL.ImageTk `
-            --hidden-import cv2 `
-            --hidden-import numpy `
-            svg2wsd_gui.py
 
       - name: Copy template and samples
         run: |
