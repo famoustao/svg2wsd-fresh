@@ -390,11 +390,11 @@ class MainWindow:
 
         # 漫画模式选项卡
         self.comic_tab = ttk.Frame(self.mode_notebook, style='TFrame')
-        self.mode_notebook.add(self.comic_tab, text='  漫画模式  ')
+        self.mode_notebook.add(self.comic_tab, text=' 🎨 漫画模式 ')
 
         # 几何模式选项卡
         self.geo_tab = ttk.Frame(self.mode_notebook, style='TFrame')
-        self.mode_notebook.add(self.geo_tab, text='  几何模式  ')
+        self.mode_notebook.add(self.geo_tab, text=' 📐 几何模式 ')
 
         # 绑定选项卡切换事件
         self.mode_notebook.bind(

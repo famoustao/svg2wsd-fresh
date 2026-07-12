@@ -479,22 +479,39 @@ def _configure_notebook(style):
         ],
     )
 
-    # 扁平化 Notebook 样式 - 只用明暗区分选中状态，大小一致
+    # 扁平化 Notebook 样式 - 只用明暗区分选中状态，大小完全一致
+    # 使用自定义布局，去掉会改变大小的边框/焦点元素
+    style.layout('Flat.TNotebook.Tab', [
+        ('Notebook.tab', {
+            'children': [
+                ('Notebook.padding', {
+                    'children': [
+                        ('Notebook.label', {'side': 'top', 'sticky': ''}),
+                    ],
+                    'sticky': 'nswe',
+                })
+            ],
+            'sticky': 'nswe',
+        })
+    ])
+
     style.configure(
         'Flat.TNotebook',
         background=COLOR_BACKGROUND,
         borderwidth=0,
     )
 
+    # 统一设置 padding，确保选中和未选中大小完全一致
     style.configure(
         'Flat.TNotebook.Tab',
         background=COLOR_BACKGROUND,
         foreground=COLOR_TEXT_SECONDARY,
         font=('Microsoft YaHei UI', 10),
-        padding=(16, 8),
+        padding=(18, 8),
         borderwidth=0,
     )
 
+    # 只改变背景和前景色，不改变任何大小/边距相关属性
     style.map(
         'Flat.TNotebook.Tab',
         background=[
@@ -502,8 +519,14 @@ def _configure_notebook(style):
             ('active', COLOR_BORDER),
         ],
         foreground=[
-            ('selected', COLOR_TEXT),
+            ('selected', COLOR_PRIMARY),
             ('active', COLOR_TEXT),
+        ],
+        # 确保 padding 在所有状态下都一致
+        padding=[
+            ('selected', (18, 8)),
+            ('active', (18, 8)),
+            ('!selected', (18, 8)),
         ],
     )
 

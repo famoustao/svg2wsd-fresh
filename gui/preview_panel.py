@@ -898,35 +898,35 @@ class PreviewPanel(ttk.Frame):
 
         # --- 原图预览页 ---
         self.image_tab = ttk.Frame(self.notebook)
-        self.notebook.add(self.image_tab, text='原图预览')
+        self.notebook.add(self.image_tab, text=' 🖼 原图 ')
         self.image_canvas = ImagePreviewCanvas(self.image_tab)
         self.image_canvas.pack(fill=tk.BOTH, expand=True)
         self.image_canvas.on_zoom_changed(self._on_zoom_changed)
 
         # --- WSD 预览页 ---
         self.ws_tab = ttk.Frame(self.notebook)
-        self.notebook.add(self.ws_tab, text='WSD预览')
+        self.notebook.add(self.ws_tab, text=' ✏️ WSD ')
         self.wsd_canvas = WsdPreviewCanvas(self.ws_tab)
         self.wsd_canvas.pack(fill=tk.BOTH, expand=True)
         self.wsd_canvas.on_zoom_changed(self._on_zoom_changed)
 
         # --- SVG 预览页 ---
         self.svg_tab = ttk.Frame(self.notebook)
-        self.notebook.add(self.svg_tab, text='SVG预览')
+        self.notebook.add(self.svg_tab, text=' 📄 SVG ')
         self.svg_canvas = PlaceholderPreviewCanvas(self.svg_tab, title='SVG')
         self.svg_canvas.pack(fill=tk.BOTH, expand=True)
         self.svg_canvas.on_zoom_changed(self._on_zoom_changed)
 
         # --- LaTeX 预览页 ---
         self.latex_tab = ttk.Frame(self.notebook)
-        self.notebook.add(self.latex_tab, text='LaTeX预览')
+        self.notebook.add(self.latex_tab, text=' 📝 LaTeX ')
         self.latex_canvas = PlaceholderPreviewCanvas(self.latex_tab, title='LaTeX')
         self.latex_canvas.pack(fill=tk.BOTH, expand=True)
         self.latex_canvas.on_zoom_changed(self._on_zoom_changed)
 
         # --- GGB 预览页 ---
         self.ggb_tab = ttk.Frame(self.notebook)
-        self.notebook.add(self.ggb_tab, text='GGB预览')
+        self.notebook.add(self.ggb_tab, text=' 📊 GGB ')
         self.ggb_canvas = PlaceholderPreviewCanvas(self.ggb_tab, title='GGB')
         self.ggb_canvas.pack(fill=tk.BOTH, expand=True)
         self.ggb_canvas.on_zoom_changed(self._on_zoom_changed)
