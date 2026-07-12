@@ -525,15 +525,6 @@ class MainWindow:
         # 绑定选择事件
         self.file_tree.bind('<<TreeviewSelect>>', self._on_file_selected)
 
-        # 快速转换按钮（文件列表下方，方便查找）
-        self.quick_convert_btn = ttk.Button(
-            content,
-            text='🚀 开始转换',
-            style='Accent.TButton',
-            command=self._on_start_convert,
-        )
-        self.quick_convert_btn.pack(fill='x', pady=(8, 0), ipady=4)
-
     def _build_comic_params_card(self, parent):
         """构建漫画模式参数卡片"""
         self._comic_params_card = CardFrame(parent, title='🎨 漫画模式参数')
@@ -961,7 +952,7 @@ class MainWindow:
             text='🔄 更新预览',
             command=self._on_update_preview,
         )
-        self.update_preview_btn.pack(fill='x', pady=(0, 8))
+        self.update_preview_btn.pack(fill='x', pady=(0, 10))
 
         # 开始转换并导出按钮（主按钮，大尺寸醒目）
         self.convert_btn = ttk.Button(
@@ -970,7 +961,10 @@ class MainWindow:
             style='Accent.TButton',
             command=self._on_start_convert,
         )
-        self.convert_btn.pack(fill='x', pady=6, ipady=6)
+        self.convert_btn.pack(fill='x', pady=8, ipady=10)
+
+        # 底部留白，增加卡片高度使滚动条可用
+        tk.Label(content, text='', bg=get_color('card'), height=2).pack(fill='x')
 
         # 进度条（默认隐藏）
         self._progress_var = tk.DoubleVar(value=0.0)
@@ -1365,8 +1359,6 @@ class MainWindow:
         # 禁用操作按钮
         self.update_preview_btn.config(state='disabled')
         self.convert_btn.config(state='disabled')
-        if hasattr(self, 'quick_convert_btn'):
-            self.quick_convert_btn.config(state='disabled')
 
     def _hide_action_progress(self):
         """隐藏操作卡片中的进度条，恢复按钮"""
@@ -1374,8 +1366,6 @@ class MainWindow:
         self._progress_label.pack_forget()
         self.update_preview_btn.config(state='normal')
         self.convert_btn.config(state='normal')
-        if hasattr(self, 'quick_convert_btn'):
-            self.quick_convert_btn.config(state='normal')
 
     def _update_action_progress(self, value: float, message: str = ''):
         """更新操作卡片中进度条数值和文字"""
@@ -1617,8 +1607,6 @@ class MainWindow:
 
         # 更新UI状态
         self.convert_btn.configure(state='disabled')
-        if hasattr(self, 'quick_convert_btn'):
-            self.quick_convert_btn.configure(state='disabled')
         self.progress_var.set(0)
         self.progress_label.config(text='0%')
         self._update_status('正在处理...')
@@ -1720,8 +1708,6 @@ class MainWindow:
     def _handle_finished_task(self):
         """处理任务结束（恢复按钮等）"""
         self.convert_btn.configure(state='normal')
-        if hasattr(self, 'quick_convert_btn'):
-            self.quick_convert_btn.configure(state='normal')
         # 更新最终状态
         if self._task_worker is None:
             # 任务已完成或失败，在 _handle_result/_handle_error 中已更新状态
