@@ -1131,9 +1131,15 @@ class PreviewPanel(ttk.Frame):
         # --- 原图预览页 ---
         self.image_tab = ttk.Frame(self.notebook)
         self.notebook.add(self.image_tab, text='  原图  ')
+        # 图片画布（用于普通图片）
         self.image_canvas = ImagePreviewCanvas(self.image_tab)
-        self.image_canvas.pack(fill=tk.BOTH, expand=True)
+        # SVG 路径画布（用于 SVG 文件，显示原始路径和颜色）
+        self.svg_original_canvas = WsdPreviewCanvas(self.image_tab)
         self.image_canvas.on_zoom_changed(self._on_zoom_changed)
+        self.svg_original_canvas.on_zoom_changed(self._on_zoom_changed)
+        # 默认显示图片画布
+        self._image_tab_mode = 'image'  # 'image' or 'svg'
+        self.image_canvas.pack(fill=tk.BOTH, expand=True)
 
         # --- WSD 预览页 ---
         self.ws_tab = ttk.Frame(self.notebook)
@@ -1246,7 +1252,11 @@ class PreviewPanel(ttk.Frame):
 
         # 根据选项卡找到对应的画布
         if tab_widget is self.image_tab:
-            self._active_canvas = self.image_canvas
+            # 原图选项卡：根据当前模式选择画布
+            if self._image_tab_mode == 'svg':
+                self._active_canvas = self.svg_original_canvas
+            else:
+                self._active_canvas = self.image_canvas
         elif tab_widget is self.ws_tab:
             self._active_canvas = self.wsd_canvas
         elif tab_widget is self.svg_tab:
@@ -1362,12 +1372,53 @@ class PreviewPanel(ttk.Frame):
 
     def set_image(self, image):
         """
-        设置原图预览图像
+        设置原图预览图像（普通图片模式）
 
         Args:
-            image: PIL Image 对象
+            image: PIL Image 对象，None=显示占位
         """
+        self._switch_image_tab_mode('image')
         self.image_canvas.set_image(image)
+
+    def set_svg_original(self, canvas_data: CanvasData):
+        """
+        设置 SVG 原图预览（路径模式，使用 CanvasData）
+
+        Args:
+            canvas_data: CanvasData 对象（SVG 原始颜色）
+        """
+        self._switch_image_tab_mode('svg')
+        self.svg_original_canvas.set_canvas_data(canvas_data)
+
+    def _switch_image_tab_mode(self, mode: str):
+        """
+        切换原图选项卡的显示模式
+
+        Args:
+            mode: 'image' 或 'svg'
+        """
+        if mode == self._image_tab_mode:
+            return
+        if mode == 'image':
+            self.svg_original_canvas.pack_forget()
+            self.image_canvas.pack(fill=tk.BOTH, expand=True)
+        else:  # 'svg'
+            self.image_canvas.pack_forget()
+            self.svg_original_canvas.pack(fill=tk.BOTH, expand=True)
+        self._image_tab_mode = mode
+        # 如果当前正在查看原图选项卡，更新活动画布引用
+        try:
+            current_tab = self.notebook.nametowidget(self.notebook.select())
+            if current_tab is self.image_tab:
+                if mode == 'svg':
+                    self._active_canvas = self.svg_original_canvas
+                else:
+                    self._active_canvas = self.image_canvas
+                # 同步缩放显示
+                if self._active_canvas is not None:
+                    self._update_zoom_display(self._active_canvas.get_zoom())
+        except Exception:
+            pass
 
     def set_canvas_data(self, canvas_data: CanvasData):
         """

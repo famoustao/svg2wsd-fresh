@@ -482,27 +482,27 @@ class MainWindow:
 
         self.add_file_btn = ttk.Button(
             btn_frame,
-            text='  添加  ',
+            text='添加',
             command=self._on_add_file,
             width=8,
         )
-        self.add_file_btn.pack(side='left', padx=(0, 6))
+        self.add_file_btn.pack(side='left', padx=(0, 8))
 
         self.remove_file_btn = ttk.Button(
             btn_frame,
-            text='  移除  ',
+            text='移除',
             command=self._on_remove_file,
             width=8,
         )
-        self.remove_file_btn.pack(side='left', padx=6)
+        self.remove_file_btn.pack(side='left', padx=8)
 
         self.clear_file_btn = ttk.Button(
             btn_frame,
-            text='  清空  ',
+            text='清空',
             command=self._on_clear_files,
             width=8,
         )
-        self.clear_file_btn.pack(side='left', padx=6)
+        self.clear_file_btn.pack(side='left', padx=8)
 
         # 文件列表（Treeview）
         tree_frame = tk.Frame(content, bg=get_color('card'))
@@ -1220,13 +1220,66 @@ class MainWindow:
         try:
             from PIL import Image
             if ext == '.svg':
-                # SVG 文件：尝试多种方式渲染
-                img = self._render_svg_to_image(filepath)
-                if img is not None:
-                    self.preview_panel.set_image(img)
-                else:
-                    # 渲染失败，在原图选项卡显示提示
-                    self.preview_panel.set_image(None)
+                # SVG 文件：用 SVG 原始路径和颜色作为原图预览
+                # 这样不依赖 cairosvg，显示效果更准确
+                try:
+                    import svg2wsd_core
+                    subpaths, colors, bbox, is_stroke, stroke_widths, path_group_ids = \
+                        svg2wsd_core._parse_svg_file(filepath)
+                    # 构建 CanvasData（使用 SVG 原始颜色）
+                    from core.data_model import CanvasData, Shape, ShapeType
+                    canvas_data = CanvasData()
+                    canvas_data.source_file = filepath
+                    canvas_data.bbox = bbox
+
+                    def _to_bgr(color):
+                        if color is None:
+                            return None
+                        if isinstance(color, (tuple, list)):
+                            return tuple(int(c) for c in color[:3])
+                        if isinstance(color, str) and color.startswith('#'):
+                            h = color.lstrip('#')
+                            if len(h) == 6:
+                                return (int(h[4:6], 16), int(h[2:4], 16), int(h[0:2], 16))
+                        return (0, 0, 0)
+
+                    all_points = []
+                    for i, path_points in enumerate(subpaths):
+                        fill_color = None
+                        line_color = (0, 0, 0)
+                        line_width = 1.0
+                        if is_stroke and i < len(is_stroke) and is_stroke[i]:
+                            if colors and i < len(colors):
+                                line_color = _to_bgr(colors[i])
+                        else:
+                            if colors and i < len(colors):
+                                fill_color = _to_bgr(colors[i])
+                        if stroke_widths and i < len(stroke_widths) and stroke_widths[i]:
+                            line_width = float(stroke_widths[i])
+                        shape = Shape(
+                            type=ShapeType.BEZIER,
+                            points=list(path_points),
+                            line_color=line_color,
+                            fill_color=fill_color,
+                            line_width=line_width,
+                            extra={},
+                        )
+                        canvas_data.shapes.append(shape)
+                        all_points.extend(path_points)
+
+                    if all_points:
+                        xs = [p[0] for p in all_points]
+                        ys = [p[1] for p in all_points]
+                        canvas_data.bbox = (min(xs), min(ys), max(xs), max(ys))
+
+                    self.preview_panel.set_svg_original(canvas_data)
+                except Exception as e:
+                    # 失败时尝试 cairosvg
+                    img = self._render_svg_to_image(filepath)
+                    if img is not None:
+                        self.preview_panel.set_image(img)
+                    else:
+                        self.preview_panel.set_image(None)
             else:
                 img = Image.open(filepath)
                 if img.mode == 'RGBA':
