@@ -56,10 +56,19 @@ class ScrollableFrame(ttk.Frame):
             highlightthickness=0,
             bd=0,
         )
-        self.scrollbar = ttk.Scrollbar(
+        # 使用原生 tk.Scrollbar，更宽更明显（16像素宽）
+        self.scrollbar = tk.Scrollbar(
             self,
             orient='vertical',
             command=self.canvas.yview,
+            width=16,
+            activebackground=get_color('primary'),
+            bg=get_color('text_secondary'),
+            troughcolor=get_color('background'),
+            highlightthickness=1,
+            highlightbackground=get_color('border'),
+            bd=0,
+            relief='flat',
         )
         self.scrollable_frame = ttk.Frame(self.canvas, style='TFrame')
 
@@ -497,13 +506,13 @@ class MainWindow:
 
         # 文件列表（Treeview）
         tree_frame = tk.Frame(content, bg=get_color('card'))
-        tree_frame.pack(fill='both', expand=True)
+        tree_frame.pack(fill='x')
 
         self.file_tree = ttk.Treeview(
             tree_frame,
             columns=('status',),
             show='tree headings',
-            height=6,
+            height=5,
             selectmode='browse',
         )
         self.file_tree.heading('#0', text='文件名')
