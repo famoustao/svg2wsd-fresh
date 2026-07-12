@@ -1648,7 +1648,7 @@ def build_combo_path(segments_list,
 
 
 def _build_es_path(seglists, line_color_bgra, line_width_wsd,
-                   fill_color_bgra=None, fill_alpha=0x64):
+                   fill_color_bgra=None, fill_alpha=0xff):
     """
     构建一个 esShapePath 记录（底层函数）
 
