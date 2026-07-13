@@ -9,9 +9,28 @@ on:
 
 permissions:
   contents: write
+  actions: write
 
 jobs:
+  cleanup-artifacts:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Delete old artifacts
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # 列出所有artifact，删除非最新的
+          ARTIFACTS=$(gh api repos/${{ github.repository }}/actions/artifacts --jq '.artifacts[] | "\(.id)|\(.created_at)|\(.name)"' 2>/dev/null || true)
+          COUNT=$(echo "$ARTIFACTS" | grep -c '|' 2>/dev/null || echo "0")
+          echo "Found $COUNT artifacts"
+          # 保留最新的3个，删除其余的
+          echo "$ARTIFACTS" | sort -t'|' -k2 | head -n -3 | while IFS='|' read -r id date name; do
+            echo "Deleting artifact: $name (id=$id)"
+            gh api -X DELETE repos/${{ github.repository }}/actions/artifacts/$id || true
+          done
+
   build-windows:
+    needs: cleanup-artifacts
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -86,8 +105,8 @@ jobs:
         with:
           name: svg2wsd-windows-${{ steps.version.outputs.COMMIT_SHORT }}
           path: ${{ env.ZIP_NAME }}
-          retention-days: 7
-          if-no-files-found: error
+          retention-days: 1
+          if-no-files-found: warn
 
       - name: Upload to Release
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
@@ -103,29 +122,6 @@ jobs:
             **构建时间**: ${{ steps.version.outputs.BUILD_DATE }}
             **提交短哈希**: `${{ steps.version.outputs.COMMIT_SHORT }}`
 
-            ### 🆕 v2.0 新特性
-
-            - 全新架构：基于二进制构建器，完全脱离模板依赖
-            - 双模式选项卡：漫画模式 + 几何模式
-            - 美观GUI：卡片式布局，深蓝主题，现代化界面
-            - 批量处理：支持多文件导入导出，可合并到同一WSD的多画布
-            - 5种预览：原图/WSD/SVG/LaTeX/GGB，支持缩放拖拽
-            - 后台运行：多线程处理，进度条实时显示，UI不卡顿
-            - 左侧面板滚动：文件列表、参数、输出设置、操作全部支持滚动
-            - 漫画模式后台计算：复杂图形不再卡顿，进度条实时反馈
-
-            ### 漫画模式
-            - 黑白线稿模式（阈值、最小区域、平滑度可调）
-            - 实际颜色模式（颜色矢量化，自动填充）
-            - 彩色模式（系统随机填充）
-
-            ### 几何模式
-            - 形状拟合：直线、三角形、四边形、圆、圆弧
-            - 霍夫变换检测 + 去重合并
-            - 字母自动识别 + 自动标注
-            - 对称性检测（轴对称、旋转对称、中心对称、直角）
-            - 颜色模式：黑白线稿 / 实际颜色 / 彩色自动填充
-
             ### 启动失败排查
 
             如果双击后没有反应，请查看同目录下的 `svg2wsd_startup.log` 文件获取错误信息。
@@ -137,9 +133,6 @@ jobs:
             ```
             https://ghproxy.com/原始下载链接
             ```
-
-            例：
-            `https://ghproxy.com/https://github.com/famoustao/svg2wsd/releases/download/continuous/${{ env.ZIP_NAME }}`
           prerelease: true
           files: ${{ env.ZIP_NAME }}
           fail_on_unmatched_files: true
