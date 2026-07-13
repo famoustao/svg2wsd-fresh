@@ -86,6 +86,8 @@ jobs:
         with:
           name: svg2wsd-windows-${{ steps.version.outputs.COMMIT_SHORT }}
           path: ${{ env.ZIP_NAME }}
+          retention-days: 7
+          if-no-files-found: error
 
       - name: Upload to Release
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
