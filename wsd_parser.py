@@ -411,12 +411,17 @@ def _parse_path_record_normal(data, pos):
     # 解析填充颜色
     fill_color_hex = None
     if has_fill:
-        # brush = 01 ff 06 + BGR + alpha
-        if p + 7 <= len(data) and data[p:p + 2] == b'\x01\xff' and data[p + 2] == 0x06:
-            fill_color_hex = bgr_to_hex(data[p + 3:p + 6])
-            p += 7
+        # brush = 01 ff + BGRA (6字节)
+        # 格式: 01 ff B G R A
+        # 经过验证：brush共6字节，没有单独的类型字段，直接是BGRA颜色
+        if p + 6 <= len(data) and data[p:p + 2] == b'\x01\xff':
+            fill_color_hex = bgr_to_hex(data[p + 2:p + 5])
+            p += 6
+            # 跳过尾部 0x64 字节
+            if p < len(data):
+                p += 1
         elif p + 3 <= len(data) and data[p:p + 2] == b'\x01\xff':
-            # 其他填充格式
+            # 其他填充格式（兼容旧格式）
             fill_color_hex = line_color_hex
             p += 2
             if p + 4 <= len(data):

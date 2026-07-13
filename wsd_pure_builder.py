@@ -1689,8 +1689,18 @@ def _build_es_path(seglists, line_color_bgra, line_width_wsd,
 
     # brush（填充模式）或尾部不透明度字节
     if fill_color_bgra is not None:
-        # 填充模式: brush = 01 ff 06 + BGR + alpha
-        p += b'\x01\xff' + bytes([0x06]) + fill_color_bgra + bytes([fill_alpha & 0xff])
+        # 填充模式: brush = 01 ff + BGRA (6字节)
+        # 经过验证：brush共6字节，没有单独的类型字段，直接是BGRA颜色
+        # 格式: 01 ff B G R A
+        if len(fill_color_bgra) == 3:
+            # BGR 3字节，补alpha
+            fill_bgra = fill_color_bgra + bytes([fill_alpha & 0xff])
+        else:
+            # 已经是BGRA 4字节
+            fill_bgra = fill_color_bgra[:4]
+        p += b'\x01\xff' + fill_bgra
+        # 尾部 0x64 不透明度字节
+        p += bytes([0x64])
     else:
         # 仅轮廓: 尾部 0x64 不透明度字节
         p += bytes([0x64])
