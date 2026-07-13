@@ -1394,6 +1394,12 @@ class MainWindow:
 
     def _on_param_changed(self):
         """参数变化，延迟更新预览（防抖）"""
+        # 参数变化时清除当前文件的预览缓存（参数变了结果也会变）
+        if self._current_file_index >= 0:
+            file_info = self._files[self._current_file_index]
+            file_info['preview_cache'] = None
+            file_info['preview_params'] = None
+        
         # 取消之前的定时器
         if self._debounce_id is not None:
             try:
@@ -1572,6 +1578,12 @@ class MainWindow:
         
         # 应用用户选择的线条颜色（保持预览与导出一致）
         self._apply_line_color_override(result)
+        
+        # 存入预览缓存，供导出时直接使用（避免重复计算）
+        if self._current_file_index >= 0:
+            file_info = self._files[self._current_file_index]
+            file_info['preview_cache'] = result
+            file_info['preview_params'] = self._get_current_params()
         
         # 正常结果
         self.preview_panel.set_canvas_data(result)
@@ -1814,34 +1826,59 @@ class MainWindow:
 
         # 同步文件列表到 batch_manager
         self._batch_manager.clear()
-        for f in self._files:
+        cached_count = 0
+        for idx, f in enumerate(self._files):
             self._batch_manager.add_file(f['path'])
+            
+            # 如果该文件有预览缓存且参数匹配，直接使用缓存，跳过处理
+            cache = f.get('preview_cache')
+            cache_params = f.get('preview_params')
+            if cache is not None and cache_params is not None and cache_params == params:
+                file_item = self._batch_manager.get_file(idx)
+                if file_item is not None:
+                    file_item.set_done(cache)
+                    cached_count += 1
 
         # 更新UI状态
         self.convert_btn.configure(state='disabled')
         self.progress_var.set(0)
         self.progress_label.config(text='0%')
-        self._update_status('正在处理...')
+        if cached_count > 0:
+            self._update_status(f'正在导出... ({cached_count} 个文件使用预览缓存)')
+        else:
+            self._update_status('正在处理...')
 
         # 创建后台任务 - 真正的转换+导出逻辑
         batch_mgr = self._batch_manager
 
         def conversion_task(progress_callback=None, cancel_check=None):
             total = len(self._files)
+            
+            # 如果所有文件都有缓存，直接跳到导出阶段
+            pending_count = sum(1 for f in batch_mgr._files if f.is_pending)
+            
+            if pending_count > 0:
+                def on_progress(current_idx, total_count, file_item):
+                    if progress_callback:
+                        progress = ((current_idx - 1) / total) * 100 * 0.8  # 处理占80%进度
+                        fname = os.path.basename(file_item.filepath)
+                        status_text = '正在解析' if file_item.is_processing else '已解析'
+                        progress_callback(progress, f'{status_text}: {fname} ({current_idx}/{total})')
 
-            def on_progress(current_idx, total_count, file_item):
-                if progress_callback:
-                    progress = ((current_idx - 1) / total) * 100 * 0.8  # 处理占80%进度
-                    fname = os.path.basename(file_item.filepath)
-                    status_text = '正在解析' if file_item.is_processing else '已解析'
-                    progress_callback(progress, f'{status_text}: {fname} ({current_idx}/{total})')
-
-            # 1. 批量处理
-            process_result = batch_mgr.process_all(
-                mode_type=mode_type,
-                params=params,
-                progress_callback=on_progress,
-            )
+                # 1. 批量处理（仅处理未缓存的文件）
+                process_result = batch_mgr.process_all(
+                    mode_type=mode_type,
+                    params=params,
+                    progress_callback=on_progress,
+                )
+            else:
+                # 全部使用缓存
+                process_result = {
+                    'total': total,
+                    'success': cached_count,
+                    'failed': 0,
+                    'skipped': 0,
+                }
 
             if cancel_check and cancel_check():
                 return {'cancelled': True, 'output_dir': output_dir}
@@ -1872,6 +1909,7 @@ class MainWindow:
                 'process': process_result,
                 'export': export_result,
                 'output_dir': output_dir,
+                'cached_count': cached_count,
             }
 
         self._task_worker = TaskWorker(conversion_task)
@@ -1964,7 +2002,11 @@ class MainWindow:
             # 显示结果对话框
             exported = exp.get('exported', 0)
             total = exp.get('total', 0)
-            msg = f"处理完成！\n\n成功: {proc.get('success', 0)} 个\n失败: {proc.get('failed', 0)} 个\n已导出: {exported}/{total} 个文件\n\n输出目录: {output_dir}"
+            cached = result.get('cached_count', 0)
+            msg = f"处理完成！\n\n成功: {proc.get('success', 0)} 个\n失败: {proc.get('failed', 0)} 个\n已导出: {exported}/{total} 个文件"
+            if cached > 0:
+                msg += f"\n使用预览缓存: {cached} 个"
+            msg += f"\n\n输出目录: {output_dir}"
 
             # 询问是否打开输出目录
             if messagebox.askyesno('转换完成', msg + '\n\n是否打开输出目录？'):
