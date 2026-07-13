@@ -873,7 +873,7 @@ class MainWindow:
 
         content = self._output_card.content
 
-        # 线宽 + 线条颜色（一行排列）
+        # 线宽（第一行）
         row1_frame = tk.Frame(content, bg=get_color('card'))
         row1_frame.pack(fill='x', pady=(0, 2))
 
@@ -898,36 +898,6 @@ class MainWindow:
 
         tk.Label(
             row1_frame,
-            text='线条颜色:',
-            bg=get_color('card'),
-            fg=get_color('text'),
-            font=('Microsoft YaHei UI', 9),
-        ).pack(side='left')
-
-        self.line_color_var = tk.StringVar(value='#000000')
-        self._line_color_btn = tk.Button(
-            row1_frame,
-            text='  黑色  ',
-            bg='#000000',
-            fg='#ffffff',
-            font=('Microsoft YaHei UI', 8),
-            relief='flat',
-            width=8,
-            command=self._on_pick_line_color,
-        )
-        self._line_color_btn.pack(side='left', padx=(4, 8))
-
-        self.line_color_none_var = tk.BooleanVar(value=False)
-        self._line_color_none_chk = ttk.Checkbutton(
-            row1_frame,
-            text='无色',
-            variable=self.line_color_none_var,
-            command=self._on_line_color_none_toggled,
-        )
-        self._line_color_none_chk.pack(side='left')
-
-        tk.Label(
-            row1_frame,
             text='画布:',
             bg=get_color('card'),
             fg=get_color('text'),
@@ -947,6 +917,48 @@ class MainWindow:
             '<<ComboboxSelected>>',
             self._on_canvas_size_changed,
         )
+
+        # 线条颜色（第二行）
+        line_color_frame = tk.Frame(content, bg=get_color('card'))
+        line_color_frame.pack(fill='x', pady=2)
+
+        tk.Label(
+            line_color_frame,
+            text='线条颜色:',
+            bg=get_color('card'),
+            fg=get_color('text'),
+            font=('Microsoft YaHei UI', 9),
+        ).pack(side='left')
+
+        self.line_color_var = tk.StringVar(value='#000000')
+        self._line_color_btn = tk.Button(
+            line_color_frame,
+            text='  黑色  ',
+            bg='#000000',
+            fg='#ffffff',
+            font=('Microsoft YaHei UI', 8),
+            relief='flat',
+            width=8,
+            command=self._on_pick_line_color,
+        )
+        self._line_color_btn.pack(side='left', padx=(4, 8))
+
+        self.line_color_none_var = tk.BooleanVar(value=False)
+        self._line_color_none_chk = tk.Checkbutton(
+            line_color_frame,
+            text='无色',
+            variable=self.line_color_none_var,
+            command=self._on_line_color_none_toggled,
+            bg=get_color('card'),
+            fg=get_color('text'),
+            activebackground=get_color('card'),
+            activeforeground=get_color('text'),
+            selectcolor=get_color('card'),
+            font=('Microsoft YaHei UI', 9),
+            bd=0,
+            highlightthickness=0,
+        )
+        self._line_color_none_chk.pack(side='left')
 
         # 导出模式
         export_mode_frame = tk.Frame(content, bg=get_color('card'))
@@ -1104,6 +1116,17 @@ class MainWindow:
             self.color_scheme_frame.pack(fill='x', pady=4)
         else:
             self.color_scheme_frame.pack_forget()
+
+        # 实际颜色模式：线条颜色默认为无色
+        # 其他模式：线条颜色默认为黑色
+        if mode == 'actual_color':
+            if not self.line_color_none_var.get():
+                self.line_color_none_var.set(True)
+                self._line_color_btn.config(state='disabled')
+        else:
+            if self.line_color_none_var.get():
+                self.line_color_none_var.set(False)
+                self._line_color_btn.config(state='normal')
 
         # 更新滚动区域（子模式切换后内容高度变化）
         self.root.after(50, self.scroll_frame.update_scroll_region)
@@ -1844,7 +1867,7 @@ class MainWindow:
         self.progress_var.set(0)
         self.progress_label.config(text='0%')
         if cached_count > 0:
-            self._update_status(f'正在导出... ({cached_count} 个文件使用预览缓存)')
+            self._update_status(f'正在导出... ({cached_count} 个文件使用缓存)')
         else:
             self._update_status('正在处理...')
 
@@ -1991,6 +2014,19 @@ class MainWindow:
             proc = result['process']
             exp = result.get('export', {})
             output_dir = result.get('output_dir', '')
+            params = self._get_current_params()
+
+            # 将导出处理结果回存到文件缓存（转过的文件也有缓存，下次直接用）
+            cached_back_count = 0
+            for i, file_item in enumerate(self._batch_manager._files):
+                if file_item.is_done and file_item.result is not None and i < len(self._files):
+                    # 只有当该文件没有缓存或参数不同时才回存
+                    existing_cache = self._files[i].get('preview_cache')
+                    existing_params = self._files[i].get('preview_params')
+                    if existing_cache is None or existing_params != params:
+                        self._files[i]['preview_cache'] = file_item.result
+                        self._files[i]['preview_params'] = params.copy()
+                        cached_back_count += 1
 
             # 更新Treeview中的状态
             for i, item in enumerate(self.file_tree.get_children()):
@@ -2005,7 +2041,9 @@ class MainWindow:
             cached = result.get('cached_count', 0)
             msg = f"处理完成！\n\n成功: {proc.get('success', 0)} 个\n失败: {proc.get('failed', 0)} 个\n已导出: {exported}/{total} 个文件"
             if cached > 0:
-                msg += f"\n使用预览缓存: {cached} 个"
+                msg += f"\n使用缓存: {cached} 个"
+            if cached_back_count > 0:
+                msg += f"\n新缓存: {cached_back_count} 个"
             msg += f"\n\n输出目录: {output_dir}"
 
             # 询问是否打开输出目录

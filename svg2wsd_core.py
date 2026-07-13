@@ -650,18 +650,58 @@ def _parse_svg_file(svg_path):
     tree = ET.parse(svg_path)
     root = tree.getroot()
 
+    # 解析 <style> 标签中的 CSS 类样式
+    css_classes = {}  # {class_name: {prop_name: value}}
+
+    def _parse_css_style(style_text):
+        """解析 CSS 样式文本，提取类选择器的样式规则"""
+        if not style_text:
+            return
+        # 匹配 .classname { prop: value; ... }
+        pattern = r'\.([a-zA-Z_][a-zA-Z0-9_-]*)\s*\{([^}]*)\}'
+        for match in re.finditer(pattern, style_text):
+            cls_name = match.group(1)
+            props_text = match.group(2)
+            props = {}
+            for prop_match in re.finditer(r'([a-zA-Z-]+)\s*:\s*([^;]+)', props_text):
+                prop_name = prop_match.group(1).strip()
+                prop_val = prop_match.group(2).strip()
+                props[prop_name] = prop_val
+            if cls_name not in css_classes:
+                css_classes[cls_name] = {}
+            css_classes[cls_name].update(props)
+
+    # 查找所有 style 标签并解析
+    ns = ''
+    for elem in root.iter():
+        tag = elem.tag.split('}')[-1] if '}' in elem.tag else elem.tag
+        if tag == 'style' and elem.text:
+            _parse_css_style(elem.text)
+
+    def _get_elem_classes(elem):
+        """获取元素的 CSS 类名列表"""
+        class_attr = elem.get('class', '')
+        if not class_attr:
+            return []
+        return class_attr.strip().split()
+
     def _get_style_value(elem, prop_name, default=None):
-        """从元素属性或style中获取样式值"""
-        # 先直接从属性获取
+        """从元素属性、style、CSS类中获取样式值（优先级：属性 > style > CSS类）"""
+        # 1. 先直接从属性获取
         val = elem.get(prop_name)
         if val is not None:
             return val.strip()
-        # 再从style中查找
+        # 2. 再从 style 属性中查找
         style = elem.get('style', '')
         if style:
             m = re.search(rf'{prop_name}\s*:\s*([^;]+)', style)
             if m:
                 return m.group(1).strip()
+        # 3. 从 CSS 类中查找（按类名顺序，后定义的覆盖先定义的）
+        classes = _get_elem_classes(elem)
+        for cls in reversed(classes):  # reversed 保证后定义的优先级高
+            if cls in css_classes and prop_name in css_classes[cls]:
+                return css_classes[cls][prop_name]
         return default
 
     def _get_fill(elem, parent_fill='#000000'):
