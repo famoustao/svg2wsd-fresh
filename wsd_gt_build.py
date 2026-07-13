@@ -528,13 +528,14 @@ def make_path(seglists, line_color_bgra, line_width_wsd,
         for seg in shape_segs:
             p += seg
 
-    # brush（填充模式）或尾部不透明度字节
+    # brush（填充模式）或尾部
     if fill_color_bgra is not None:
-        # 填充模式: brush = 01 ff 06 + BGR + alpha
-        p += b'\x01\xff' + bytes([0x06]) + fill_color_bgra + bytes([fill_alpha & 0xff])
+        # 填充模式: 01 ff 00 + fill_color_bgra(3) + 64
+        # 共7字节，与原始WSD格式一致
+        p += b'\x01\xff\x00' + fill_color_bgra + bytes([0x64])
     else:
-        # 仅轮廓: 尾部 0x64 不透明度字节
-        p += bytes([0x64])
+        # 仅轮廓: 01 ff 00 + 00 00 00 + 64
+        p += b'\x01\xff\x00\x00\x00\x00\x64'
 
     return bytes(p)
 

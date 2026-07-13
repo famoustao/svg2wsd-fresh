@@ -2775,8 +2775,24 @@ def convert_to_wsd(input_path, wsd_path, color_mode='rainbow',
     path_group_ids = extra_info.get('path_group_ids', None)
     use_compound = (file_type == 'svg' and path_group_ids is not None)
 
+    # 检测SVG是否为单色（所有填充颜色相同）
+    # 单色SVG的复合路径需要特殊处理：拆分为独立描边path以保留孔径效果
+    _is_single_color_svg = False
     if use_compound:
-        # SVG模式：按path组构建复合路径（同一SVG path的子路径合并为一个WSD path，支持孔洞）
+        unique_fill_colors = set()
+        for i, c in enumerate(fill_colors):
+            if i < len(is_stroke_list) and not is_stroke_list[i]:
+                if c is not None:
+                    unique_fill_colors.add(c)
+        _is_single_color_svg = len(unique_fill_colors) <= 1
+
+    if use_compound:
+        # SVG模式：按path组处理
+        # 对于复合路径（同一SVG path有多个子路径），需要正确处理孔径：
+        # 方案：将复合路径拆分为独立子路径对象
+        # - 外轮廓和内孔径都作为独立WSD path
+        # - 使用无填充的描边模式（和原始WSD一致）
+        # 这样线条之间的空白自然形成孔径效果
         # 先建立分组
         groups = {}
         for i, gid in enumerate(path_group_ids):
@@ -2789,8 +2805,6 @@ def convert_to_wsd(input_path, wsd_path, color_mode='rainbow',
         for gid, indices in groups.items():
             group_idx += 1
             # 获取组内所有子路径
-            group_sps = [all_subpaths[i] for i in indices]
-            # 所有子路径应该有相同的颜色和描边属性（来自同一SVG path）
             ref_i = indices[0]
             is_stroke_only = (ref_i < len(is_stroke_list) and is_stroke_list[ref_i])
             color = fill_colors[ref_i] if ref_i < len(fill_colors) else None
@@ -2815,7 +2829,7 @@ def convert_to_wsd(input_path, wsd_path, color_mode='rainbow',
                 sw = max(20, int(stroke_widths[ref_i] * abs(sx) * 100))
 
             if is_stroke_only:
-                # 纯描边复合路径
+                # 纯描边：合并所有子路径为一个复合路径
                 stroke_color = color if color is not None else bytes([0x00, 0x00, 0x00])
                 records_data += build_native_bezier_compound(
                     wsd_sps, stroke_color, sw,
@@ -2823,32 +2837,50 @@ def convert_to_wsd(input_path, wsd_path, color_mode='rainbow',
                 )
                 num_objects += 1
             else:
-                # 填充复合路径（带可选轮廓）
-                if color is not None:
-                    if outline:
-                        # 有轮廓：填充+黑色轮廓
+                # 填充路径
+                if _is_single_color_svg and len(wsd_sps) > 1:
+                    # 单色SVG的复合路径（有孔径）：
+                    # 拆分为独立描边path对象，避免WSD渲染器不正确地填充所有seglist区域
+                    # 使用描边模式，线条之间的空白自然形成孔径效果
+                    if color is not None:
+                        for sp_idx, wsd_sp in enumerate(wsd_sps):
+                            records_data += build_native_bezier_compound(
+                                [wsd_sp], color, linewidth,
+                                is_stroke_only=True
+                            )
+                            num_objects += 1
+                    elif outline:
+                        bgr_black = bytes([0x00, 0x00, 0x00])
+                        for wsd_sp in wsd_sps:
+                            records_data += build_native_bezier_compound(
+                                [wsd_sp], bgr_black, linewidth,
+                                is_stroke_only=True
+                            )
+                            num_objects += 1
+                else:
+                    # 彩色SVG或单子路径：使用填充模式（复合路径合并）
+                    if color is not None:
+                        if outline:
+                            bgr_black = bytes([0x00, 0x00, 0x00])
+                            records_data += build_native_bezier_compound(
+                                wsd_sps, color, linewidth,
+                                is_stroke_only=False,
+                                outline_color=bgr_black,
+                                outline_linewidth=linewidth
+                            )
+                        else:
+                            records_data += build_native_bezier_compound(
+                                wsd_sps, color, linewidth,
+                                is_stroke_only=False
+                            )
+                        num_objects += 1
+                    elif outline:
                         bgr_black = bytes([0x00, 0x00, 0x00])
                         records_data += build_native_bezier_compound(
-                            wsd_sps, color, linewidth,
-                            is_stroke_only=False,
-                            outline_color=bgr_black,
-                            outline_linewidth=linewidth
+                            wsd_sps, bgr_black, linewidth,
+                            is_stroke_only=True
                         )
-                    else:
-                        # 无轮廓：仅填充
-                        records_data += build_native_bezier_compound(
-                            wsd_sps, color, linewidth,
-                            is_stroke_only=False
-                        )
-                    num_objects += 1
-                elif outline:
-                    # 无填充仅轮廓
-                    bgr_black = bytes([0x00, 0x00, 0x00])
-                    records_data += build_native_bezier_compound(
-                        wsd_sps, bgr_black, linewidth,
-                        is_stroke_only=True
-                    )
-                    num_objects += 1
+                        num_objects += 1
 
             if progress_cb and group_idx % 10 == 0:
                 pct = 55 + int(35 * group_idx / total)
