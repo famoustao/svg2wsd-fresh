@@ -654,22 +654,45 @@ def _parse_svg_file(svg_path):
     css_classes = {}  # {class_name: {prop_name: value}}
 
     def _parse_css_style(style_text):
-        """解析 CSS 样式文本，提取类选择器的样式规则"""
+        """解析 CSS 样式文本，提取类选择器的样式规则（支持分组选择器）"""
         if not style_text:
             return
         # 匹配 .classname { prop: value; ... }
-        pattern = r'\.([a-zA-Z_][a-zA-Z0-9_-]*)\s*\{([^}]*)\}'
-        for match in re.finditer(pattern, style_text):
-            cls_name = match.group(1)
-            props_text = match.group(2)
+        # 支持分组选择器: .cls-1, .cls-2, .cls-3 { prop: value; ... }
+        # 支持跨行的选择器和属性
+        # 先去掉注释
+        css_no_comments = re.sub(r'/\*.*?\*/', '', style_text, flags=re.DOTALL)
+        
+        # 匹配 { ... } 块，捕获前面的选择器部分
+        pattern = r'([^{}]+)\{([^}]*)\}'
+        for match in re.finditer(pattern, css_no_comments):
+            selector_text = match.group(1).strip()
+            props_text = match.group(2).strip()
+            if not selector_text or not props_text:
+                continue
+            
+            # 解析属性
             props = {}
             for prop_match in re.finditer(r'([a-zA-Z-]+)\s*:\s*([^;]+)', props_text):
                 prop_name = prop_match.group(1).strip()
                 prop_val = prop_match.group(2).strip()
                 props[prop_name] = prop_val
-            if cls_name not in css_classes:
-                css_classes[cls_name] = {}
-            css_classes[cls_name].update(props)
+            
+            if not props:
+                continue
+            
+            # 分割选择器（逗号分隔，支持跨行）
+            selectors = [s.strip() for s in selector_text.split(',')]
+            for sel in selectors:
+                sel = sel.strip()
+                if not sel:
+                    continue
+                # 只处理类选择器（.开头）
+                if sel.startswith('.'):
+                    cls_name = sel[1:]  # 去掉开头的.
+                    if cls_name not in css_classes:
+                        css_classes[cls_name] = {}
+                    css_classes[cls_name].update(props)
 
     # 查找所有 style 标签并解析
     ns = ''
@@ -731,7 +754,7 @@ def _parse_svg_file(svg_path):
 
     paths = []
     def _collect(parent, parent_fill='#000000', parent_stroke='none',
-                 parent_stroke_width=1.0, parent_transform=None):
+                 parent_stroke_width=1.0, parent_transform=None, in_defs=False):
         g_fill = _get_fill(parent, parent_fill)
         g_stroke = _get_stroke(parent, parent_stroke)
         g_stroke_width = _get_stroke_width(parent, parent_stroke_width)
@@ -739,8 +762,15 @@ def _parse_svg_file(svg_path):
         combined = _concat_transform(parent_transform, g_transform)
         for child in parent:
             tag = child.tag.split('}')[-1] if '}' in child.tag else child.tag
+            # 跳过 defs 中的内容（clipPath、模板等不可见元素）
+            child_in_defs = in_defs or tag == 'defs'
+            if child_in_defs:
+                # 继续递归（处理defs中的嵌套结构），但不收集路径
+                if tag in ('g', 'defs', 'clipPath', 'mask', 'pattern', 'symbol'):
+                    _collect(child, g_fill, g_stroke, g_stroke_width, combined, child_in_defs)
+                continue
             if tag == 'g':
-                _collect(child, g_fill, g_stroke, g_stroke_width, combined)
+                _collect(child, g_fill, g_stroke, g_stroke_width, combined, child_in_defs)
             elif tag == 'path':
                 d = child.get('d', '')
                 fill = _get_fill(child, g_fill)
