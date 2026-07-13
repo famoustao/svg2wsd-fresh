@@ -2792,22 +2792,18 @@ def convert_to_wsd(input_path, wsd_path, color_mode='rainbow',
     use_compound = (file_type == 'svg' and path_group_ids is not None)
 
     # 根据 compound_mode 决定复合路径处理方式
-    # 'auto': 自动检测（单色拆分，彩色合并）
+    # 'auto': 默认拆分（WSD不支持多seglist的奇偶填充来挖孔）
     # 'split': 强制拆分
     # 'merge': 强制合并
-    _should_split = False
+    _should_split = True  # 默认拆分
     if use_compound:
-        if compound_mode == 'split':
-            _should_split = True
-        elif compound_mode == 'merge':
+        if compound_mode == 'merge':
             _should_split = False
-        else:  # auto
-            unique_fill_colors = set()
-            for i, c in enumerate(fill_colors):
-                if i < len(is_stroke_list) and not is_stroke_list[i]:
-                    if c is not None:
-                        unique_fill_colors.add(c)
-            _should_split = len(unique_fill_colors) <= 1
+        elif compound_mode == 'split':
+            _should_split = True
+        # auto: 默认拆分（因为WSD渲染器不支持多seglist孔径效果）
+        else:
+            _should_split = True
 
     if use_compound:
         # SVG模式：按path组处理
@@ -2862,14 +2858,13 @@ def convert_to_wsd(input_path, wsd_path, color_mode='rainbow',
             else:
                 # 填充路径
                 if _should_split and len(wsd_sps) > 1:
-                    # 单色SVG的复合路径（有孔径）：
-                    # 拆分为独立描边path对象，避免WSD渲染器不正确地填充所有seglist区域
-                    # 使用描边模式，线条之间的空白自然形成孔径效果
+                    # 复合路径拆分：每个子路径作为独立path对象
+                    # 保留原始填充色（不使用描边模式），避免WSD多seglist孔径问题
                     if color is not None:
                         for sp_idx, wsd_sp in enumerate(wsd_sps):
                             records_data += build_native_bezier_compound(
                                 [wsd_sp], color, linewidth,
-                                is_stroke_only=True
+                                is_stroke_only=False
                             )
                             num_objects += 1
                     elif outline:

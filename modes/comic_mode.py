@@ -409,19 +409,16 @@ class ComicMode:
             for gid in path_group_ids:
                 group_counts[gid] = group_counts.get(gid, 0) + 1
 
-        # 判断是否需要拆分复合路径（去除填充）
-        _should_split = False
-        if compound_mode == 'split':
-            _should_split = True
-        elif compound_mode == 'merge':
+        # 判断是否需要拆分复合路径
+        # 默认拆分（WSD渲染器不支持多seglist的奇偶填充来挖孔）
+        _should_split = True
+        if compound_mode == 'merge':
             _should_split = False
-        elif compound_mode == 'auto' and path_group_ids:
-            # 自动模式：检测是否为单色SVG
-            unique_colors = set()
-            for i, c in enumerate(fill_colors or []):
-                if c is not None:
-                    unique_colors.add(str(c).lower().strip())
-            _should_split = len(unique_colors) <= 1
+        elif compound_mode == 'split':
+            _should_split = True
+        # auto: 默认拆分
+        else:
+            _should_split = True
 
         # 标记哪些子路径属于复合路径组（同一组有多个子路径）
         compound_subpaths = set()
@@ -478,9 +475,8 @@ class ComicMode:
             if stroke_widths and i < len(stroke_widths) and stroke_widths[i]:
                 line_width = float(stroke_widths[i])
 
-            # 复合路径拆分模式：去除孔径子路径的填充
-            if i in compound_subpaths:
-                fill_color = None
+            # 复合路径拆分模式：保留填充色，每个子路径独立渲染
+            # 不再去除填充（之前去除填充导致彩色SVG丢失颜色）
 
             shape = Shape(
                 type=ShapeType.BEZIER,
