@@ -302,19 +302,9 @@ def _shape_to_path_record(shape: Shape, linewidth: int = 80, line_alpha: int = 2
             [pts[9], pts[10], pts[11], pts[12]],
         ]
 
-        # 有填充色时，转为多边形段确保兼容性
-        if fill_color_bgr is not None:
-            poly_pts = _bezier_to_polygon(bezier_segs, samples_per_segment=12)
-            if poly_pts and len(poly_pts) >= 3:
-                if poly_pts[0] != poly_pts[-1]:
-                    poly_pts.append(poly_pts[0])
-                segments_list.append([('gon', poly_pts)])
-            else:
-                return None
-        else:
-            # 无填充，保留贝塞尔段
-            segs = [('bezier', seg) for seg in bezier_segs]
-            segments_list.append(segs)
+        # 圆形：用4段贝塞尔曲线近似，直接使用bezier段（支持填充）
+        segs = [('bezier', seg) for seg in bezier_segs]
+        segments_list.append(segs)
 
     elif shape.type == ShapeType.ARC:
         # 圆弧：用贝塞尔曲线近似
@@ -366,28 +356,10 @@ def _shape_to_path_record(shape: Shape, linewidth: int = 80, line_alpha: int = 2
         if not bez_segs:
             return None
 
-        # 判断路径是否闭合（首尾点距离小于1像素）
-        first_pt = bez_segs[0][0]
-        last_pt = bez_segs[-1][3]
-        is_closed = (abs(first_pt[0] - last_pt[0]) < 1.0 and
-                     abs(first_pt[1] - last_pt[1]) < 1.0)
-
-        # 有填充色且闭合时，转为多边形段(GON)以确保填充兼容性
-        # 部分WSD软件对BEZIER段的填充支持不完善，GON段兼容性最好
-        if fill_color_bgr is not None and is_closed:
-            # 将贝塞尔曲线采样为多边形点
-            poly_pts = _bezier_to_polygon(bez_segs, samples_per_segment=8)
-            if poly_pts and len(poly_pts) >= 3:
-                # 确保闭合（GON段会自动闭合，但首尾相同更安全）
-                if poly_pts[0] != poly_pts[-1]:
-                    poly_pts.append(poly_pts[0])
-                segments_list.append([('gon', poly_pts)])
-            else:
-                return None
-        else:
-            # 无填充或开放路径，保留贝塞尔段
-            segs = [('bezier', seg) for seg in bez_segs]
-            segments_list.append(segs)
+        # 贝塞尔曲线直接使用bezier段，支持填充和描边
+        # WSD原生支持贝塞尔段填充，无需转为多边形
+        segs = [('bezier', seg) for seg in bez_segs]
+        segments_list.append(segs)
 
     elif shape.type == ShapeType.ELLIPSE:
         # 椭圆：用贝塞尔曲线近似
@@ -428,19 +400,9 @@ def _shape_to_path_record(shape: Shape, linewidth: int = 80, line_alpha: int = 2
             [p9, p10_1, p11_1, p12],
         ]
 
-        # 有填充色时，转为多边形段确保兼容性
-        if fill_color_bgr is not None:
-            poly_pts = _bezier_to_polygon(bez_segs_raw, samples_per_segment=12)
-            if poly_pts and len(poly_pts) >= 3:
-                if poly_pts[0] != poly_pts[-1]:
-                    poly_pts.append(poly_pts[0])
-                segments_list.append([('gon', poly_pts)])
-            else:
-                return None
-        else:
-            # 无填充，保留贝塞尔段
-            segs = [('bezier', seg) for seg in bez_segs_raw]
-            segments_list.append(segs)
+        # 椭圆：用4段贝塞尔曲线近似，直接使用bezier段（支持填充）
+        segs = [('bezier', seg) for seg in bez_segs_raw]
+        segments_list.append(segs)
 
     else:
         return None
