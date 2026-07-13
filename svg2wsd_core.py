@@ -792,6 +792,303 @@ def _parse_svg_file(svg_path):
 
     _collect(root, '#000000', 'none', 1.0, None)
 
+    # ====== 处理 clip-path + 嵌入位图的颜色填充 ======
+    # 某些SVG使用 clip-path 裁剪位图来实现颜色填充（如肤色、头发色）
+    # 将这些位图填充转换为矢量填充（clipPath形状 + 位图主色）
+    try:
+        import base64
+        from io import BytesIO
+        from PIL import Image as PILImage
+
+        # 命名空间
+        root_tag = root.tag
+        ns_prefix = ''
+        if '}' in root_tag:
+            ns_prefix = root_tag.split('}')[0] + '}'
+        xlink_ns = '{http://www.w3.org/1999/xlink}'
+
+        # 1. 解析defs中的clipPath定义（只收集path类型的，rect类型的是边界框不是实际形状）
+        defs_elem = root.find(f'{ns_prefix}defs')
+        clip_path_defs = {}  # {clipPath_id: [d_strings]}
+        image_defs = {}     # {image_id: {pil_image, width, height, x, y}}
+
+        if defs_elem is not None:
+            # 收集所有clipPath
+            for cp in defs_elem.findall(f'{ns_prefix}clipPath'):
+                cp_id = cp.get('id', '')
+                if not cp_id:
+                    continue
+                cp_paths = []
+                # path元素
+                for p in cp.findall(f'.//{ns_prefix}path'):
+                    d = p.get('d', '')
+                    if d:
+                        cp_paths.append(d)
+                # rect元素也收集（作为备选）
+                if not cp_paths:
+                    for r in cp.findall(f'.//{ns_prefix}rect'):
+                        try:
+                            x = float(r.get('x', '0') or '0')
+                            y = float(r.get('y', '0') or '0')
+                            w = float(r.get('width', '0') or '0')
+                            h = float(r.get('height', '0') or '0')
+                            if w > 0 and h > 0:
+                                d = f'M{x},{y} L{x+w},{y} L{x+w},{y+h} L{x},{y+h} Z'
+                                cp_paths.append(d)
+                        except (ValueError, TypeError):
+                            pass
+                if cp_paths:
+                    clip_path_defs[cp_id] = cp_paths
+
+            # 收集defs中的image
+            for img_elem in defs_elem.findall(f'{ns_prefix}image'):
+                img_id = img_elem.get('id', '')
+                if not img_id:
+                    continue
+                href = img_elem.get(f'{xlink_ns}href', '') or img_elem.get('href', '')
+                width = float(img_elem.get('width', '0') or '0')
+                height = float(img_elem.get('height', '0') or '0')
+                img_x = float(img_elem.get('x', '0') or '0')
+                img_y = float(img_elem.get('y', '0') or '0')
+
+                pil_img = None
+                if href.startswith('data:image'):
+                    parts = href.split(',', 1)
+                    if len(parts) == 2:
+                        try:
+                            img_data = base64.b64decode(parts[1])
+                            pil_img = PILImage.open(BytesIO(img_data)).convert('RGBA')
+                        except Exception:
+                            pass
+
+                if pil_img is not None:
+                    image_defs[img_id] = {
+                        'pil_image': pil_img,
+                        'width': width,
+                        'height': height,
+                        'x': img_x,
+                        'y': img_y,
+                    }
+
+        # 2. 建立元素到父元素的映射
+        parent_map = {}
+        for parent in root.iter():
+            for child in parent:
+                parent_map[child] = parent
+
+        # 辅助函数：获取元素的clip-path id（从class和style中）
+        def _get_clip_path_id(elem):
+            cls = elem.get('class', '')
+            for c in cls.split():
+                if c in css_classes and 'clip-path' in css_classes[c]:
+                    m = re.search(r'url\(#([^)]+)\)', css_classes[c]['clip-path'])
+                    if m:
+                        return m.group(1)
+            # 也检查style属性
+            style = elem.get('style', '')
+            if style:
+                m = re.search(r'clip-path\s*:\s*url\(#([^)]+)\)', style)
+                if m:
+                    return m.group(1)
+            return None
+
+        # 辅助函数：获取元素的变换链（从元素到root）
+        def _get_elem_transform_chain(elem):
+            transforms = []
+            cur = elem
+            while cur is not None:
+                t = cur.get('transform', '')
+                if t:
+                    transforms.append(t)
+                cur = parent_map.get(cur)
+            # 从root到elem的顺序，所以要反转
+            transforms.reverse()
+            combined = None
+            for t_str in transforms:
+                t_mat = _parse_transform(t_str)
+                combined = _concat_transform(combined, t_mat)
+            return combined
+
+        # 辅助函数：从image中提取主色
+        def _extract_image_avg_color(pil_img):
+            if pil_img is None or pil_img.size[0] <= 0 or pil_img.size[1] <= 0:
+                return None
+            try:
+                img_small = pil_img.resize((1, 1), PILImage.Resampling.BILINEAR)
+                r, g, b, a = img_small.getpixel((0, 0))
+                if a > 10:
+                    return f'#{r:02x}{g:02x}{b:02x}'
+            except Exception:
+                pass
+            return None
+
+        # 3. 找所有可见的image和use元素，提取clip-image填充
+        clip_image_fills = []  # [(d_list, fill_color_hex, transform)]
+
+        # 所有image元素
+        for img_elem in root.findall(f'.//{ns_prefix}image'):
+            # 跳过defs中的
+            in_defs = False
+            cur = img_elem
+            while cur is not None:
+                tag = cur.tag.split('}')[-1] if '}' in cur.tag else cur.tag
+                if tag == 'defs':
+                    in_defs = True
+                    break
+                cur = parent_map.get(cur)
+            if in_defs:
+                continue
+
+            # 获取href
+            href = img_elem.get(f'{xlink_ns}href', '') or img_elem.get('href', '')
+            if not href:
+                continue
+
+            # 解码图片
+            pil_img = None
+            if href.startswith('data:image'):
+                parts = href.split(',', 1)
+                if len(parts) == 2:
+                    try:
+                        img_data = base64.b64decode(parts[1])
+                        pil_img = PILImage.open(BytesIO(img_data)).convert('RGBA')
+                    except Exception:
+                        pass
+            elif href.startswith('#'):
+                ref_id = href[1:]
+                if ref_id in image_defs:
+                    pil_img = image_defs[ref_id]['pil_image']
+
+            if pil_img is None:
+                continue
+
+            # 找祖先的clip-path（优先找path类型的，rect类型的是边界框不是实际形状）
+            # 注意：clipPath的坐标是在应用clip-path的元素的坐标系中定义的（userSpaceOnUse模式）
+            # 所以我们需要找到应用clip-path的那个祖先元素，用它的transform来变换clipPath
+            cp_d_list = None
+            cp_rect_list = None  # 备用：rect类型的
+            cp_owner_elem = None  # 应用clip-path的元素
+            cur = img_elem
+            while cur is not None:
+                cp_id = _get_clip_path_id(cur)
+                if cp_id and cp_id in clip_path_defs:
+                    # 判断是path类型还是rect类型
+                    # path类型的优先（实际裁剪形状），rect类型的是边界框
+                    # 检查这个clipPath是path还是rect类型
+                    cp_elem = defs_elem.find(f'.//{ns_prefix}clipPath[@id="{cp_id}"]') if defs_elem is not None else None
+                    is_path_type = False
+                    if cp_elem is not None:
+                        is_path_type = len(cp_elem.findall(f'.//{ns_prefix}path')) > 0
+                    
+                    if is_path_type:
+                        cp_d_list = clip_path_defs[cp_id]
+                        cp_owner_elem = cur
+                        break  # 找到path类型的就用它
+                    elif cp_rect_list is None:
+                        cp_rect_list = clip_path_defs[cp_id]  # 备用
+                        if cp_owner_elem is None:
+                            cp_owner_elem = cur
+                cur = parent_map.get(cur)
+
+            # 如果没找到path类型的，用rect类型的（备用）
+            if cp_d_list is None:
+                cp_d_list = cp_rect_list
+
+            if cp_d_list is None:
+                continue
+
+            # 提取主色
+            fill_color = _extract_image_avg_color(pil_img)
+            if fill_color is None:
+                continue
+
+            # 获取变换：使用应用clip-path的元素的transform（到根的变换链）
+            # 而不是image自身的transform，因为clipPath坐标是在父元素坐标系中的
+            transform = _get_elem_transform_chain(cp_owner_elem) if cp_owner_elem is not None else None
+            clip_image_fills.append((cp_d_list, fill_color, transform))
+
+        # 所有use元素（引用image的）
+        for use_elem in root.findall(f'.//{ns_prefix}use'):
+            # 跳过defs中的
+            in_defs = False
+            cur = use_elem
+            while cur is not None:
+                tag = cur.tag.split('}')[-1] if '}' in cur.tag else cur.tag
+                if tag == 'defs':
+                    in_defs = True
+                    break
+                cur = parent_map.get(cur)
+            if in_defs:
+                continue
+
+            href = use_elem.get(f'{xlink_ns}href', '') or use_elem.get('href', '')
+            if not href or not href.startswith('#'):
+                continue
+
+            ref_id = href[1:]
+            if ref_id not in image_defs:
+                continue
+
+            pil_img = image_defs[ref_id]['pil_image']
+            if pil_img is None:
+                continue
+
+            # 找祖先的clip-path（优先找path类型的，rect类型的是边界框不是实际形状）
+            # 注意：clipPath的坐标是在应用clip-path的元素的坐标系中定义的（userSpaceOnUse模式）
+            # 所以我们需要找到应用clip-path的那个祖先元素，用它的transform来变换clipPath
+            cp_d_list = None
+            cp_rect_list = None
+            cp_owner_elem = None  # 应用clip-path的元素
+            cur = use_elem
+            while cur is not None:
+                cp_id = _get_clip_path_id(cur)
+                if cp_id and cp_id in clip_path_defs:
+                    # 判断是path类型还是rect类型
+                    cp_elem = defs_elem.find(f'.//{ns_prefix}clipPath[@id="{cp_id}"]') if defs_elem is not None else None
+                    is_path_type = False
+                    if cp_elem is not None:
+                        is_path_type = len(cp_elem.findall(f'.//{ns_prefix}path')) > 0
+                    
+                    if is_path_type:
+                        cp_d_list = clip_path_defs[cp_id]
+                        cp_owner_elem = cur
+                        break
+                    elif cp_rect_list is None:
+                        cp_rect_list = clip_path_defs[cp_id]
+                        if cp_owner_elem is None:
+                            cp_owner_elem = cur
+                cur = parent_map.get(cur)
+
+            if cp_d_list is None:
+                cp_d_list = cp_rect_list
+
+            if cp_d_list is None:
+                continue
+
+            # 提取主色
+            fill_color = _extract_image_avg_color(pil_img)
+            if fill_color is None:
+                continue
+
+            # 获取变换：使用应用clip-path的元素的transform（到根的变换链）
+            # 而不是use自身的transform，因为clipPath坐标是在父元素坐标系中的
+            transform = _get_elem_transform_chain(cp_owner_elem) if cp_owner_elem is not None else None
+            clip_image_fills.append((cp_d_list, fill_color, transform))
+
+        # 4. 将clip-image填充添加到paths列表的最前面（作为底色，先绘制）
+        # 反转顺序以保持正确的叠放（后绘制的在上层）
+        clip_image_fills.reverse()
+        for cp_d_list, fill_color_hex, transform in clip_image_fills:
+            for d in cp_d_list:
+                paths.insert(0, (d, fill_color_hex, 'none', 1.0, transform))
+
+    except ImportError:
+        # PIL不可用，跳过位图填充处理
+        pass
+    except Exception:
+        # 任何错误都不影响主流程
+        pass
+
     all_subpaths = []
     all_colors = []
     all_is_stroke = []    # True=描边路径, False=填充路径
