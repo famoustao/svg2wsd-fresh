@@ -194,6 +194,39 @@ def _bgr_to_bgr_bytes(bgr):
     return bytes([int(bgr[0]) & 0xff, int(bgr[1]) & 0xff, int(bgr[2]) & 0xff])
 
 
+def _bezier_to_polygon(bez_segs, samples_per_segment=8):
+    """
+    将多段三次贝塞尔曲线采样为多边形点列表
+
+    参数:
+        bez_segs: 贝塞尔段列表，每段是 [p0, p1, p2, p3]，每个点是 (x, y)
+        samples_per_segment: 每段采样点数（不含起点）
+
+    返回:
+        list: 多边形点列表 [(x, y), ...]
+    """
+    if not bez_segs:
+        return []
+
+    poly_pts = []
+    n = len(bez_segs)
+
+    for si, seg in enumerate(bez_segs):
+        p0, p1, p2, p3 = seg
+        # 第一段包含起点，后续段跳过起点（与前一段终点重合）
+        start_idx = 0 if si == 0 else 1
+
+        for i in range(start_idx, samples_per_segment + 1):
+            t = i / samples_per_segment
+            mt = 1.0 - t
+            # 三次贝塞尔公式
+            x = mt*mt*mt*p0[0] + 3*mt*mt*t*p1[0] + 3*mt*t*t*p2[0] + t*t*t*p3[0]
+            y = mt*mt*mt*p0[1] + 3*mt*mt*t*p1[1] + 3*mt*t*t*p2[1] + t*t*t*p3[1]
+            poly_pts.append((int(round(x)), int(round(y))))
+
+    return poly_pts
+
+
 def _shape_to_path_record(shape: Shape, linewidth: int = 80, line_alpha: int = 255) -> Optional[bytes]:
     """
     将 Shape 对象转换为对应的 WSD 路径记录（esShapePath 格式，支持颜色）
@@ -262,12 +295,26 @@ def _shape_to_path_record(shape: Shape, linewidth: int = 80, line_alpha: int = 2
             (cx + r, cy),
         ]
         # 转换为 4 段贝塞尔曲线
-        bezier_segs = []
-        bezier_segs.append(('bezier', [pts[0], pts[1], pts[2], pts[3]]))
-        bezier_segs.append(('bezier', [pts[3], pts[4], pts[5], pts[6]]))
-        bezier_segs.append(('bezier', [pts[6], pts[7], pts[8], pts[9]]))
-        bezier_segs.append(('bezier', [pts[9], pts[10], pts[11], pts[12]]))
-        segments_list.append(bezier_segs)
+        bezier_segs = [
+            [pts[0], pts[1], pts[2], pts[3]],
+            [pts[3], pts[4], pts[5], pts[6]],
+            [pts[6], pts[7], pts[8], pts[9]],
+            [pts[9], pts[10], pts[11], pts[12]],
+        ]
+
+        # 有填充色时，转为多边形段确保兼容性
+        if fill_color_bgr is not None:
+            poly_pts = _bezier_to_polygon(bezier_segs, samples_per_segment=12)
+            if poly_pts and len(poly_pts) >= 3:
+                if poly_pts[0] != poly_pts[-1]:
+                    poly_pts.append(poly_pts[0])
+                segments_list.append([('gon', poly_pts)])
+            else:
+                return None
+        else:
+            # 无填充，保留贝塞尔段
+            segs = [('bezier', seg) for seg in bezier_segs]
+            segments_list.append(segs)
 
     elif shape.type == ShapeType.ARC:
         # 圆弧：用贝塞尔曲线近似
@@ -293,30 +340,54 @@ def _shape_to_path_record(shape: Shape, linewidth: int = 80, line_alpha: int = 2
         pts = shape.points
         if len(pts) < 4:
             return None
-        # 4个点为单段贝塞尔
+
+        # 收集所有贝塞尔段
+        bez_segs = []
         if len(pts) == 4:
-            segments_list.append([('bezier', [
+            # 单段贝塞尔
+            bez_segs.append([
                 (pts[0][0], pts[0][1]),
                 (pts[1][0], pts[1][1]),
                 (pts[2][0], pts[2][1]),
                 (pts[3][0], pts[3][1]),
-            ])])
-        # 多个控制点：构建连续贝塞尔链
-        elif len(pts) >= 4:
-            bez_segs = []
+            ])
+        else:
+            # 多段连续贝塞尔链
             i = 0
             while i + 3 < len(pts):
-                bez_segs.append(('bezier', [
+                bez_segs.append([
                     (pts[i][0], pts[i][1]),
                     (pts[i+1][0], pts[i+1][1]),
                     (pts[i+2][0], pts[i+2][1]),
                     (pts[i+3][0], pts[i+3][1]),
-                ]))
+                ])
                 i += 3
-            if bez_segs:
-                segments_list.append(bez_segs)
-        else:
+
+        if not bez_segs:
             return None
+
+        # 判断路径是否闭合（首尾点距离小于1像素）
+        first_pt = bez_segs[0][0]
+        last_pt = bez_segs[-1][3]
+        is_closed = (abs(first_pt[0] - last_pt[0]) < 1.0 and
+                     abs(first_pt[1] - last_pt[1]) < 1.0)
+
+        # 有填充色且闭合时，转为多边形段(GON)以确保填充兼容性
+        # 部分WSD软件对BEZIER段的填充支持不完善，GON段兼容性最好
+        if fill_color_bgr is not None and is_closed:
+            # 将贝塞尔曲线采样为多边形点
+            poly_pts = _bezier_to_polygon(bez_segs, samples_per_segment=8)
+            if poly_pts and len(poly_pts) >= 3:
+                # 确保闭合（GON段会自动闭合，但首尾相同更安全）
+                if poly_pts[0] != poly_pts[-1]:
+                    poly_pts.append(poly_pts[0])
+                segments_list.append([('gon', poly_pts)])
+            else:
+                return None
+        else:
+            # 无填充或开放路径，保留贝塞尔段
+            segs = [('bezier', seg) for seg in bez_segs]
+            segments_list.append(segs)
 
     elif shape.type == ShapeType.ELLIPSE:
         # 椭圆：用贝塞尔曲线近似
@@ -350,13 +421,26 @@ def _shape_to_path_record(shape: Shape, linewidth: int = 80, line_alpha: int = 2
         p11_1 = rotate(rx, ry * k)
         p12 = rotate(rx, 0)
 
-        bez_segs = [
-            ('bezier', [p0, p1_1, p2_1, p3]),
-            ('bezier', [p3, p4_1, p5_1, p6]),
-            ('bezier', [p6, p7_1, p8_1, p9]),
-            ('bezier', [p9, p10_1, p11_1, p12]),
+        bez_segs_raw = [
+            [p0, p1_1, p2_1, p3],
+            [p3, p4_1, p5_1, p6],
+            [p6, p7_1, p8_1, p9],
+            [p9, p10_1, p11_1, p12],
         ]
-        segments_list.append(bez_segs)
+
+        # 有填充色时，转为多边形段确保兼容性
+        if fill_color_bgr is not None:
+            poly_pts = _bezier_to_polygon(bez_segs_raw, samples_per_segment=12)
+            if poly_pts and len(poly_pts) >= 3:
+                if poly_pts[0] != poly_pts[-1]:
+                    poly_pts.append(poly_pts[0])
+                segments_list.append([('gon', poly_pts)])
+            else:
+                return None
+        else:
+            # 无填充，保留贝塞尔段
+            segs = [('bezier', seg) for seg in bez_segs_raw]
+            segments_list.append(segs)
 
     else:
         return None
