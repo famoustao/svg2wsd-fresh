@@ -350,14 +350,21 @@ class ComicMode:
                         g = int(h[1]*2, 16)
                         b = int(h[2]*2, 16)
                         return (b, g, r)
-                # rgb(r, g, b) 格式
+                # rgb(r, g, b) 格式 - 支持整数和百分比
                 if s.startswith('rgb(') and s.endswith(')'):
                     try:
                         parts = s[4:-1].split(',')
                         if len(parts) == 3:
-                            r = int(parts[0].strip())
-                            g = int(parts[1].strip())
-                            b = int(parts[2].strip())
+                            vals = []
+                            for p in parts:
+                                p = p.strip()
+                                if p.endswith('%'):
+                                    vals.append(round(float(p[:-1]) * 255 / 100))
+                                else:
+                                    vals.append(int(float(p)))
+                            r = max(0, min(255, vals[0]))
+                            g = max(0, min(255, vals[1]))
+                            b = max(0, min(255, vals[2]))
                             return (b, g, r)
                     except (ValueError, IndexError):
                         pass

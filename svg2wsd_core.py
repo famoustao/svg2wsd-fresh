@@ -328,10 +328,21 @@ def _normalize_color(color):
             hex_color = ''.join(c * 2 for c in hex_color)
         return '#' + hex_color.lower()
     elif color.lower().startswith('rgb('):
-        # rgb(r, g, b) 格式
-        m = re.match(r'rgb\s*\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*\)', color, re.IGNORECASE)
+        # rgb(r, g, b) 格式 - 支持整数和百分比
+        # 百分比格式: rgb(55.75%, 72.94%, 90.42%)
+        m = re.match(r'rgb\s*\(\s*(\d+(?:\.\d+)?)\s*%?\s*,\s*(\d+(?:\.\d+)?)\s*%?\s*,\s*(\d+(?:\.\d+)?)\s*%?\s*\)', color, re.IGNORECASE)
         if m:
-            r, g, b = int(m.group(1)), int(m.group(2)), int(m.group(3))
+            v1, v2, v3 = float(m.group(1)), float(m.group(2)), float(m.group(3))
+            # 判断是百分比还是整数
+            if '%' in color:
+                r = round(v1 * 255 / 100)
+                g = round(v2 * 255 / 100)
+                b = round(v3 * 255 / 100)
+            else:
+                r, g, b = int(v1), int(v2), int(v3)
+            r = max(0, min(255, r))
+            g = max(0, min(255, g))
+            b = max(0, min(255, b))
             return f'#{r:02x}{g:02x}{b:02x}'
         return '#000000'
     else:
