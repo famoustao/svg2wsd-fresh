@@ -44,6 +44,9 @@ def main():
                         help='批量输出目录')
     parser.add_argument('--merge', action='store_true',
                         help='合并到同一个WSD的不同画布')
+    parser.add_argument('--compound-mode', default='auto',
+                        choices=['auto', 'split', 'merge'],
+                        help='复合路径处理模式 (auto=自动, split=拆分, merge=合并, 默认auto)')
 
     # 普通转换参数
     normal_group = parser.add_argument_group('普通转换参数')
@@ -159,6 +162,7 @@ def main():
                 custom_size=custom_size,
                 img_threshold=args.threshold,
                 img_turdsize=args.turdsize,
+                compound_mode=args.compound_mode,
             )
             print(f"✓ 转换完成!")
             print(f"  输入: {in_file} ({result['file_type']})")
@@ -201,6 +205,7 @@ def main():
                         custom_size=custom_size,
                         img_threshold=args.threshold,
                         img_turdsize=args.turdsize,
+                        compound_mode=args.compound_mode,
                     )
                 success += 1
                 print(f"  ✓ {base}.wsd")

@@ -2627,7 +2627,8 @@ def convert_to_wsd(input_path, wsd_path, color_mode='rainbow',
                    img_preprocess_denoise=False,
                    img_preprocess_sharpen=False,
                    img_quantize_method='median_cut',
-                   progress_cb=None):
+                   progress_cb=None,
+                   compound_mode='auto'):
     """
     将SVG或图片转换为WSD
 
@@ -2656,6 +2657,10 @@ def convert_to_wsd(input_path, wsd_path, color_mode='rainbow',
         img_preprocess_sharpen: 边缘锐化(USM)
         img_quantize_method: 调色板量化方法 'median_cut' / 'kmeans'
         progress_cb: 进度回调函数(msg, percent)
+        compound_mode: 复合路径处理模式
+            'auto'  - 自动（单色SVG拆分，彩色SVG合并）
+            'split' - 强制拆分（每个子路径独立）
+            'merge' - 强制合并（复合路径合并为多seglist）
     """
 
     with open(TEMPLATE_PATH, 'rb') as f:
@@ -2775,16 +2780,23 @@ def convert_to_wsd(input_path, wsd_path, color_mode='rainbow',
     path_group_ids = extra_info.get('path_group_ids', None)
     use_compound = (file_type == 'svg' and path_group_ids is not None)
 
-    # 检测SVG是否为单色（所有填充颜色相同）
-    # 单色SVG的复合路径需要特殊处理：拆分为独立描边path以保留孔径效果
-    _is_single_color_svg = False
+    # 根据 compound_mode 决定复合路径处理方式
+    # 'auto': 自动检测（单色拆分，彩色合并）
+    # 'split': 强制拆分
+    # 'merge': 强制合并
+    _should_split = False
     if use_compound:
-        unique_fill_colors = set()
-        for i, c in enumerate(fill_colors):
-            if i < len(is_stroke_list) and not is_stroke_list[i]:
-                if c is not None:
-                    unique_fill_colors.add(c)
-        _is_single_color_svg = len(unique_fill_colors) <= 1
+        if compound_mode == 'split':
+            _should_split = True
+        elif compound_mode == 'merge':
+            _should_split = False
+        else:  # auto
+            unique_fill_colors = set()
+            for i, c in enumerate(fill_colors):
+                if i < len(is_stroke_list) and not is_stroke_list[i]:
+                    if c is not None:
+                        unique_fill_colors.add(c)
+            _should_split = len(unique_fill_colors) <= 1
 
     if use_compound:
         # SVG模式：按path组处理
@@ -2838,7 +2850,7 @@ def convert_to_wsd(input_path, wsd_path, color_mode='rainbow',
                 num_objects += 1
             else:
                 # 填充路径
-                if _is_single_color_svg and len(wsd_sps) > 1:
+                if _should_split and len(wsd_sps) > 1:
                     # 单色SVG的复合路径（有孔径）：
                     # 拆分为独立描边path对象，避免WSD渲染器不正确地填充所有seglist区域
                     # 使用描边模式，线条之间的空白自然形成孔径效果

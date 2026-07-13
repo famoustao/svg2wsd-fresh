@@ -629,6 +629,32 @@ class MainWindow:
         )
         self.smoothness_scale.pack(fill='x', pady=2)
 
+        # 复合路径处理模式
+        self.compound_mode_frame = tk.Frame(content, bg=get_color('card'))
+        self.compound_mode_frame.pack(fill='x', pady=2)
+
+        tk.Label(
+            self.compound_mode_frame,
+            text='复合路径:',
+            bg=get_color('card'),
+            fg=get_color('text'),
+            font=('Microsoft YaHei UI', 9),
+        ).pack(side='left')
+
+        self.compound_mode_var = tk.StringVar(value='auto')
+        self.compound_mode_combo = ttk.Combobox(
+            self.compound_mode_frame,
+            textvariable=self.compound_mode_var,
+            values=['自动', '拆分', '合并'],
+            state='readonly',
+            width=10,
+        )
+        self.compound_mode_combo.pack(side='left', padx=8)
+        self.compound_mode_combo.bind(
+            '<<ComboboxSelected>>',
+            lambda e: self._on_param_changed(),
+        )
+
         # 颜色数量（实际颜色模式时显示）
         self.color_count_frame = tk.Frame(content, bg=get_color('card'))
         self.color_count_frame.pack(fill='x', pady=2)
@@ -1481,7 +1507,8 @@ class MainWindow:
                     canvas_data = GeometryMode().process(filepath, params)
                 else:
                     from modes.comic_mode import process as comic_process
-                    canvas_data = comic_process(filepath, sub_mode, params)
+                    compound_mode = params.get('compound_mode', 'auto')
+                    canvas_data = comic_process(filepath, sub_mode, params, compound_mode=compound_mode)
                 self._handle_preview_result(canvas_data)
             except Exception as e:
                 import traceback
@@ -1510,7 +1537,8 @@ class MainWindow:
                     from modes.comic_mode import process as comic_process
                     if progress_callback:
                         progress_callback(30, f'漫画模式({sub_mode})处理中...')
-                    canvas_data = comic_process(filepath, sub_mode, params)
+                    compound_mode = params.get('compound_mode', 'auto')
+                    canvas_data = comic_process(filepath, sub_mode, params, compound_mode=compound_mode)
 
                 if progress_callback:
                     progress_callback(90, '生成预览...')
@@ -2120,6 +2148,9 @@ class MainWindow:
         }
 
         if self._current_mode == 'comic':
+            # 复合路径模式中文映射
+            compound_map = {'自动': 'auto', '拆分': 'split', '合并': 'merge'}
+            compound_val = self.compound_mode_var.get()
             params.update({
                 'color_mode': self.comic_color_mode.get(),
                 'threshold': self.threshold_scale.get(),
@@ -2127,6 +2158,7 @@ class MainWindow:
                 'smoothness': self.smoothness_scale.get(),
                 'color_count': self.color_count_var.get(),
                 'color_scheme': self.color_scheme_var.get(),
+                'compound_mode': compound_map.get(compound_val, 'auto'),
             })
         else:
             params.update({

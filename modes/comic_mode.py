@@ -302,7 +302,8 @@ class ComicMode:
                                   fill_colors=None,
                                   is_stroke=None,
                                   stroke_widths=None,
-                                  path_group_ids=None) -> CanvasData:
+                                  path_group_ids=None,
+                                  compound_mode='auto') -> CanvasData:
         """
         将原始路径数据转换为 CanvasData 格式
 
@@ -394,6 +395,34 @@ class ComicMode:
             scheme_name = params.get('color_scheme', 'rainbow')
             color_fill_colors = self._generate_color_scheme(scheme_name, count)
 
+        # 根据 compound_mode 处理复合路径的 fill_color
+        # 先统计每组的子路径数
+        group_counts = {}
+        if path_group_ids:
+            for gid in path_group_ids:
+                group_counts[gid] = group_counts.get(gid, 0) + 1
+
+        # 判断是否需要拆分复合路径（去除填充）
+        _should_split = False
+        if compound_mode == 'split':
+            _should_split = True
+        elif compound_mode == 'merge':
+            _should_split = False
+        elif compound_mode == 'auto' and path_group_ids:
+            # 自动模式：检测是否为单色SVG
+            unique_colors = set()
+            for i, c in enumerate(fill_colors or []):
+                if c is not None:
+                    unique_colors.add(str(c).lower().strip())
+            _should_split = len(unique_colors) <= 1
+
+        # 标记哪些子路径属于复合路径组（同一组有多个子路径）
+        compound_subpaths = set()
+        if _should_split and path_group_ids:
+            for i, gid in enumerate(path_group_ids):
+                if group_counts.get(gid, 0) > 1:
+                    compound_subpaths.add(i)
+
         for i, path_points in enumerate(geo_paths):
             # path_points 是 [(x,y), ...] 贝塞尔曲线点列表
             fill_color = None
@@ -441,6 +470,10 @@ class ComicMode:
             # 描边宽度（SVG 中明确指定的描边宽度优先）
             if stroke_widths and i < len(stroke_widths) and stroke_widths[i]:
                 line_width = float(stroke_widths[i])
+
+            # 复合路径拆分模式：去除孔径子路径的填充
+            if i in compound_subpaths:
+                fill_color = None
 
             shape = Shape(
                 type=ShapeType.BEZIER,
@@ -569,7 +602,8 @@ class ComicMode:
 # 主处理函数
 # ============================================================
 
-def process(image_path: str, mode_type: str, params: Optional[Dict[str, Any]] = None) -> CanvasData:
+def process(image_path: str, mode_type: str, params: Optional[Dict[str, Any]] = None,
+            compound_mode: str = 'auto') -> CanvasData:
     """
     漫画模式主处理函数
 
@@ -584,6 +618,10 @@ def process(image_path: str, mode_type: str, params: Optional[Dict[str, Any]] = 
             'actual_color' - 实际颜色模式
             'color_fill' - 彩色填充模式
         params: 参数字典（具体参数取决于 mode_type）
+        compound_mode: 复合路径处理模式
+            'auto'  - 自动（单色SVG拆分，彩色SVG合并）
+            'split' - 强制拆分（每个子路径独立，去除孔径填充）
+            'merge' - 强制合并（保留复合路径填充）
 
     返回:
         CanvasData: 处理后的画布数据
@@ -617,7 +655,8 @@ def process(image_path: str, mode_type: str, params: Optional[Dict[str, Any]] = 
                                                    fill_colors=colors,
                                                    is_stroke=is_stroke,
                                                    stroke_widths=stroke_widths,
-                                                   path_group_ids=path_group_ids)
+                                                   path_group_ids=path_group_ids,
+                                                   compound_mode=compound_mode)
 
     # 创建处理器
     processor = ComicMode()

@@ -427,7 +427,8 @@ class BatchManager:
                         # 漫画模式（使用模块级 process 函数，支持 SVG 和图片）
                         from modes.comic_mode import process as comic_process
                         color_mode = params.get('color_mode', 'line_art')
-                        canvas_data = comic_process(file_item.filepath, color_mode, params)
+                        compound_mode = params.get('compound_mode', 'auto')
+                        canvas_data = comic_process(file_item.filepath, color_mode, params, compound_mode=compound_mode)
                     else:
                         raise ValueError(f"不支持的处理模式: {mode_type}")
 
