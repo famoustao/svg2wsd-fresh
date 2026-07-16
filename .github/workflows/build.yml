@@ -15,19 +15,28 @@ jobs:
   cleanup-artifacts:
     runs-on: ubuntu-latest
     steps:
-      - name: Delete old artifacts
+      - name: Delete ALL old artifacts
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # 列出所有artifact，删除非最新的
-          ARTIFACTS=$(gh api repos/${{ github.repository }}/actions/artifacts --jq '.artifacts[] | "\(.id)|\(.created_at)|\(.name)"' 2>/dev/null || true)
-          COUNT=$(echo "$ARTIFACTS" | grep -c '|' 2>/dev/null || echo "0")
-          echo "Found $COUNT artifacts"
-          # 保留最新的3个，删除其余的
-          echo "$ARTIFACTS" | sort -t'|' -k2 | head -n -3 | while IFS='|' read -r id date name; do
-            echo "Deleting artifact: $name (id=$id)"
-            gh api -X DELETE repos/${{ github.repository }}/actions/artifacts/$id || true
+          echo "=== 清理所有旧 artifact ==="
+          # 获取所有 artifact（分页）
+          PAGE=1
+          while true; do
+            RESPONSE=$(gh api "repos/${{ github.repository }}/actions/artifacts?per_page=100&page=$PAGE" --jq '.artifacts[] | "\(.id)|\(.name)"' 2>/dev/null || true)
+            if [ -z "$RESPONSE" ]; then
+              break
+            fi
+            echo "$RESPONSE" | while IFS='|' read -r id name; do
+              echo "Deleting artifact: $name (id=$id)"
+              gh api -X DELETE "repos/${{ github.repository }}/actions/artifacts/$id" || true
+            done
+            PAGE=$((PAGE + 1))
+            if [ $PAGE -gt 20 ]; then
+              break
+            fi
           done
+          echo "=== Artifact 清理完成 ==="
 
   build-windows:
     needs: cleanup-artifacts
@@ -100,8 +109,9 @@ jobs:
           Compress-Archive -Path dist\* -DestinationPath $zipName
           echo "ZIP_NAME=$zipName" >> $env:GITHUB_ENV
 
-      - name: Upload artifact
+      - name: Upload artifact (best effort)
         uses: actions/upload-artifact@v4
+        continue-on-error: true
         with:
           name: svg2wsd-windows-${{ steps.version.outputs.COMMIT_SHORT }}
           path: ${{ env.ZIP_NAME }}

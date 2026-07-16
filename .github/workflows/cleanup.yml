@@ -9,7 +9,7 @@ permissions:
   actions: write
 
 jobs:
-  cleanup:
+  cleanup-runs:
     runs-on: ubuntu-latest
     steps:
       - name: Delete old workflow runs
@@ -25,7 +25,6 @@ jobs:
             let page = 1;
             let allRuns = [];
 
-            // 分页获取所有工作流运行记录
             while (true) {
               const { data } = await github.rest.actions.listWorkflowRunsForRepo({
                 owner: context.repo.owner,
@@ -37,12 +36,11 @@ jobs:
               if (data.workflow_runs.length === 0) break;
               allRuns = allRuns.concat(data.workflow_runs);
               page++;
-              if (page > 20) break; // 最多2000条，防止无限循环
+              if (page > 20) break;
             }
 
             console.log(`Found ${allRuns.length} workflow runs total`);
 
-            // 按时间排序，最新的在前面
             allRuns.sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
 
             let deleted = 0;
@@ -52,7 +50,6 @@ jobs:
               const run = allRuns[i];
               const runTime = new Date(run.created_at).getTime();
 
-              // 只删除超过cutoffDays天且状态为completed的记录
               if (runTime < cutoffTime && run.status === 'completed') {
                 try {
                   await github.rest.actions.deleteWorkflowRun({
@@ -70,4 +67,29 @@ jobs:
               }
             }
 
-            console.log(`Cleanup complete: deleted ${deleted}, skipped ${skipped}, total ${allRuns.length}`);
+            console.log(`Runs cleanup: deleted ${deleted}, skipped ${skipped}, total ${allRuns.length}`);
+
+  cleanup-artifacts:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Delete ALL artifacts
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "=== 清理所有 artifact ==="
+          PAGE=1
+          while true; do
+            RESPONSE=$(gh api "repos/${{ github.repository }}/actions/artifacts?per_page=100&page=$PAGE" --jq '.artifacts[] | "\(.id)|\(.name)"' 2>/dev/null || true)
+            if [ -z "$RESPONSE" ]; then
+              break
+            fi
+            echo "$RESPONSE" | while IFS='|' read -r id name; do
+              echo "Deleting artifact: $name (id=$id)"
+              gh api -X DELETE "repos/${{ github.repository }}/actions/artifacts/$id" || true
+            done
+            PAGE=$((PAGE + 1))
+            if [ $PAGE -gt 20 ]; then
+              break
+            fi
+          done
+          echo "=== Artifact 清理完成 ==="
