@@ -712,6 +712,58 @@ def _parse_svg_file(svg_path):
         if tag == 'style' and elem.text:
             _parse_css_style(elem.text)
 
+    # 解析渐变定义（支持 linearGradient 和 radialGradient）
+    # 以及通过 xlink:href 引用的渐变
+    gradient_colors = {}  # {gradient_id: first_stop_color}
+
+    # 第一遍：收集所有渐变定义
+    gradient_defs = {}
+    for elem in root.iter():
+        tag = elem.tag.split('}')[-1] if '}' in elem.tag else elem.tag
+        if tag in ('linearGradient', 'radialGradient'):
+            gid = elem.get('id')
+            if gid:
+                stops = []
+                for stop in elem:
+                    stop_tag = stop.tag.split('}')[-1] if '}' in stop.tag else stop.tag
+                    if stop_tag == 'stop':
+                        # 从 style 属性提取 stop-color
+                        style = stop.get('style', '')
+                        m = re.search(r'stop-color:([^;]+)', style)
+                        if m:
+                            stops.append(m.group(1).strip())
+                        else:
+                            sc = stop.get('stop-color', '')
+                            if sc:
+                                stops.append(sc)
+                # 检查 xlink:href 引用
+                xlink = elem.get('{http://www.w3.org/1999/xlink}href', '')
+                gradient_defs[gid] = {'stops': stops, 'ref': xlink[1:] if xlink.startswith('#') else None}
+
+    # 第二遍：解析引用关系，获取最终颜色
+    def _resolve_gradient(gid):
+        """解析渐变ID，返回第一个stop的颜色"""
+        if gid in gradient_colors:
+            return gradient_colors[gid]
+        if gid not in gradient_defs:
+            return None
+        gdef = gradient_defs[gid]
+        # 如果有引用，先解析引用
+        if gdef['ref'] and gdef['ref'] in gradient_defs:
+            ref_color = _resolve_gradient(gdef['ref'])
+            if ref_color:
+                gradient_colors[gid] = ref_color
+                return ref_color
+        # 使用自己的 stops
+        if gdef['stops']:
+            color = gdef['stops'][0]
+            gradient_colors[gid] = color
+            return color
+        return None
+
+    for gid in gradient_defs:
+        _resolve_gradient(gid)
+
     def _get_elem_classes(elem):
         """获取元素的 CSS 类名列表"""
         class_attr = elem.get('class', '')
@@ -741,6 +793,14 @@ def _parse_svg_file(svg_path):
     def _get_fill(elem, parent_fill='#000000'):
         fill = _get_style_value(elem, 'fill')
         if fill and fill != 'none':
+            # 处理渐变引用: url(#gradientId)
+            if fill.startswith('url('):
+                m = re.search(r'url\(#([^)]+)\)', fill)
+                if m:
+                    gid = m.group(1)
+                    grad_color = gradient_colors.get(gid)
+                    if grad_color:
+                        return grad_color
             return fill
         if fill == 'none':
             return 'none'
