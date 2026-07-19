@@ -75,11 +75,10 @@ jobs:
             --hidden-import wsd_pure_builder `
             --hidden-import svg2wsd_geo `
             --hidden-import svg2wsd_core `
-            --hidden-import wsd_template_builder `
-            --hidden-import wsd_unified_builder `
             --hidden-import wsd_records `
             --hidden-import wsd_parser `
             --hidden-import wsd_text `
+            --hidden-import wsd_letter_recognizer `
             --hidden-import tikz_utils `
             --hidden-import cairosvg `
             --hidden-import cairocffi `
@@ -89,9 +88,8 @@ jobs:
             --hidden-import pillow `
             app.py
 
-      - name: Copy template and samples
+      - name: Copy label samples (skeleton)
         run: |
-          xcopy /E /I template dist\template
           xcopy /E /I wsd_label_samples dist\wsd_label_samples
 
       - name: Create release zip

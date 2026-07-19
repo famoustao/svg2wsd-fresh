@@ -22,7 +22,7 @@ def _get_app_dir():
     return os.path.dirname(os.path.abspath(__file__))
 
 APP_DIR = _get_app_dir()
-TEMPLATE_PATH = os.path.join(APP_DIR, 'template', 'A1块画布+贝塞尔曲线.wsd')
+TEMPLATE_PATH = os.path.join(APP_DIR, 'wsd_label_samples', '几何模板_可增减记录.wsd')
 
 CANVAS_MIN = 2000
 CANVAS_MAX = 48000
