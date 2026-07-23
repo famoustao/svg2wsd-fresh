@@ -568,7 +568,7 @@ class MainWindow:
 
         content = self._comic_params_card.content
 
-        # 颜色模式单选（一行排列）
+        # 颜色模式单选（网格布局，2行2列，避免窄面板截断）
         self.comic_color_mode = tk.StringVar(value='actual_color')
 
         modes = [
@@ -581,7 +581,9 @@ class MainWindow:
         color_mode_frame = tk.Frame(content, bg=get_color('card'))
         color_mode_frame.pack(fill='x', pady=(0, 4))
 
-        for text, value in modes:
+        for idx, (text, value) in enumerate(modes):
+            row = idx // 2
+            col = idx % 2
             rb = tk.Radiobutton(
                 color_mode_frame,
                 text=text,
@@ -595,7 +597,7 @@ class MainWindow:
                 activeforeground=get_color('accent'),
                 command=self._on_comic_mode_changed,
             )
-            rb.pack(side='left', padx=(0, 16))
+            rb.grid(row=row, column=col, sticky='w', padx=(0, 8), pady=1)
 
         # 阈值滑块
         self.threshold_scale = LabeledScale(
