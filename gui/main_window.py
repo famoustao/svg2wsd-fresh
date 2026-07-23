@@ -527,6 +527,11 @@ class MainWindow:
         # 内容构建完成后，递归绑定所有子控件的滚轮事件
         _bind_mousewheel_recursive(inner)
 
+        # 强制 tkinter 计算 inner 的实际大小并更新滚动区域
+        # inner 未 pack，<Configure> 事件可能不触发，需手动更新
+        inner.update_idletasks()
+        _on_inner_configure()
+
         # 初始显示漫画模式参数，隐藏几何模式参数
         self._geo_params_card.pack_forget()
 
