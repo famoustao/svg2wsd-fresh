@@ -532,11 +532,47 @@ class BatchManager:
                     export_wsd_multi(canvas_list, output_path, canvas_size_mm,
                                      line_color_override=line_color,
                                      line_alpha=line_alpha)
-                else:
-                    # 其他格式暂未实现
-                    raise NotImplementedError(
-                        f"格式 {format} 的合并导出功能尚未实现"
-                    )
+                elif format_lower == 'svg':
+                    # SVG 合并: 将多个 CanvasData 合并为一个 SVG
+                    import xml.etree.ElementTree as ET
+                    output_path = os.path.join(output_dir, merge_name)
+                    # 计算合并后的总边界
+                    all_min_x, all_min_y = float('inf'), float('inf')
+                    all_max_x, all_max_y = float('-inf'), float('-inf')
+                    for cd in canvas_list:
+                        bx = cd.bbox
+                        if bx and len(bx) == 4:
+                            all_min_x = min(all_min_x, bx[0])
+                            all_min_y = min(all_min_y, bx[1])
+                            all_max_x = max(all_max_x, bx[2])
+                            all_max_y = max(all_max_y, bx[3])
+                    if all_min_x == float('inf'):
+                        all_min_x, all_min_y, all_max_x, all_max_y = 0, 0, 100, 100
+                    total_w = max(all_max_x - all_min_x, 1)
+                    total_h = max(all_max_y - all_min_y, 1)
+                    svg_root = ET.Element('svg', {
+                        'xmlns': 'http://www.w3.org/2000/svg',
+                        'version': '1.1',
+                        'width': str(total_w),
+                        'height': str(total_h),
+                        'viewBox': f'{all_min_x} {all_min_y} {total_w} {total_h}',
+                    })
+                    # 为每个 CanvasData 导出 path
+                    from core.exporter import _shape_to_svg_path, _bgr_to_hex
+                    for cd in canvas_list:
+                        for shape in cd.shapes:
+                            d = _shape_to_svg_path(shape)
+                            if not d:
+                                continue
+                            attrs = {'d': d}
+                            attrs['fill'] = _bgr_to_hex(shape.fill_color) if shape.fill_color else 'none'
+                            attrs['stroke'] = _bgr_to_hex(shape.line_color) if shape.line_color else 'none'
+                            if shape.line_color is not None:
+                                attrs['stroke-width'] = str(shape.line_width)
+                            ET.SubElement(svg_root, 'path', attrs)
+                    tree = ET.ElementTree(svg_root)
+                    ET.indent(tree, space='  ', level=0)
+                    tree.write(output_path, encoding='utf-8', xml_declaration=True)
 
                 exported = total
             except Exception as e:

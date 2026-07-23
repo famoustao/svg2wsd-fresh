@@ -575,6 +575,7 @@ class MainWindow:
             ('实际颜色', 'actual_color'),
             ('黑白线稿', 'line_art'),
             ('彩色填充', 'color_fill'),
+            ('vtracer', 'vtracer'),
         ]
 
         color_mode_frame = tk.Frame(content, bg=get_color('card'))
@@ -707,6 +708,142 @@ class MainWindow:
         # 初始隐藏颜色数量和配色方案
         self.color_count_frame.pack_forget()
         self.color_scheme_frame.pack_forget()
+
+        # ===== vtracer 参数面板 =====
+        self.vtracer_frame = tk.Frame(content, bg=get_color('card'))
+        self.vtracer_frame.pack(fill='x', pady=2)
+
+        # 预设选择
+        preset_row = tk.Frame(self.vtracer_frame, bg=get_color('card'))
+        preset_row.pack(fill='x', pady=1)
+        tk.Label(
+            preset_row,
+            text='预设:',
+            bg=get_color('card'),
+            fg=get_color('text'),
+            font=('Microsoft YaHei UI', 9),
+        ).pack(side='left')
+        self.vtracer_preset_var = tk.StringVar(value='comic')
+        self.vtracer_preset_combo = ttk.Combobox(
+            preset_row,
+            textvariable=self.vtracer_preset_var,
+            values=['漫画(comic)', '黑白(bw)', '海报(poster)', '照片(photo)', '像素(pixel)'],
+            state='readonly',
+            width=14,
+        )
+        self.vtracer_preset_combo.pack(side='left', padx=8)
+        self.vtracer_preset_combo.bind(
+            '<<ComboboxSelected>>',
+            lambda e: self._on_param_changed(),
+        )
+
+        # 颜色模式
+        colormode_row = tk.Frame(self.vtracer_frame, bg=get_color('card'))
+        colormode_row.pack(fill='x', pady=1)
+        tk.Label(
+            colormode_row,
+            text='颜色模式:',
+            bg=get_color('card'),
+            fg=get_color('text'),
+            font=('Microsoft YaHei UI', 9),
+        ).pack(side='left')
+        self.vtracer_colormode_var = tk.StringVar(value='color')
+        for text, val in [('彩色', 'color'), ('黑白', 'binary')]:
+            tk.Radiobutton(
+                colormode_row,
+                text=text,
+                variable=self.vtracer_colormode_var,
+                value=val,
+                bg=get_color('card'),
+                fg=get_color('text'),
+                font=('Microsoft YaHei UI', 9),
+                selectcolor=get_color('card'),
+                activebackground=get_color('card'),
+                command=self._on_param_changed,
+            ).pack(side='left', padx=(8, 12))
+
+        # 曲线模式
+        mode_row = tk.Frame(self.vtracer_frame, bg=get_color('card'))
+        mode_row.pack(fill='x', pady=1)
+        tk.Label(
+            mode_row,
+            text='曲线模式:',
+            bg=get_color('card'),
+            fg=get_color('text'),
+            font=('Microsoft YaHei UI', 9),
+        ).pack(side='left')
+        self.vtracer_mode_var = tk.StringVar(value='spline')
+        for text, val in [('样条', 'spline'), ('多边形', 'polygon'), ('像素', 'none')]:
+            tk.Radiobutton(
+                mode_row,
+                text=text,
+                variable=self.vtracer_mode_var,
+                value=val,
+                bg=get_color('card'),
+                fg=get_color('text'),
+                font=('Microsoft YaHei UI', 9),
+                selectcolor=get_color('card'),
+                activebackground=get_color('card'),
+                command=self._on_param_changed,
+            ).pack(side='left', padx=(8, 12))
+
+        # 去噪强度
+        self.vtracer_speckle_scale = LabeledScale(
+            self.vtracer_frame,
+            label='去噪强度',
+            from_=0,
+            to=20,
+            value=4,
+            command=lambda v: self._on_param_changed(),
+        )
+        self.vtracer_speckle_scale.pack(fill='x', pady=1)
+
+        # 颜色精度
+        self.vtracer_precision_scale = LabeledScale(
+            self.vtracer_frame,
+            label='颜色精度',
+            from_=1,
+            to=8,
+            value=6,
+            command=lambda v: self._on_param_changed(),
+        )
+        self.vtracer_precision_scale.pack(fill='x', pady=1)
+
+        # 颜色差异
+        self.vtracer_layer_diff_scale = LabeledScale(
+            self.vtracer_frame,
+            label='颜色差异',
+            from_=0,
+            to=64,
+            value=16,
+            command=lambda v: self._on_param_changed(),
+        )
+        self.vtracer_layer_diff_scale.pack(fill='x', pady=1)
+
+        # 角点阈值
+        self.vtracer_corner_scale = LabeledScale(
+            self.vtracer_frame,
+            label='角点阈值',
+            from_=0,
+            to=180,
+            value=60,
+            command=lambda v: self._on_param_changed(),
+        )
+        self.vtracer_corner_scale.pack(fill='x', pady=1)
+
+        # 样条精度
+        self.vtracer_splice_scale = LabeledScale(
+            self.vtracer_frame,
+            label='样条精度',
+            from_=0,
+            to=90,
+            value=45,
+            command=lambda v: self._on_param_changed(),
+        )
+        self.vtracer_splice_scale.pack(fill='x', pady=1)
+
+        # 初始隐藏 vtracer 参数
+        self.vtracer_frame.pack_forget()
 
     def _build_geo_params_card(self, parent):
         """构建几何模式参数卡片"""
@@ -1008,6 +1145,32 @@ class MainWindow:
         )
         export_mode_combo.pack(side='left', padx=4)
 
+        # 导出格式
+        export_format_frame = tk.Frame(content, bg=get_color('card'))
+        export_format_frame.pack(fill='x', pady=2)
+
+        tk.Label(
+            export_format_frame,
+            text='导出格式:',
+            bg=get_color('card'),
+            fg=get_color('text'),
+            font=('Microsoft YaHei UI', 9),
+        ).pack(side='left')
+
+        self.export_format_var = tk.StringVar(value='wsd')
+        export_format_combo = ttk.Combobox(
+            export_format_frame,
+            textvariable=self.export_format_var,
+            values=['WSD', 'SVG'],
+            state='readonly',
+            width=12,
+        )
+        export_format_combo.pack(side='left', padx=4)
+        export_format_combo.bind(
+            '<<ComboboxSelected>>',
+            lambda e: self._on_export_format_changed(),
+        )
+
     def _build_action_buttons_card(self, parent):
         """构建操作按钮卡片（已弃用，按钮移至文件列表卡片）"""
         # 此卡片保留为空，按钮已移至文件列表卡片中
@@ -1127,6 +1290,14 @@ class MainWindow:
             self.mode_notebook.tab(0, text='  漫画模式  ')
             self.mode_notebook.tab(1, text='📐 几何模式')
 
+    def _on_export_format_changed(self):
+        """导出格式切换时调整UI"""
+        fmt = self.export_format_var.get()
+        if fmt == 'SVG':
+            # SVG 不支持合并模式，禁用合并选项
+            self.export_mode_var.set('separate')
+        self._on_param_changed()
+
     def _on_comic_mode_changed(self):
         """漫画子模式切换时调整显示的参数项"""
         mode = self.comic_color_mode.get()
@@ -1143,9 +1314,15 @@ class MainWindow:
         else:
             self.color_scheme_frame.pack_forget()
 
-        # 实际颜色模式：线条颜色默认为无色
+        # 显示/隐藏 vtracer 参数
+        if mode == 'vtracer':
+            self.vtracer_frame.pack(fill='x', pady=4)
+        else:
+            self.vtracer_frame.pack_forget()
+
+        # 实际颜色/vtracer模式：线条颜色默认为无色
         # 其他模式：线条颜色默认为黑色
-        if mode == 'actual_color':
+        if mode in ('actual_color', 'vtracer'):
             if not self.line_color_none_var.get():
                 self.line_color_none_var.set(True)
                 self._line_color_btn.config(state='disabled')
@@ -1936,18 +2113,19 @@ class MainWindow:
 
             # 处理完成，更新进度到80%
             if progress_callback:
-                progress_callback(80.0, '正在导出WSD文件...')
+                progress_callback(80.0, f'正在导出{export_format.upper()}文件...')
 
             # 2. 批量导出
             canvas_size_mm = self._get_canvas_size_mm()
             line_color_none = params.get('line_color_none', False)
             line_color = params.get('line_color')
             line_alpha = 0 if line_color_none else 255
+            export_format = self.export_format_var.get().lower()  # 'wsd' 或 'svg'
             export_result = batch_mgr.export_all(
                 output_dir=output_dir,
-                format='wsd',
+                format=export_format,
                 merge_mode=export_mode,
-                merge_name='合并输出.wsd',
+                merge_name='合并输出.wsd' if export_format == 'wsd' else '合并输出.svg',
                 canvas_size_mm=canvas_size_mm,
                 line_color=line_color,
                 line_alpha=line_alpha,
@@ -2160,6 +2338,27 @@ class MainWindow:
                 'color_scheme': self.color_scheme_var.get(),
                 'compound_mode': compound_map.get(compound_val, 'auto'),
             })
+
+            # vtracer 参数
+            if self.comic_color_mode.get() == 'vtracer':
+                # 预设中文映射
+                preset_map = {
+                    '漫画(comic)': 'comic',
+                    '黑白(bw)': 'bw',
+                    '海报(poster)': 'poster',
+                    '照片(photo)': 'photo',
+                    '像素(pixel)': 'pixel',
+                }
+                params.update({
+                    'vtracer_preset': preset_map.get(self.vtracer_preset_var.get(), 'comic'),
+                    'vtracer_colormode': self.vtracer_colormode_var.get(),
+                    'vtracer_mode': self.vtracer_mode_var.get(),
+                    'vtracer_filter_speckle': int(self.vtracer_speckle_scale.get()),
+                    'vtracer_color_precision': int(self.vtracer_precision_scale.get()),
+                    'vtracer_layer_difference': int(self.vtracer_layer_diff_scale.get()),
+                    'vtracer_corner_threshold': int(self.vtracer_corner_scale.get()),
+                    'vtracer_splice_threshold': int(self.vtracer_splice_scale.get()),
+                })
         else:
             params.update({
                 'min_area': self.geo_min_area_scale.get(),

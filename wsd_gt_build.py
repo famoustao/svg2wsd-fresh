@@ -33,6 +33,7 @@ SEG_LINE = 0x4701      # 直线/折线
 SEG_GON = 0x4702       # 多边形/闭合折线
 SEG_BEZIER = 0x4703    # 贝塞尔曲线
 SEG_CIRCLE = 0x4284    # 原生圆/椭圆/弧 (float32参数)
+SEG_GRADIENT_RECT = 0x4281  # 渐变矩形 (2个i32对角点)
 
 PATH_TAG = 0x330f
 HDR4 = bytes.fromhex('cf100704')  # v2 Type-A 格式头
@@ -538,6 +539,134 @@ def make_path(seglists, line_color_bgra, line_width_wsd,
         p += b'\x01\xff\x00\x00\x00\x00\x64'
 
     return bytes(p)
+
+
+# ========== 渐变填充 ==========
+
+def _build_gradient_brush(stop1_bgra, stop2_bgra, pt1, pt2):
+    """
+    构建 59 字节 WSD 渐变 brush (仅支持水平 2-stop 线性渐变)
+
+    结构 (经 7 轮二进制实验验证):
+      +0:  8B 前缀 (00 00 00 00 00 13 FF 00)  固定
+      +8:  8B 签名 (20 00 01 01 02 00 00 00)  type=32, stop_count=2
+      +16: 4B stop1 BGRA
+      +20: 4B stop2 BGRA
+      +24: 16B 4个float32 (0.0, 1.0, 0.5, 0.5) 固定，不影响渲染
+      +40: 2B padding (00 00)
+      +42: 16B 矩形坐标 (pt1.x, pt1.y, pt2.x, pt2.y) 与段坐标一致
+      +58: 1B 0x64 结束标记
+
+    Args:
+        stop1_bgra: stop1 颜色 (BGRA 4字节)
+        stop2_bgra: stop2 颜色 (BGRA 4字节)
+        pt1: (x1, y1) 矩形左上角 (WSD坐标)
+        pt2: (x2, y2) 矩形右下角 (WSD坐标)
+            pt1.x < pt2.x → 从左到右 (stop1在左, stop2在右)
+            pt1.x > pt2.x → 从右到左
+    Returns:
+        bytes: 59 字节渐变 brush
+    """
+    b = bytearray()
+    # 前缀 (9B) — 与原始文件字节级一致
+    b += bytes([0x00, 0x00, 0x00, 0x00, 0xBC, 0x3F, 0x13, 0xFF, 0x00])
+    # 签名 (8B): u16(32) u8(1) u8(1) u32(stop_count=2)
+    b += struct.pack('<HBBi', 0x0020, 0x01, 0x01, 2)
+    # stop 颜色 (8B)
+    b += stop1_bgra
+    b += stop2_bgra
+    # float 参数 (16B, 固定值, 不影响渲染)
+    b += struct.pack('<ffff', 0.0, 1.0, 0.5, 0.5)
+    # padding (2B)
+    b += bytes([0x00, 0x00])
+    # 矩形坐标 (16B, 与 0x4281 段坐标一致)
+    b += struct.pack('<iiii', pt1[0], pt1[1], pt2[0], pt2[1])
+    # 结束标记 (1B)
+    b += bytes([0x64])
+    assert len(b) == 60, f"gradient brush size mismatch: {len(b)}"
+    return bytes(b)
+
+
+def _build_gradient_segment(pt1, pt2):
+    """
+    构建 0x4281 渐变矩形段 (20 字节)
+
+    原始文件字节级验证格式:
+      u16 tag (0x4281) | u8 mflag (0x00) | u8 npts (2) | 2×(i32 x, i32 y)
+
+    Args:
+        pt1: (x1, y1) 矩形对角点1 (WSD坐标)
+        pt2: (x2, y2) 矩形对角点2 (WSD坐标)
+    Returns:
+        bytes: 段头部 + 坐标 = 20 字节
+    """
+    b = bytearray()
+    b += struct.pack('<H', SEG_GRADIENT_RECT)  # tag u16
+    b += bytes([0x00, 0x02])                    # mflag=0, npts=2 (u8+u8，非u16)
+    b += struct.pack('<ii', pt1[0], pt1[1])      # pt1
+    b += struct.pack('<ii', pt2[0], pt2[1])      # pt2
+    assert len(b) == 20, f"gradient segment size mismatch: {len(b)}"
+    return bytes(b)
+
+
+def make_gradient_path(seglists, line_color_bgra, line_width_wsd,
+                       stop1_bgra, stop2_bgra, bbox_pt1, bbox_pt2):
+    """
+    构建渐变填充的 WSD 记录
+
+    生成两个独立记录 (列表返回):
+    1. 描边记录: 原始路径段 + 仅轮廓 brush（无填充）
+    2. 填充记录: 只有 0x4281 渐变矩形段 + 渐变 brush（无轮廓）
+
+    原始 WSD 中渐变形状只有单个 0x330f 记录（无可见轮廓，line_color alpha=0）。
+    但 SVG→WSD 转换需要同时保留可见轮廓和渐变填充，所以拆成两个记录。
+
+    Args:
+        seglists: 子路径列表（用于描边）
+        line_color_bgra: 线条颜色 (BGRA 4字节)
+        line_width_wsd: 线宽（WSD单位）
+        stop1_bgra: 渐变起始色 (BGRA 4字节)
+        stop2_bgra: 渐变终止色 (BGRA 4字节)
+        bbox_pt1: (x1, y1) 渐变矩形对角点1 (WSD坐标)
+        bbox_pt2: (x2, y2) 渐变矩形对角点2 (WSD坐标)
+    Returns:
+        list[bytes]: 描边记录和填充记录的列表（2个元素）
+    """
+    records = []
+
+    # 记录1: 描边（无填充）
+    stroke_record = bytearray()
+    stroke_record += struct.pack('<H', PATH_TAG)
+    stroke_record += HDR4
+    stroke_record += struct.pack('<H', 0xffff)
+    stroke_record += line_color_bgra
+    stroke_record += bytes(4)  # stroke = 0
+    stroke_record += struct.pack('<i', int(round(line_width_wsd)))
+    stroke_record += bytes([0x00])  # flag: 无填充
+    stroke_record += struct.pack('<H', len(seglists))
+    for shape_segs in seglists:
+        stroke_record += struct.pack('<i', len(shape_segs))
+        for seg in shape_segs:
+            stroke_record += seg
+    stroke_record += bytes([0x64])  # end marker
+    records.append(bytes(stroke_record))
+
+    # 记录2: 渐变填充（无轮廓线段）
+    fill_record = bytearray()
+    fill_record += struct.pack('<H', PATH_TAG)
+    fill_record += HDR4
+    fill_record += struct.pack('<H', 0xffff)
+    fill_record += bytes([0x00, 0x00, 0x00, 0x00])  # line_color (alpha=0, 不可见)
+    fill_record += bytes(4)  # stroke = 0
+    fill_record += struct.pack('<i', 0)  # linewidth = 0
+    fill_record += bytes([0x10])  # flag: 有填充
+    fill_record += struct.pack('<H', 1)  # 1 seglist
+    fill_record += struct.pack('<i', 1)  # seg_count = 1
+    fill_record += _build_gradient_segment(bbox_pt1, bbox_pt2)
+    fill_record += _build_gradient_brush(stop1_bgra, stop2_bgra, bbox_pt1, bbox_pt2)
+    records.append(bytes(fill_record))
+
+    return records
 
 
 # ========== 文件组装 ==========

@@ -748,20 +748,253 @@ def export_wsd_multi(canvas_list: List[CanvasData],
 # 其他格式导出（预留接口）
 # ============================================================
 
-def export_svg(canvas_data: CanvasData, output_path: str) -> None:
+def _bgr_to_hex(bgr) -> str:
+    """BGR 元组 -> #rrggbb 十六进制字符串"""
+    if bgr is None:
+        return 'none'
+    b, g, r = int(bgr[0]), int(bgr[1]), int(bgr[2])
+    return f'#{r:02x}{g:02x}{b:02x}'
+
+
+def _shape_to_svg_path(shape: Shape) -> str:
     """
-    导出为 SVG 格式（预留接口）
+    将 Shape 转换为 SVG path 的 d 属性字符串
+
+    支持所有 ShapeType:
+      - LINE/POLYLINE: M L L ... (开放)
+      - POLYGON/TRIANGLE/RECTANGLE: M L L ... Z (闭合)
+      - CIRCLE: 用4段贝塞尔曲线近似圆
+      - ARC: 用多段直线近似
+      - BEZIER: M C C C ... (贝塞尔链)
+      - ELLIPSE: 用贝塞尔曲线近似椭圆
+
+    参数:
+        shape: Shape 对象
+
+    返回:
+        str: SVG path d 属性字符串，无法转换时返回空字符串
+    """
+    import math
+
+    pts = shape.points
+    if not pts:
+        return ''
+
+    def fmt(v):
+        """格式化坐标值，去除多余小数"""
+        if v == int(v):
+            return str(int(v))
+        return f'{v:.2f}'
+
+    if shape.type in (ShapeType.LINE, ShapeType.POLYLINE):
+        if len(pts) < 2:
+            return ''
+        parts = [f'M {fmt(pts[0][0])} {fmt(pts[0][1])}']
+        for p in pts[1:]:
+            parts.append(f'L {fmt(p[0])} {fmt(p[1])}')
+        return ' '.join(parts)
+
+    elif shape.type in (ShapeType.POLYGON, ShapeType.TRIANGLE, ShapeType.RECTANGLE):
+        if len(pts) < 3:
+            return ''
+        parts = [f'M {fmt(pts[0][0])} {fmt(pts[0][1])}']
+        for p in pts[1:]:
+            parts.append(f'L {fmt(p[0])} {fmt(p[1])}')
+        parts.append('Z')
+        return ' '.join(parts)
+
+    elif shape.type == ShapeType.CIRCLE:
+        if not pts:
+            return ''
+        cx, cy = pts[0]
+        r = shape.extra.get('radius', 50)
+        k = 0.5522847498  # 贝塞尔圆近似常数
+        # 4段贝塞尔近似圆: 右→上→左→下→右
+        p_right = (cx + r, cy)
+        p_top = (cx, cy - r)
+        p_left = (cx - r, cy)
+        p_bottom = (cx, cy + r)
+        c1_ru = (cx + r, cy - r * k)
+        c2_ru = (cx + r * k, cy - r)
+        c1_ul = (cx - r * k, cy - r)
+        c2_ul = (cx - r, cy - r * k)
+        c1_ld = (cx - r, cy + r * k)
+        c2_ld = (cx - r * k, cy + r)
+        c1_dr = (cx + r * k, cy + r)
+        c2_dr = (cx + r, cy + r * k)
+        return (
+            f'M {fmt(p_right[0])} {fmt(p_right[1])} '
+            f'C {fmt(c1_ru[0])} {fmt(c1_ru[1])} {fmt(c2_ru[0])} {fmt(c2_ru[1])} {fmt(p_top[0])} {fmt(p_top[1])} '
+            f'C {fmt(c1_ul[0])} {fmt(c1_ul[1])} {fmt(c2_ul[0])} {fmt(c2_ul[1])} {fmt(p_left[0])} {fmt(p_left[1])} '
+            f'C {fmt(c1_ld[0])} {fmt(c1_ld[1])} {fmt(c2_ld[0])} {fmt(c2_ld[1])} {fmt(p_bottom[0])} {fmt(p_bottom[1])} '
+            f'C {fmt(c1_dr[0])} {fmt(c1_dr[1])} {fmt(c2_dr[0])} {fmt(c2_dr[1])} {fmt(p_right[0])} {fmt(p_right[1])} '
+            f'Z'
+        )
+
+    elif shape.type == ShapeType.ARC:
+        if not pts:
+            return ''
+        cx, cy = pts[0]
+        r = shape.extra.get('radius', 50)
+        start_angle = shape.extra.get('start_angle', 0.0)
+        end_angle = shape.extra.get('end_angle', math.pi)
+        n_segs = max(8, int(abs(end_angle - start_angle) / 0.2))
+        arc_pts = []
+        for i in range(n_segs + 1):
+            t = start_angle + (end_angle - start_angle) * i / n_segs
+            x = cx + r * math.cos(t)
+            y = cy + r * math.sin(t)
+            arc_pts.append((x, y))
+        parts = [f'M {fmt(arc_pts[0][0])} {fmt(arc_pts[0][1])}']
+        for p in arc_pts[1:]:
+            parts.append(f'L {fmt(p[0])} {fmt(p[1])}')
+        return ' '.join(parts)
+
+    elif shape.type == ShapeType.ELLIPSE:
+        if not pts:
+            return ''
+        cx, cy = pts[0]
+        rx = shape.extra.get('rx', 50)
+        ry = shape.extra.get('ry', 50)
+        k = 0.5522847498
+        # 4段贝塞尔近似椭圆
+        return (
+            f'M {fmt(cx + rx)} {fmt(cy)} '
+            f'C {fmt(cx + rx)} {fmt(cy - ry * k)} {fmt(cx + rx * k)} {fmt(cy - ry)} {fmt(cx)} {fmt(cy - ry)} '
+            f'C {fmt(cx - rx * k)} {fmt(cy - ry)} {fmt(cx - rx)} {fmt(cy - ry * k)} {fmt(cx - rx)} {fmt(cy)} '
+            f'C {fmt(cx - rx)} {fmt(cy + ry * k)} {fmt(cx - rx * k)} {fmt(cy + ry)} {fmt(cx)} {fmt(cy + ry)} '
+            f'C {fmt(cx + rx * k)} {fmt(cy + ry)} {fmt(cx + rx)} {fmt(cy + ry * k)} {fmt(cx + rx)} {fmt(cy)} '
+            f'Z'
+        )
+
+    elif shape.type == ShapeType.BEZIER:
+        if len(pts) < 4:
+            return ''
+        parts = [f'M {fmt(pts[0][0])} {fmt(pts[0][1])}']
+        if len(pts) == 4:
+            # 单段贝塞尔
+            parts.append(
+                f'C {fmt(pts[1][0])} {fmt(pts[1][1])} '
+                f'{fmt(pts[2][0])} {fmt(pts[2][1])} '
+                f'{fmt(pts[3][0])} {fmt(pts[3][1])}'
+            )
+        else:
+            # 多段连续贝塞尔链 (每3个点一段)
+            i = 0
+            while i + 3 < len(pts):
+                parts.append(
+                    f'C {fmt(pts[i+1][0])} {fmt(pts[i+1][1])} '
+                    f'{fmt(pts[i+2][0])} {fmt(pts[i+2][1])} '
+                    f'{fmt(pts[i+3][0])} {fmt(pts[i+3][1])}'
+                )
+                i += 3
+        return ' '.join(parts)
+
+    return ''
+
+
+def export_svg(canvas_data: CanvasData, output_path: str,
+               canvas_size_mm: Optional[Tuple[float, float]] = None) -> None:
+    """
+    导出为 SVG 格式
+
+    将 CanvasData 中的 Shape 和 TextAnnotation 转换为 SVG 文件。
+    支持所有形状类型、填充色、线条颜色、文字标注。
+
+    坐标系: SVG 的 Y 轴向下，与 CanvasData 一致，无需翻转。
+    画布尺寸根据 bbox 自动计算，也可通过 canvas_size_mm 指定。
 
     参数:
         canvas_data: CanvasData 画布数据
         output_path: 输出 SVG 文件路径
-
-    TODO:
-        - 实现 Shape 到 SVG path 的转换
-        - 实现 TextAnnotation 到 SVG text 的转换
-        - 支持样式属性映射
+        canvas_size_mm: 画布尺寸 (宽mm, 高mm)，None 则根据内容自适应
     """
-    raise NotImplementedError("SVG 导出功能尚未实现")
+    import xml.etree.ElementTree as ET
+
+    # 计算画布边界
+    bbox = canvas_data.bbox
+    if bbox and len(bbox) == 4:
+        min_x, min_y, max_x, max_y = bbox
+    else:
+        # 从 shapes 中计算 bbox
+        all_x, all_y = [], []
+        for shape in canvas_data.shapes:
+            for px, py in shape.points:
+                all_x.append(px)
+                all_y.append(py)
+        if not all_x:
+            min_x, min_y, max_x, max_y = 0, 0, 100, 100
+        else:
+            min_x, min_y = min(all_x), min(all_y)
+            max_x, max_y = max(all_x), max(all_y)
+
+    width = max(max_x - min_x, 1)
+    height = max(max_y - min_y, 1)
+
+    # 创建 SVG 根元素
+    svg = ET.Element('svg', {
+        'xmlns': 'http://www.w3.org/2000/svg',
+        'version': '1.1',
+        'width': str(width),
+        'height': str(height),
+        'viewBox': f'{min_x} {min_y} {width} {height}',
+    })
+
+    # 添加白色背景矩形
+    bg = ET.SubElement(svg, 'rect', {
+        'x': str(min_x),
+        'y': str(min_y),
+        'width': str(width),
+        'height': str(height),
+        'fill': 'white',
+    })
+
+    # 转换每个 Shape
+    for shape in canvas_data.shapes:
+        d = _shape_to_svg_path(shape)
+        if not d:
+            continue
+
+        attrs = {'d': d}
+
+        # 填充色
+        if shape.fill_color is not None:
+            attrs['fill'] = _bgr_to_hex(shape.fill_color)
+        else:
+            attrs['fill'] = 'none'
+
+        # 线条颜色
+        if shape.line_color is not None:
+            attrs['stroke'] = _bgr_to_hex(shape.line_color)
+            attrs['stroke-width'] = str(shape.line_width)
+        else:
+            attrs['stroke'] = 'none'
+
+        ET.SubElement(svg, 'path', attrs)
+
+    # 转换文字标注
+    for ann in canvas_data.annotations:
+        text_elem = ET.SubElement(svg, 'text', {
+            'x': str(ann.x),
+            'y': str(ann.y),
+            'font-size': str(ann.font_size),
+            'fill': 'black',
+        })
+        # 字体样式
+        font_style = []
+        if ann.bold:
+            font_style.append('bold')
+        if ann.italic:
+            font_style.append('italic')
+        if font_style:
+            text_elem.set('font-style', ' '.join(font_style))
+
+        text_elem.text = ann.text
+
+    # 写入文件
+    tree = ET.ElementTree(svg)
+    ET.indent(tree, space='  ', level=0)
+    tree.write(output_path, encoding='utf-8', xml_declaration=True)
 
 
 def export_latex(canvas_data: CanvasData, output_path: str) -> None:

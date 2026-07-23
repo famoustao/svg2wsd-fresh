@@ -86,6 +86,8 @@ jobs:
             --hidden-import defusedxml `
             --hidden-import tinycss2 `
             --hidden-import pillow `
+            --hidden-import vtracer `
+            --hidden-import image_to_svg `
             app.py
 
       - name: Copy label samples (skeleton)

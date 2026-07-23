@@ -6,5 +6,8 @@ numpy>=1.20.0
 opencv-python>=4.5.0
 cairosvg>=2.7.0
 
+# vtracer 图片转SVG引擎 (漫画模式vtracer子模式)
+vtracer>=0.6.0
+
 # 打包工具（仅构建时需要）
 pyinstaller>=5.0.0

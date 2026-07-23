@@ -714,9 +714,10 @@ def _parse_svg_file(svg_path):
 
     # 解析渐变定义（支持 linearGradient 和 radialGradient）
     # 以及通过 xlink:href 引用的渐变
-    gradient_colors = {}  # {gradient_id: first_stop_color}
+    gradient_colors = {}  # {gradient_id: first_stop_color (兼容)}
+    gradient_infos = {}   # {gradient_id: 完整渐变信息 dict}
 
-    # 第一遍：收集所有渐变定义
+    # 第一遍：收集所有渐变定义（含方向和 stop offset）
     gradient_defs = {}
     for elem in root.iter():
         tag = elem.tag.split('}')[-1] if '}' in elem.tag else elem.tag
@@ -730,39 +731,210 @@ def _parse_svg_file(svg_path):
                         # 从 style 属性提取 stop-color
                         style = stop.get('style', '')
                         m = re.search(r'stop-color:([^;]+)', style)
+                        color_str = ''
                         if m:
-                            stops.append(m.group(1).strip())
+                            color_str = m.group(1).strip()
                         else:
                             sc = stop.get('stop-color', '')
                             if sc:
-                                stops.append(sc)
+                                color_str = sc
+                        # 提取 stop-opacity
+                        m_op = re.search(r'stop-opacity:([^;]+)', style)
+                        opacity_str = ''
+                        if m_op:
+                            opacity_str = m_op.group(1).strip()
+                        else:
+                            opacity_str = stop.get('stop-opacity', '1')
+                        # 提取 offset
+                        offset_raw = stop.get('offset', '0')
+                        offset_pct = offset_raw.rstrip('%') if offset_raw.endswith('%') else offset_raw
+                        offset = float(offset_pct) / 100.0 if offset_raw.endswith('%') else float(offset_pct)
+                        if offset > 1.0:
+                            offset = offset / 100.0  # 兜底: 无百分号但值 > 1
+                        stops.append({
+                            'color': color_str,
+                            'opacity': opacity_str,
+                            'offset': offset,
+                        })
+
+                # 解析渐变方向属性 (linearGradient)
+                x1 = elem.get('x1', '0%')
+                y1 = elem.get('y1', '0%')
+                x2 = elem.get('x2', '100%')
+                y2 = elem.get('y2', '0%')
                 # 检查 xlink:href 引用
                 xlink = elem.get('{http://www.w3.org/1999/xlink}href', '')
-                gradient_defs[gid] = {'stops': stops, 'ref': xlink[1:] if xlink.startswith('#') else None}
+                gradient_defs[gid] = {
+                    'type': tag,
+                    'stops': stops,
+                    'ref': xlink[1:] if xlink.startswith('#') else None,
+                    'x1': x1, 'y1': y1, 'x2': x2, 'y2': y2,
+                }
 
-    # 第二遍：解析引用关系，获取最终颜色
-    def _resolve_gradient(gid):
-        """解析渐变ID，返回第一个stop的颜色"""
-        if gid in gradient_colors:
-            return gradient_colors[gid]
+    # 第二遍：解析引用关系，获取完整渐变信息
+    def _resolve_gradient_info(gid):
+        """解析渐变ID，返回完整渐变信息或None"""
+        if gid in gradient_infos:
+            return gradient_infos[gid]
         if gid not in gradient_defs:
             return None
         gdef = gradient_defs[gid]
-        # 如果有引用，先解析引用
+        # 如果有引用，先解析引用获取默认值
+        ref_info = None
         if gdef['ref'] and gdef['ref'] in gradient_defs:
-            ref_color = _resolve_gradient(gdef['ref'])
-            if ref_color:
-                gradient_colors[gid] = ref_color
-                return ref_color
-        # 使用自己的 stops
-        if gdef['stops']:
-            color = gdef['stops'][0]
-            gradient_colors[gid] = color
-            return color
+            ref_info = _resolve_gradient_info(gdef['ref'])
+
+        # 合并引用属性
+        merged_stops = list(gdef['stops']) if gdef['stops'] else (list(ref_info['stops']) if ref_info else [])
+        if gdef['stops'] and ref_info:
+            # 当前定义有 stops 则用自己的，否则继承引用的
+            pass
+
+        info = {
+            'type': gdef['type'],
+            'stops': merged_stops,
+            'x1': gdef['x1'], 'y1': gdef['y1'],
+            'x2': gdef['x2'], 'y2': gdef['y2'],
+        }
+        gradient_infos[gid] = info
+        return info
+
+    def _is_horizontal_2stop_gradient(grad_info):
+        """
+        判断渐变是否可以映射到 WSD 水平 2-stop 渐变
+
+        条件:
+        1. linearGradient 类型
+        2. 恰好 2 个 stop
+        3. 水平方向: y1==y2 (百分比或数值相同)
+
+        Returns:
+            (is_valid, stop1_hex, stop2_hex, reversed) 或 (False, None, None, None)
+        """
+        if not grad_info:
+            return (False, None, None, None)
+        if grad_info['type'] != 'linearGradient':
+            return (False, None, None, None)
+        if len(grad_info['stops']) != 2:
+            return (False, None, None, None)
+
+        # 解析 y1/y2 判断是否水平
+        y1 = grad_info['y1']
+        y2 = grad_info['y2']
+        try:
+            # 处理百分比
+            y1_val = float(y1.rstrip('%')) / 100.0 if y1.endswith('%') else float(y1)
+            y2_val = float(y2.rstrip('%')) / 100.0 if y2.endswith('%') else float(y2)
+        except (ValueError, TypeError):
+            return (False, None, None, None)
+
+        if abs(y1_val - y2_val) > 0.01:  # 非水平方向
+            return (False, None, None, None)
+
+        # 解析 x1/x2 判断方向
+        x1 = grad_info['x1']
+        x2 = grad_info['x2']
+        try:
+            x1_val = float(x1.rstrip('%')) / 100.0 if x1.endswith('%') else float(x1)
+            x2_val = float(x2.rstrip('%')) / 100.0 if x2.endswith('%') else float(x2)
+        except (ValueError, TypeError):
+            x1_val, x2_val = 0.0, 1.0
+
+        # 获取 stop 颜色
+        s1_color = _resolve_color_name(grad_info['stops'][0]['color'])
+        s2_color = _resolve_color_name(grad_info['stops'][1]['color'])
+
+        if not s1_color or not s2_color:
+            return (False, None, None, None)
+
+        # WSD 渐变始终从左到右: stop1 在 x 较小的一侧
+        # 如果 SVG x1 < x2: stop1 在左 → WSD 的 stop1=stop1, stop2=stop2
+        # 如果 SVG x1 > x2: stop1 在右 → WSD 的 stop1=stop2, stop2=stop1 (反转)
+        reversed = x1_val > x2_val
+        if reversed:
+            return (True, s2_color, s1_color, True)
+        else:
+            return (True, s1_color, s2_color, False)
+
+    def _resolve_color_name(color_str):
+        """将颜色名称/rgb/rgba/hex 解析为 #rrggbb 格式"""
+        if not color_str:
+            return None
+        color_str = color_str.strip().lower()
+        # 已经是 hex 格式
+        if color_str.startswith('#'):
+            if len(color_str) == 4:  # #rgb → #rrggbb
+                return f'#{color_str[1]*2}{color_str[2]*2}{color_str[3]*2}'
+            if len(color_str) == 7:
+                return color_str
+            return None
+        # rgb() / rgba() 格式
+        m = re.match(r'rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)', color_str)
+        if m:
+            r, g, b = int(m.group(1)), int(m.group(2)), int(m.group(3))
+            return f'#{r:02x}{g:02x}{b:02x}'
+        # 颜色名称 (从 SVG_COLOR_NAMES 查找)
+        try:
+            from wsd_gt_build import SVG_COLOR_NAMES
+            if color_str in SVG_COLOR_NAMES:
+                return SVG_COLOR_NAMES[color_str]
+        except ImportError:
+            pass
         return None
 
+    def _weighted_average_color(grad_info):
+        """计算渐变的加权平均代表色（兜底方案）"""
+        if not grad_info or not grad_info['stops']:
+            return '#000000'
+        stops = grad_info['stops']
+        # 如果只有一个 stop
+        if len(stops) == 1:
+            c = _resolve_color_name(stops[0]['color'])
+            return c or '#000000'
+        # 按 offset 区间加权
+        total_r, total_g, total_b = 0.0, 0.0, 0.0
+        total_weight = 0.0
+        for i in range(len(stops)):
+            s = stops[i]
+            # 解析颜色
+            c = _resolve_color_name(s['color'])
+            if not c:
+                continue
+            r = int(c[1:3], 16)
+            g = int(c[3:5], 16)
+            b = int(c[5:7], 16)
+            # 计算 weight (stop 所占区间)
+            offset = s['offset']
+            if i == 0:
+                w = offset if len(stops) > 1 else 1.0
+            elif i == len(stops) - 1:
+                w = 1.0 - stops[i-1]['offset']
+            else:
+                w = offset - stops[i-1]['offset']
+            total_r += r * w
+            total_g += g * w
+            total_b += b * w
+            total_weight += w
+        if total_weight == 0:
+            return '#000000'
+        r = int(round(total_r / total_weight))
+        g = int(round(total_g / total_weight))
+        b = int(round(total_b / total_weight))
+        return f'#{min(r,255):02x}{min(g,255):02x}{min(b,255):02x}'
+
+    # 解析所有渐变（同时生成兼容的 gradient_colors）
     for gid in gradient_defs:
-        _resolve_gradient(gid)
+        grad_info = _resolve_gradient_info(gid)
+        if grad_info:
+            # 兼容旧逻辑：gradient_colors 仍存第一个 stop 颜色
+            if grad_info['stops']:
+                c = _resolve_color_name(grad_info['stops'][0]['color'])
+                if c:
+                    gradient_colors[gid] = c
+            # 如果不是水平 2-stop，计算加权平均色作为兜底
+            valid, s1, s2, rev = _is_horizontal_2stop_gradient(grad_info)
+            if not valid and grad_info['stops']:
+                gradient_colors[gid] = _weighted_average_color(grad_info)
 
     def _get_elem_classes(elem):
         """获取元素的 CSS 类名列表"""
@@ -791,6 +963,7 @@ def _parse_svg_file(svg_path):
         return default
 
     def _get_fill(elem, parent_fill='#000000'):
+        """获取元素填充色，返回 (color_hex_or_none, gradient_id_or_none)"""
         fill = _get_style_value(elem, 'fill')
         if fill and fill != 'none':
             # 处理渐变引用: url(#gradientId)
@@ -800,11 +973,11 @@ def _parse_svg_file(svg_path):
                     gid = m.group(1)
                     grad_color = gradient_colors.get(gid)
                     if grad_color:
-                        return grad_color
-            return fill
+                        return (grad_color, gid)
+            return (fill, None)
         if fill == 'none':
-            return 'none'
-        return parent_fill
+            return ('none', None)
+        return (parent_fill, None)
 
     def _get_stroke(elem, parent_stroke='none'):
         stroke = _get_style_value(elem, 'stroke')
@@ -1162,11 +1335,16 @@ def _parse_svg_file(svg_path):
 
     all_subpaths = []
     all_colors = []
+    all_gradient_ids = []  # 每个子路径对应的渐变 ID（或 None）
     all_is_stroke = []    # True=描边路径, False=填充路径
     all_stroke_widths = []
     path_group_ids = []   # 每个子路径所属的SVG path组ID（同一path的子路径属于同一组，构成复合路径/孔洞）
 
     for path_idx, (d, fill, stroke, stroke_width, transform) in enumerate(paths):
+        # fill 现在是 (color_hex, gradient_id_or_none) 元组
+        fill_color, fill_grad_id = fill if isinstance(fill, tuple) else (fill, None)
+        stroke_color, _ = stroke if isinstance(stroke, tuple) else (stroke, None)
+
         parser = SVGPathParser(d)
         subpaths = parser.parse()
         for sp in subpaths:
@@ -1183,17 +1361,20 @@ def _parse_svg_file(svg_path):
             all_subpaths.append(tsp)
             path_group_ids.append(path_idx)
             # 优先使用fill颜色（填充路径），如果fill=none则用stroke颜色（描边路径）
-            if fill != 'none':
-                all_colors.append(fill)
+            if fill_color != 'none':
+                all_colors.append(fill_color)
+                all_gradient_ids.append(fill_grad_id)
                 all_is_stroke.append(False)
                 all_stroke_widths.append(stroke_width)
-            elif stroke != 'none':
-                all_colors.append(stroke)
+            elif stroke_color != 'none':
+                all_colors.append(stroke_color)
+                all_gradient_ids.append(None)
                 all_is_stroke.append(True)
                 all_stroke_widths.append(stroke_width)
             else:
                 # 既没有fill也没有stroke，默认黑色填充
                 all_colors.append('#000000')
+                all_gradient_ids.append(None)
                 all_is_stroke.append(False)
                 all_stroke_widths.append(stroke_width)
 
@@ -1204,8 +1385,25 @@ def _parse_svg_file(svg_path):
     all_y = [y for sp in all_subpaths for x, y in sp]
     bbox = (min(all_x), min(all_y), max(all_x), max(all_y))
 
+    # 预计算可原生渐变的 gradient_ids → WSD 渐变参数
+    # gradient_native_info: {gid: (stop1_bgra_4B, stop2_bgra_4B)} 或 None
+    gradient_native_info = {}
+    for gid in set(g for g in all_gradient_ids if g is not None):
+        if gid in gradient_infos:
+            valid, s1_hex, s2_hex, rev = _is_horizontal_2stop_gradient(gradient_infos[gid])
+            if valid and s1_hex and s2_hex:
+                # 转换 hex → BGRA 4字节
+                def _hex_to_bgra(h):
+                    h = h.lstrip('#')
+                    r = int(h[0:2], 16)
+                    g = int(h[2:4], 16)
+                    b = int(h[4:6], 16)
+                    return bytes([b, g, r, 0xff])
+                gradient_native_info[gid] = (_hex_to_bgra(s1_hex), _hex_to_bgra(s2_hex))
+
     # 保存描边信息到全局（供convert_to_wsd使用）
-    return all_subpaths, all_colors, bbox, all_is_stroke, all_stroke_widths, path_group_ids
+    # 注意: gradient_native_info 作为第8个返回值传递（通过 extra_info）
+    return all_subpaths, all_colors, bbox, all_is_stroke, all_stroke_widths, path_group_ids, all_gradient_ids, gradient_native_info
 
 
 # ========== 图像预处理增强 ==========
@@ -2324,10 +2522,12 @@ def parse_input_file(file_path, img_threshold=128, img_turdsize=2,
         }
 
     if ext in SVG_EXTENSIONS:
-        subpaths, colors, bbox, is_stroke, stroke_widths, path_group_ids = _parse_svg_file(file_path)
+        subpaths, colors, bbox, is_stroke, stroke_widths, path_group_ids, gradient_ids, gradient_native_info = _parse_svg_file(file_path)
         extra_info['is_stroke'] = is_stroke
         extra_info['stroke_widths'] = stroke_widths
         extra_info['path_group_ids'] = path_group_ids
+        extra_info['gradient_ids'] = gradient_ids
+        extra_info['gradient_native_info'] = gradient_native_info
         return subpaths, colors, bbox, 'svg', extra_info
     elif ext in IMAGE_EXTENSIONS:
         if img_color:
@@ -2357,10 +2557,12 @@ def parse_input_file(file_path, img_threshold=128, img_turdsize=2,
     else:
         # 尝试当作SVG处理
         try:
-            subpaths, colors, bbox, is_stroke, stroke_widths, path_group_ids = _parse_svg_file(file_path)
+            subpaths, colors, bbox, is_stroke, stroke_widths, path_group_ids, gradient_ids, gradient_native_info = _parse_svg_file(file_path)
             extra_info['is_stroke'] = is_stroke
             extra_info['stroke_widths'] = stroke_widths
             extra_info['path_group_ids'] = path_group_ids
+            extra_info['gradient_ids'] = gradient_ids
+            extra_info['gradient_native_info'] = gradient_native_info
             return subpaths, colors, bbox, 'svg', extra_info
         except:
             try:
@@ -2843,6 +3045,49 @@ def convert_to_wsd(input_path, wsd_path, color_mode='rainbow',
 
     if progress_cb: progress_cb("构建WSD记录...", 55)
 
+    # 导入段构建函数（用于渐变路径的轮廓线段）
+    from wsd_gt_build import make_bezier_seg as _make_bezier_seg
+    from wsd_gt_build import make_line_seg as _make_line_seg
+
+    # ====== 渐变填充预计算 ======
+    gradient_ids_list = extra_info.get('gradient_ids', [None] * len(all_subpaths))
+    # 尝试从 extra_info 获取预解析的渐变信息
+    gradient_native_info = extra_info.get('gradient_native_info', {})
+
+    # 渐变路径构建辅助
+    def _build_bezier_seglists(wsd_subpaths):
+        """将 WSD 坐标子路径列表转换为贝塞尔段列表"""
+        seglists = []
+        for wsd_sp in wsd_subpaths:
+            segs = []
+            if len(wsd_sp) >= 4:
+                segs.append(_make_bezier_seg(wsd_sp[0], wsd_sp[1], wsd_sp[2], wsd_sp[3]))
+                i = 4
+                while i + 2 < len(wsd_sp):
+                    segs.append(_make_bezier_seg(wsd_sp[i-1], wsd_sp[i], wsd_sp[i+1], wsd_sp[i+2]))
+                    i += 3
+            elif len(wsd_sp) >= 2:
+                segs.append(_make_line_seg(wsd_sp))
+            seglists.append(segs)
+        return seglists
+
+    def _emit_gradient_record(seglists, path_idx, native_grad,
+                               line_color_bgra, lw, wsd_sp):
+        """构建并追加渐变填充的 WSD 记录，返回记录数"""
+        from wsd_gt_build import make_gradient_path
+        xs = [p[0] for p in wsd_sp]
+        ys = [p[1] for p in wsd_sp]
+        pt1 = (min(xs), min(ys))
+        pt2 = (max(xs), max(ys))
+        stop1_bgra, stop2_bgra = native_grad
+        recs = make_gradient_path(
+            seglists, line_color_bgra, lw,
+            stop1_bgra, stop2_bgra, pt1, pt2
+        )
+        for rec in recs:
+            records_data.extend(rec)
+        return len(recs)
+
     records_data = bytearray()
     num_objects = 0
     black_idx = bytes([0x01, 0xff, 0x00, 0x00])
@@ -2888,6 +3133,10 @@ def convert_to_wsd(input_path, wsd_path, color_mode='rainbow',
             is_stroke_only = (ref_i < len(is_stroke_list) and is_stroke_list[ref_i])
             color = fill_colors[ref_i] if ref_i < len(fill_colors) else None
 
+            # 检查是否有可用的原生渐变
+            grad_id = gradient_ids_list[ref_i] if ref_i < len(gradient_ids_list) else None
+            native_grad = gradient_native_info.get(grad_id) if grad_id else None
+
             # 转换所有子路径到WSD坐标
             wsd_sps = []
             valid_indices = []
@@ -2917,16 +3166,27 @@ def convert_to_wsd(input_path, wsd_path, color_mode='rainbow',
                 num_objects += 1
             else:
                 # 填充路径
+                # 构建贝塞尔段用于轮廓线（渐变路径也需要轮廓）
+                all_bezier_seglists = _build_bezier_seglists(wsd_sps)
+                outline_color_bgra = (color + bytes([0xff])) if color else bytes([0x00, 0x00, 0x00, 0xff])
+
                 if _should_split and len(wsd_sps) > 1:
                     # 复合路径拆分：每个子路径作为独立path对象
-                    # 保留原始填充色（不使用描边模式），避免WSD多seglist孔径问题
                     if color is not None:
                         for sp_idx, wsd_sp in enumerate(wsd_sps):
-                            records_data += build_native_bezier_compound(
-                                [wsd_sp], color, linewidth,
-                                is_stroke_only=False
-                            )
-                            num_objects += 1
+                            seglists = _build_bezier_seglists([wsd_sp])
+                            if native_grad and len(valid_indices) > sp_idx:
+                                grad_idx = valid_indices[sp_idx]
+                                n = _emit_gradient_record(
+                                    seglists, grad_idx, native_grad,
+                                    outline_color_bgra, linewidth, wsd_sp)
+                                num_objects += n
+                            else:
+                                records_data += build_native_bezier_compound(
+                                    [wsd_sp], color, linewidth,
+                                    is_stroke_only=False
+                                )
+                                num_objects += 1
                     elif outline:
                         bgr_black = bytes([0x00, 0x00, 0x00])
                         for wsd_sp in wsd_sps:
@@ -2936,22 +3196,24 @@ def convert_to_wsd(input_path, wsd_path, color_mode='rainbow',
                             )
                             num_objects += 1
                 else:
-                    # 彩色SVG或单子路径：使用填充模式（复合路径合并）
+                    # 单子路径：使用填充模式
                     if color is not None:
-                        if outline:
-                            bgr_black = bytes([0x00, 0x00, 0x00])
-                            records_data += build_native_bezier_compound(
-                                wsd_sps, color, linewidth,
-                                is_stroke_only=False,
-                                outline_color=bgr_black,
-                                outline_linewidth=linewidth
+                        if native_grad and len(wsd_sps) >= 1:
+                            # 使用原生渐变填充
+                            n = _emit_gradient_record(
+                                _build_bezier_seglists(wsd_sps),
+                                valid_indices[0] if valid_indices else 0,
+                                native_grad,
+                                (color + bytes([0xff])) if color else bytes([0x00,0x00,0x00,0xff]),
+                                linewidth, wsd_sps[0]
                             )
+                            num_objects += n
                         else:
                             records_data += build_native_bezier_compound(
                                 wsd_sps, color, linewidth,
-                                is_stroke_only=False
+                                is_stroke_only=False,
                             )
-                        num_objects += 1
+                            num_objects += 1
                     elif outline:
                         bgr_black = bytes([0x00, 0x00, 0x00])
                         records_data += build_native_bezier_compound(

@@ -2,12 +2,14 @@
 """
 漫画模式处理模块
 
-提供三种漫画风格的矢量化处理：
+提供四种漫画风格的矢量化处理：
 1. 黑白线稿模式 (line_art): 灰度化 → 二值化 → 形态学去噪 → 骨架化 → 矢量化
 2. 实际颜色模式 (actual_color): 颜色量化 → 区域提取 → 轮廓矢量化 → 填充对应颜色
 3. 彩色模式 (color_fill): 线稿矢量化 → 随机填充颜色
+4. vtracer模式 (vtracer): 基于vtracer引擎的图片转SVG → 贝塞尔路径 (支持任意图片)
 
 调用 svg2wsd_core 中的现有矢量化函数完成核心处理。
+vtracer模式调用 image_to_svg 模块完成图片转SVG。
 """
 
 import os
@@ -44,6 +46,7 @@ def _ensure_core_loaded():
 MODE_LINE_ART = 'line_art'        # 黑白线稿模式
 MODE_ACTUAL_COLOR = 'actual_color'  # 实际颜色模式
 MODE_COLOR_FILL = 'color_fill'      # 彩色填充模式
+MODE_VTRACER = 'vtracer'            # vtracer 矢量化模式
 
 
 # ============================================================
@@ -102,6 +105,8 @@ class ComicMode:
             return self._process_actual_color(image_path, params)
         elif mode_type == MODE_COLOR_FILL:
             return self._process_color_fill(image_path, params)
+        elif mode_type == MODE_VTRACER:
+            return self._process_vtracer(image_path, params)
         else:
             raise ValueError(f"不支持的漫画模式: {mode_type}")
 
@@ -289,6 +294,102 @@ class ComicMode:
         canvas_data = self._geo_paths_to_canvas_data(
             geo_paths, text_annotations, image_path,
             fill_colors=colors
+        )
+
+        return canvas_data
+
+    # --------------------------------------------------------
+    # vtracer 矢量化模式
+    # --------------------------------------------------------
+
+    def _process_vtracer(self, image_path: str, params: Dict[str, Any]) -> CanvasData:
+        """
+        vtracer 矢量化模式处理
+
+        使用 visioncortex/vtracer 引擎将图片转为 SVG，再解析为贝塞尔路径。
+        vtracer 采用层级聚类 + 保角4点细分 + 贝塞尔样条拟合的完整流水线，
+        相比 potrace 支持完整彩色图像处理，且全流程 O(n) 线性算法。
+
+        处理流程:
+          1. vtracer 将光栅图转为 SVG (层级聚类 + 矢量追踪)
+          2. 现有 SVG 解析器提取贝塞尔路径和颜色
+          3. 装配为 CanvasData
+
+        参数:
+            image_path: 输入图像路径
+            params: 参数字典
+                - vtracer_preset: 预设名称 ('bw'/'poster'/'photo'/'comic'/'pixel')
+                - vtracer_colormode: 'color' 或 'binary'
+                - vtracer_mode: 'spline'/'polygon'/'none'
+                - vtracer_filter_speckle: 去噪阈值 (默认4)
+                - vtracer_color_precision: 颜色精度 1-8 (默认6)
+                - vtracer_layer_difference: 颜色差异阈值 (默认16)
+                - vtracer_corner_threshold: 角点角度 0-180 (默认60)
+                - vtracer_length_threshold: 线段长度 3.5-10 (默认4.0)
+                - vtracer_max_iterations: 最大迭代次数 (默认10)
+                - vtracer_splice_threshold: 样条切分阈值 (默认45)
+                - vtracer_path_precision: 小数位数 (默认3)
+                - vtracer_max_size: 图片最大边长 (默认2000, 0=不限制)
+
+        返回:
+            CanvasData: 矢量化后的画布数据（带颜色填充）
+        """
+        _ensure_core_loaded()
+
+        # 导入 vtracer 集成模块
+        import image_to_svg as vtracer_engine
+
+        if not vtracer_engine.is_available():
+            raise RuntimeError(
+                "vtracer 未安装。请运行: pip install vtracer\n"
+                "或使用其他模式 (line_art/actual_color/color_fill)"
+            )
+
+        # 提取参数
+        preset = params.get('vtracer_preset', None)
+        max_size = params.get('vtracer_max_size', 2000)
+
+        # 构建 vtracer 参数 (从 params 中提取 vtracer_ 前缀的参数)
+        vtracer_kwargs = {}
+        param_map = {
+            'vtracer_colormode': 'colormode',
+            'vtracer_hierarchical': 'hierarchical',
+            'vtracer_mode': 'mode',
+            'vtracer_filter_speckle': 'filter_speckle',
+            'vtracer_color_precision': 'color_precision',
+            'vtracer_layer_difference': 'layer_difference',
+            'vtracer_corner_threshold': 'corner_threshold',
+            'vtracer_length_threshold': 'length_threshold',
+            'vtracer_max_iterations': 'max_iterations',
+            'vtracer_splice_threshold': 'splice_threshold',
+            'vtracer_path_precision': 'path_precision',
+        }
+        for param_key, vtracer_key in param_map.items():
+            if param_key in params:
+                vtracer_kwargs[vtracer_key] = params[param_key]
+
+        # 调用 vtracer 转换: 图片 → SVG → 贝塞尔路径
+        subpaths, colors, bbox, extra_info = vtracer_engine.convert_image_to_wsd_paths(
+            image_path,
+            preset=preset,
+            max_size=max_size,
+            **vtracer_kwargs
+        )
+
+        # 装配为 CanvasData
+        # vtracer 生成的 SVG 路径都是填充路径 (is_stroke=False)
+        # 颜色直接来自 SVG 的 fill 属性
+        is_stroke = extra_info.get('is_stroke', [False] * len(subpaths))
+        stroke_widths = extra_info.get('stroke_widths', [1.0] * len(subpaths))
+        path_group_ids = extra_info.get('path_group_ids', list(range(len(subpaths))))
+
+        canvas_data = self._geo_paths_to_canvas_data(
+            subpaths, [], image_path,
+            fill_colors=colors,
+            is_stroke=is_stroke,
+            stroke_widths=stroke_widths,
+            path_group_ids=path_group_ids,
+            compound_mode=params.get('compound_mode', 'auto'),
         )
 
         return canvas_data
@@ -673,6 +774,8 @@ def process(image_path: str, mode_type: str, params: Optional[Dict[str, Any]] = 
         return processor._process_actual_color(image_path, params)
     elif mode_type == MODE_COLOR_FILL:
         return processor._process_color_fill(image_path, params)
+    elif mode_type == MODE_VTRACER:
+        return processor._process_vtracer(image_path, params)
     else:
         raise ValueError(f"不支持的漫画模式: {mode_type}\n"
-                         f"支持的模式: {MODE_LINE_ART}, {MODE_ACTUAL_COLOR}, {MODE_COLOR_FILL}")
+                         f"支持的模式: {MODE_LINE_ART}, {MODE_ACTUAL_COLOR}, {MODE_COLOR_FILL}, {MODE_VTRACER}")
