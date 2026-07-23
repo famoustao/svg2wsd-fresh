@@ -431,19 +431,87 @@ class MainWindow:
     # ============================================================
 
     def _build_control_panel(self, parent):
-        """构建左侧控制面板"""
+        """构建左侧控制面板（带滚动条）"""
         # 左侧面板容器（固定宽度）
         left_panel = tk.Frame(parent, bg=get_color('background'), width=340)
         left_panel.pack(side='left', fill='y')
         left_panel.pack_propagate(False)
 
-        # 内容区域
-        content = tk.Frame(left_panel, bg=get_color('background'))
-        content.pack(fill='both', expand=True)
+        # --- Canvas + Scrollbar 滚动区域 ---
+        self._left_scroll_canvas = tk.Canvas(
+            left_panel,
+            bg=get_color('background'),
+            highlightthickness=0,
+            bd=0,
+        )
+        self._left_scroll_canvas.pack(side='left', fill='both', expand=True)
 
-        # 内边距容器
-        inner = ttk.Frame(content, style='TFrame')
+        # 垂直滚动条
+        left_scrollbar = ttk.Scrollbar(
+            left_panel,
+            orient='vertical',
+            command=self._left_scroll_canvas.yview,
+        )
+        left_scrollbar.pack(side='right', fill='y')
+        self._left_scroll_canvas.configure(yscrollcommand=left_scrollbar.set)
+
+        # Canvas 中的滚动内容 Frame
+        inner = ttk.Frame(self._left_scroll_canvas, style='TFrame')
+        self._left_inner_window = self._left_scroll_canvas.create_window(
+            (0, 0),
+            window=inner,
+            anchor='nw',
+        )
+
+        # 内边距
         inner.pack(fill='both', expand=True, padx=(4, 4), pady=4)
+
+        # 更新滚动区域：Frame 大小变化时通知 Canvas
+        def _on_inner_configure(event):
+            """内容尺寸变化时更新 Canvas 滚动区域"""
+            self._left_scroll_canvas.configure(
+                scrollregion=self._left_scroll_canvas.bbox('all')
+            )
+
+        inner.bind('<Configure>', _on_inner_configure)
+
+        # Canvas 宽度变化时更新窗口宽度（保持与 Canvas 同宽，减去滚动条宽度）
+        def _on_canvas_configure(event):
+            canvas_width = event.width
+            self._left_scroll_canvas.itemconfig(
+                self._left_inner_window, width=canvas_width
+            )
+
+        self._left_scroll_canvas.bind('<Configure>', _on_canvas_configure)
+
+        # 鼠标滚轮滚动（Windows/Linux/macOS）
+        def _on_mousewheel(event):
+            """鼠标滚轮滚动 Canvas"""
+            delta = 0
+            if event.num == 4 or event.delta > 0:
+                delta = -1
+            elif event.num == 5 or event.delta < 0:
+                delta = 1
+            if delta != 0:
+                self._left_scroll_canvas.yview_scroll(delta, 'units')
+
+        # 递归绑定滚轮事件到控件及其所有子控件
+        skip_classes = {'Listbox', 'Scrollbar', 'Scale', 'TScale',
+                        'TCombobox', 'Spinbox'}
+
+        def _bind_mousewheel_recursive(widget):
+            wclass = widget.winfo_class()
+            if wclass not in skip_classes:
+                widget.bind('<MouseWheel>', _on_mousewheel)
+                widget.bind('<Button-4>', _on_mousewheel)
+                widget.bind('<Button-5>', _on_mousewheel)
+            for child in widget.winfo_children():
+                _bind_mousewheel_recursive(child)
+
+        # 初始绑定 Canvas 本身
+        self._left_scroll_canvas.bind('<MouseWheel>', _on_mousewheel)
+        self._left_scroll_canvas.bind('<Button-4>', _on_mousewheel)
+        self._left_scroll_canvas.bind('<Button-5>', _on_mousewheel)
 
         # 1. 文件列表区
         self._build_file_list_card(inner)
@@ -456,6 +524,9 @@ class MainWindow:
 
         # 4. 输出设置区
         self._build_output_settings_card(inner)
+
+        # 内容构建完成后，递归绑定所有子控件的滚轮事件
+        _bind_mousewheel_recursive(inner)
 
         # 初始显示漫画模式参数，隐藏几何模式参数
         self._geo_params_card.pack_forget()
