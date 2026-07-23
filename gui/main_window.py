@@ -438,65 +438,66 @@ class MainWindow:
         left_panel.pack_propagate(False)
 
         # --- Canvas + Scrollbar 滚动区域 ---
+        # 先放滚动条（确保不被 Canvas 覆盖），再放 Canvas
+        left_scrollbar = ttk.Scrollbar(
+            left_panel,
+            orient='vertical',
+        )
+        left_scrollbar.pack(side='right', fill='y')
+
         self._left_scroll_canvas = tk.Canvas(
             left_panel,
             bg=get_color('background'),
             highlightthickness=0,
             bd=0,
+            yscrollcommand=left_scrollbar.set,
         )
         self._left_scroll_canvas.pack(side='left', fill='both', expand=True)
+        left_scrollbar.configure(command=self._left_scroll_canvas.yview)
 
-        # 垂直滚动条
-        left_scrollbar = ttk.Scrollbar(
-            left_panel,
-            orient='vertical',
-            command=self._left_scroll_canvas.yview,
-        )
-        left_scrollbar.pack(side='right', fill='y')
-        self._left_scroll_canvas.configure(yscrollcommand=left_scrollbar.set)
-
-        # Canvas 中的滚动内容 Frame（不 pack，只通过 create_window 定位）
-        inner = ttk.Frame(self._left_scroll_canvas, style='TFrame')
+        # 滚动内容 Frame
+        inner = tk.Frame(self._left_scroll_canvas, bg=get_color('background'))
         self._left_inner_window = self._left_scroll_canvas.create_window(
-            (4, 4),              # 左上内边距
+            (0, 0),
             window=inner,
             anchor='nw',
         )
 
-        # 更新滚动区域：Frame 大小变化时通知 Canvas
-        def _on_inner_configure(event=None):
-            """内容尺寸变化时更新 Canvas 滚动区域"""
-            self._left_scroll_canvas.configure(
-                scrollregion=self._left_scroll_canvas.bbox('all')
-            )
+        # 更新滚动区域：内容大小变化时通知 Canvas
+        def _update_scroll_region():
+            """重新计算并设置 Canvas 的 scrollregion"""
+            self._left_scroll_canvas.update_idletasks()
+            bbox = self._left_scroll_canvas.bbox('all')
+            if bbox:
+                # 添加 4px padding 使底部内容不被裁切
+                self._left_scroll_canvas.configure(
+                    scrollregion=(0, 0, bbox[2] + 4, bbox[3] + 4)
+                )
 
-        inner.bind('<Configure>', _on_inner_configure)
-
-        # Canvas 宽度变化时更新窗口宽度（减去滚动条和左右 padding）
+        # Canvas 宽度变化时，同步 inner 宽度（减去滚动条宽度）
         def _on_canvas_configure(event):
-            canvas_width = event.width - 8  # 减去左右各 4px padding
-            self._left_scroll_canvas.itemconfig(
-                self._left_inner_window, width=max(canvas_width, 1)
-            )
-            # 同时更新滚动区域，确保滚动条状态正确
-            _on_inner_configure()
+            inner_width = event.width - 4  # 留右侧间隙
+            if inner_width > 0:
+                self._left_scroll_canvas.itemconfig(
+                    self._left_inner_window, width=inner_width
+                )
+            _update_scroll_region()
 
         self._left_scroll_canvas.bind('<Configure>', _on_canvas_configure)
 
         # 鼠标滚轮滚动（Windows/Linux/macOS）
         def _on_mousewheel(event):
-            """鼠标滚轮滚动 Canvas"""
             delta = 0
             if event.num == 4 or event.delta > 0:
-                delta = -1
+                delta = -3  # 向上滚 3 行
             elif event.num == 5 or event.delta < 0:
-                delta = 1
+                delta = 3   # 向下滚 3 行
             if delta != 0:
-                self._left_scroll_canvas.yview_scroll(delta, 'units')
+                self._left_scroll_canvas.yview_scroll(int(delta), 'units')
 
         # 递归绑定滚轮事件到控件及其所有子控件
-        skip_classes = {'Listbox', 'Scrollbar', 'Scale', 'TScale',
-                        'TCombobox', 'Spinbox'}
+        skip_classes = {'Scrollbar', 'Listbox', 'Scale', 'TScale',
+                        'TCombobox', 'Spinbox', 'Canvas'}
 
         def _bind_mousewheel_recursive(widget):
             wclass = widget.winfo_class()
@@ -527,10 +528,8 @@ class MainWindow:
         # 内容构建完成后，递归绑定所有子控件的滚轮事件
         _bind_mousewheel_recursive(inner)
 
-        # 强制 tkinter 计算 inner 的实际大小并更新滚动区域
-        # inner 未 pack，<Configure> 事件可能不触发，需手动更新
-        inner.update_idletasks()
-        _on_inner_configure()
+        # 强制更新滚动区域（确保滚动条在启动时就正确显示）
+        self.root.after(100, _update_scroll_region)
 
         # 初始显示漫画模式参数，隐藏几何模式参数
         self._geo_params_card.pack_forget()
