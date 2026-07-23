@@ -455,19 +455,16 @@ class MainWindow:
         left_scrollbar.pack(side='right', fill='y')
         self._left_scroll_canvas.configure(yscrollcommand=left_scrollbar.set)
 
-        # Canvas 中的滚动内容 Frame
+        # Canvas 中的滚动内容 Frame（不 pack，只通过 create_window 定位）
         inner = ttk.Frame(self._left_scroll_canvas, style='TFrame')
         self._left_inner_window = self._left_scroll_canvas.create_window(
-            (0, 0),
+            (4, 4),              # 左上内边距
             window=inner,
             anchor='nw',
         )
 
-        # 内边距
-        inner.pack(fill='both', expand=True, padx=(4, 4), pady=4)
-
         # 更新滚动区域：Frame 大小变化时通知 Canvas
-        def _on_inner_configure(event):
+        def _on_inner_configure(event=None):
             """内容尺寸变化时更新 Canvas 滚动区域"""
             self._left_scroll_canvas.configure(
                 scrollregion=self._left_scroll_canvas.bbox('all')
@@ -475,12 +472,14 @@ class MainWindow:
 
         inner.bind('<Configure>', _on_inner_configure)
 
-        # Canvas 宽度变化时更新窗口宽度（保持与 Canvas 同宽，减去滚动条宽度）
+        # Canvas 宽度变化时更新窗口宽度（减去滚动条和左右 padding）
         def _on_canvas_configure(event):
-            canvas_width = event.width
+            canvas_width = event.width - 8  # 减去左右各 4px padding
             self._left_scroll_canvas.itemconfig(
-                self._left_inner_window, width=canvas_width
+                self._left_inner_window, width=max(canvas_width, 1)
             )
+            # 同时更新滚动区域，确保滚动条状态正确
+            _on_inner_configure()
 
         self._left_scroll_canvas.bind('<Configure>', _on_canvas_configure)
 
