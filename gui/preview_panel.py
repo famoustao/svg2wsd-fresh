@@ -1031,7 +1031,7 @@ class PlaceholderPreviewCanvas(ZoomableCanvas):
     """
     占位预览画布
 
-    用于 SVG / LaTeX / GGB 等尚未实现的预览功能，
+    用于 LaTeX / GGB 等尚未实现的预览功能，
     显示"预览功能开发中"提示。
     """
 
@@ -1076,6 +1076,288 @@ class PlaceholderPreviewCanvas(ZoomableCanvas):
             fill='#9ca3af',
             font=('Microsoft YaHei UI', 11),
         )
+
+
+# ============================================================
+# SVG 预览画布
+# ============================================================
+
+class SvgPreviewCanvas(WsdPreviewCanvas):
+    """
+    SVG 矢量预览画布
+
+    将 CanvasData 中的 shapes 和 annotations 渲染到 tkinter Canvas 上，
+    模拟 SVG 导出的视觉效果。
+
+    与 WsdPreviewCanvas 的区别：
+      - 白色背景（与 SVG 导出一致），不绘制网格
+      - 底部叠加 SVG 信息栏（路径数、画布尺寸等）
+      - 支持 SVG 源码查看模式（按 S 键切换）
+    """
+
+    def __init__(self, master=None, **kwargs):
+        super().__init__(master, **kwargs)
+        # SVG 源码显示模式
+        self._show_source: bool = False
+        # 缓存的 SVG 源码
+        self._svg_source: str = ''
+        # 绑定 S 键切换源码视图
+        self.canvas.bind('<KeyPress-s>', self._toggle_source_view)
+        self.canvas.bind('<KeyPress-S>', self._toggle_source_view)
+        # 点击画布时获取焦点（使键盘事件生效），使用 add='+' 不覆盖父类拖拽绑定
+        self.canvas.bind('<ButtonPress-1>', self._on_click_focus, add='+')
+        # 设置 canvas 可接收键盘焦点
+        self.canvas.configure(takefocus=True)
+
+    def _on_click_focus(self, event):
+        """点击画布时获取焦点，使 S 键切换可用"""
+        self.canvas.focus_set()
+
+    def set_canvas_data(self, canvas_data: CanvasData):
+        """
+        设置 SVG 预览数据，同时生成 SVG 源码缓存
+
+        Args:
+            canvas_data: CanvasData 对象
+        """
+        self._canvas_data = canvas_data
+
+        # 生成 SVG 源码（用于源码查看模式）
+        self._svg_source = self._generate_svg_source(canvas_data)
+
+        self.fit_to_view()
+
+    def _generate_svg_source(self, canvas_data: CanvasData) -> str:
+        """
+        生成 SVG 源码字符串
+
+        Args:
+            canvas_data: CanvasData 对象
+
+        Returns:
+            SVG 源码字符串
+        """
+        if canvas_data is None:
+            return ''
+
+        try:
+            from core.exporter import _shape_to_svg_path, _bgr_to_hex
+            import xml.etree.ElementTree as ET
+
+            bbox = canvas_data.bbox
+            if bbox and len(bbox) == 4:
+                min_x, min_y, max_x, max_y = bbox
+            else:
+                all_x, all_y = [], []
+                for shape in canvas_data.shapes:
+                    for px, py in shape.points:
+                        all_x.append(px)
+                        all_y.append(py)
+                if not all_x:
+                    min_x, min_y, max_x, max_y = 0, 0, 100, 100
+                else:
+                    min_x, min_y = min(all_x), min(all_y)
+                    max_x, max_y = max(all_x), max(all_y)
+
+            width = max(max_x - min_x, 1)
+            height = max(max_y - min_y, 1)
+
+            lines = [
+                f'<svg xmlns="http://www.w3.org/2000/svg" version="1.1"',
+                f'     width="{width:.0f}" height="{height:.0f}"',
+                f'     viewBox="{min_x:.0f} {min_y:.0f} {width:.0f} {height:.0f}">',
+                f'  <rect x="{min_x:.0f}" y="{min_y:.0f}" '
+                f'width="{width:.0f}" height="{height:.0f}" fill="white"/>',
+            ]
+
+            path_count = 0
+            for shape in canvas_data.shapes:
+                d = _shape_to_svg_path(shape)
+                if not d:
+                    continue
+                path_count += 1
+                fill = _bgr_to_hex(shape.fill_color) if shape.fill_color else 'none'
+                stroke = _bgr_to_hex(shape.line_color) if shape.line_color else 'none'
+                sw = shape.line_width if shape.line_color else 0
+                lines.append(f'  <path d="{d}" fill="{fill}" '
+                             f'stroke="{stroke}" stroke-width="{sw}"/>')
+
+            for ann in canvas_data.annotations:
+                lines.append(f'  <text x="{ann.x:.0f}" y="{ann.y:.0f}" '
+                             f'font-size="{ann.font_size:.0f}" fill="black">'
+                             f'{ann.text}</text>')
+
+            lines.append('</svg>')
+            return '\n'.join(lines)
+
+        except Exception:
+            return ''
+
+    def _toggle_source_view(self, event=None):
+        """切换 SVG 源码/图形视图"""
+        self._show_source = not self._show_source
+        self._render_content()
+
+    def _render_content(self):
+        """渲染 SVG 预览内容"""
+        if self._show_source and self._svg_source:
+            self._render_source_view()
+            return
+
+        # 正常图形渲染（复用父类逻辑，但跳过网格）
+        self.canvas.delete('all')
+
+        if self._canvas_data is None:
+            self._draw_placeholder('暂无 SVG 数据')
+            return
+
+        if not self._canvas_data.shapes and not self._canvas_data.annotations:
+            self._draw_placeholder('SVG 数据为空')
+            return
+
+        # 绘制白色背景矩形（与 SVG 导出一致）
+        self._draw_white_background()
+
+        # 按 path_group_id 分组，处理复合路径（孔洞）
+        groups = {}
+        for shape in self._canvas_data.shapes:
+            gid = shape.extra.get('pathGroupId', shape.extra.get('path_group_id', 0))
+            if gid not in groups:
+                groups[gid] = []
+            groups[gid].append(shape)
+
+        # 绘制每组形状
+        for gid, group_shapes in groups.items():
+            if len(group_shapes) == 1:
+                try:
+                    self._draw_shape(group_shapes[0])
+                except Exception:
+                    pass
+            else:
+                try:
+                    self._draw_compound_path(group_shapes)
+                except Exception:
+                    for shape in group_shapes:
+                        try:
+                            self._draw_shape(shape)
+                        except Exception:
+                            pass
+
+        # 绘制所有文字标注
+        for ann in self._canvas_data.annotations:
+            try:
+                self._draw_annotation(ann)
+            except Exception:
+                pass
+
+        # 绘制 SVG 信息栏
+        self._draw_info_bar()
+
+    def _draw_white_background(self):
+        """绘制白色背景（与 SVG 导出的白色背景一致）"""
+        if self._canvas_data is None:
+            return
+        min_x, min_y, max_x, max_y = self._canvas_data.bbox
+        x1 = self._to_canvas_x(min_x)
+        y1 = self._to_canvas_y(min_y)
+        x2 = self._to_canvas_x(max_x)
+        y2 = self._to_canvas_y(max_y)
+        self.canvas.create_rectangle(
+            x1, y1, x2, y2,
+            fill='#ffffff',
+            outline='#e5e7eb',
+            width=1,
+        )
+
+    def _draw_info_bar(self):
+        """绘制底部 SVG 信息栏"""
+        if self._canvas_data is None:
+            return
+
+        w = self.canvas.winfo_width()
+        h = self.canvas.winfo_height()
+
+        path_count = len(self._canvas_data.shapes)
+        ann_count = len(self._canvas_data.annotations)
+        min_x, min_y, max_x, max_y = self._canvas_data.bbox
+        cw = max_x - min_x
+        ch = max_y - min_y
+
+        # 半透明信息栏背景（用浅灰色矩形模拟）
+        bar_h = 28
+        self.canvas.create_rectangle(
+            0, h - bar_h, w, h,
+            fill='#f3f4f6',
+            outline='#e5e7eb',
+            width=1,
+        )
+
+        info_text = (f'SVG  |  {path_count} 路径  |  {ann_count} 标注  |  '
+                     f'画布: {cw:.0f}x{ch:.0f}  |  按 S 键查看源码')
+        self.canvas.create_text(
+            10, h - bar_h // 2,
+            text=info_text,
+            fill='#6b7280',
+            font=('Microsoft YaHei UI', 9),
+            anchor='w',
+        )
+
+    def _render_source_view(self):
+        """渲染 SVG 源码视图"""
+        self.canvas.delete('all')
+
+        w = self.canvas.winfo_width()
+        h = self.canvas.winfo_height()
+
+        # 背景
+        self.canvas.create_rectangle(
+            0, 0, w, h,
+            fill='#1e1e1e',
+            outline='',
+        )
+
+        # 标题栏
+        bar_h = 28
+        self.canvas.create_rectangle(
+            0, 0, w, bar_h,
+            fill='#2d2d2d',
+            outline='',
+        )
+        self.canvas.create_text(
+            10, bar_h // 2,
+            text='SVG 源码  (按 S 键返回图形视图)',
+            fill='#9ca3af',
+            font=('Microsoft YaHei UI', 9),
+            anchor='w',
+        )
+
+        # 源码内容（等宽字体，带行号效果）
+        source_lines = self._svg_source.split('\n')
+        max_lines = 60  # 最多显示行数
+        display_lines = source_lines[:max_lines]
+
+        y_offset = bar_h + 10
+        line_height = 16
+        for i, line in enumerate(display_lines):
+            # 截断过长的行
+            if len(line) > 120:
+                line = line[:117] + '...'
+            self.canvas.create_text(
+                10, y_offset + i * line_height,
+                text=line,
+                fill='#d4d4d4',
+                font=('Consolas', 9),
+                anchor='w',
+            )
+
+        if len(source_lines) > max_lines:
+            self.canvas.create_text(
+                10, y_offset + max_lines * line_height,
+                text=f'... ({len(source_lines) - max_lines} 行未显示)',
+                fill='#6b7280',
+                font=('Consolas', 9),
+                anchor='w',
+            )
 
 
 # ============================================================
@@ -1151,7 +1433,7 @@ class PreviewPanel(ttk.Frame):
         # --- SVG 预览页 ---
         self.svg_tab = ttk.Frame(self.notebook)
         self.notebook.add(self.svg_tab, text='  SVG  ')
-        self.svg_canvas = PlaceholderPreviewCanvas(self.svg_tab, title='SVG')
+        self.svg_canvas = SvgPreviewCanvas(self.svg_tab)
         self.svg_canvas.pack(fill=tk.BOTH, expand=True)
         self.svg_canvas.on_zoom_changed(self._on_zoom_changed)
 
@@ -1261,6 +1543,8 @@ class PreviewPanel(ttk.Frame):
             self._active_canvas = self.wsd_canvas
         elif tab_widget is self.svg_tab:
             self._active_canvas = self.svg_canvas
+            # SVG 画布获取焦点，使 S 键切换源码视图可用
+            self.svg_canvas.canvas.focus_set()
         elif tab_widget is self.latex_tab:
             self._active_canvas = self.latex_canvas
         elif tab_widget is self.ggb_tab:
@@ -1422,12 +1706,16 @@ class PreviewPanel(ttk.Frame):
 
     def set_canvas_data(self, canvas_data: CanvasData):
         """
-        设置 WSD 预览数据
+        设置 WSD 和 SVG 预览数据
+
+        同时更新 WSD 预览画布和 SVG 预览画布，
+        确保两个选项卡中显示的内容保持同步。
 
         Args:
             canvas_data: CanvasData 对象
         """
         self.wsd_canvas.set_canvas_data(canvas_data)
+        self.svg_canvas.set_canvas_data(canvas_data)
 
 
 # ============================================================
