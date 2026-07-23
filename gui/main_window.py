@@ -2112,6 +2112,7 @@ class MainWindow:
                 return {'cancelled': True, 'output_dir': output_dir}
 
             # 处理完成，更新进度到80%
+            export_format = self.export_format_var.get().lower()  # 'wsd' 或 'svg'
             if progress_callback:
                 progress_callback(80.0, f'正在导出{export_format.upper()}文件...')
 
@@ -2120,7 +2121,6 @@ class MainWindow:
             line_color_none = params.get('line_color_none', False)
             line_color = params.get('line_color')
             line_alpha = 0 if line_color_none else 255
-            export_format = self.export_format_var.get().lower()  # 'wsd' 或 'svg'
             export_result = batch_mgr.export_all(
                 output_dir=output_dir,
                 format=export_format,
