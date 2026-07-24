@@ -569,6 +569,14 @@ class MainWindow:
         )
         self.clear_file_btn.pack(side='left', padx=6)
 
+        self.paste_code_btn = ttk.Button(
+            btn_frame1,
+            text='粘贴代码',
+            command=self._on_paste_code,
+            width=10,
+        )
+        self.paste_code_btn.pack(side='left', padx=6)
+
         # 第二行按钮：更新预览、开始转换并导出
         btn_frame2 = tk.Frame(content, bg=get_color('card'))
         btn_frame2.pack(fill='x', pady=(0, 6))
@@ -1460,6 +1468,210 @@ class MainWindow:
             if children:
                 self.file_tree.selection_set(children[0])
                 self._load_preview(0)
+
+    def _on_paste_code(self):
+        """粘贴 GGB/LaTeX 代码弹窗"""
+        self._open_code_import_dialog()
+
+    def _open_code_import_dialog(self):
+        """打开代码导入弹窗"""
+        dialog = tk.Toplevel(self.root)
+        dialog.title('粘贴 GGB / LaTeX 代码')
+        dialog.geometry('520x480')
+        dialog.transient(self.root)
+        dialog.grab_set()
+        dialog.resizable(True, True)
+
+        bg = get_color('card')
+        fg = get_color('text')
+
+        # --- 格式选择行 ---
+        top_frame = tk.Frame(dialog, bg=bg)
+        top_frame.pack(fill='x', padx=12, pady=(10, 4))
+
+        tk.Label(
+            top_frame, text='格式:', bg=bg, fg=fg,
+            font=('Microsoft YaHei UI', 10),
+        ).pack(side='left')
+
+        code_format_var = tk.StringVar(value='latex')
+
+        for text, val in [('LaTeX/TikZ', 'latex'), ('GeoGebra XML', 'ggb')]:
+            rb = tk.Radiobutton(
+                top_frame, text=text, variable=code_format_var, value=val,
+                bg=bg, fg=fg, font=('Microsoft YaHei UI', 10),
+                selectcolor=bg, activebackground=bg, activeforeground=fg,
+            )
+            rb.pack(side='left', padx=(0, 16))
+
+        # --- 提示标签 ---
+        hint = '在此粘贴 LaTeX/TikZ 代码（支持 \\begin{tikzpicture} 环境）'
+        hint_label = tk.Label(
+            dialog, text=hint, bg=bg, fg='#888',
+            font=('Microsoft YaHei UI', 9), anchor='w',
+        )
+        hint_label.pack(fill='x', padx=12, pady=(2, 4))
+
+        # --- 代码输入区 ---
+        code_frame = tk.Frame(dialog, bg=bg)
+        code_frame.pack(fill='both', expand=True, padx=12, pady=4)
+
+        # 使用 scrolledtext
+        from tkinter.scrolledtext import ScrolledText
+        code_text = ScrolledText(
+            code_frame,
+            wrap='word',
+            font=('Consolas', 11),
+            bg='#1e1e2e',
+            fg='#cdd6f4',
+            insertbackground='#cdd6f4',
+            selectbackground='#45475a',
+            relief='flat',
+            bd=2,
+        )
+        code_text.pack(fill='both', expand=True)
+
+        # 预填示例代码
+        example_latex = r"""\begin{tikzpicture}
+  \draw (0,0) -- (4,0) -- (2,3.46) -- cycle;
+  \draw (2,1) circle (0.5);
+\end{tikzpicture}"""
+
+        example_ggb = """<?xml version="1.0" encoding="UTF-8"?>
+<geogebra>
+  <construction>
+    <element type="point" label="A">
+      <coords x="0" y="0" z="1"/>
+    </element>
+    <element type="point" label="B">
+      <coords x="4" y="0" z="1"/>
+    </element>
+    <element type="point" label="C">
+      <coords x="2" y="3" z="1"/>
+    </element>
+    <command name="Segment" type="Segment">
+      <input a0="A" a1="B"/><output a0="d"/>
+    </command>
+    <command name="Segment" type="Segment">
+      <input a0="B" a1="C"/><output a0="e"/>
+    </command>
+    <command name="Segment" type="Segment">
+      <input a0="C" a1="A"/><output a0="f"/>
+    </command>
+    <element type="segment" label="d">
+      <coords x1="0" y1="0" x2="4" y2="0"/>
+    </element>
+    <element type="segment" label="e">
+      <coords x1="4" y1="0" x2="2" y2="3"/>
+    </element>
+    <element type="segment" label="f">
+      <coords x1="2" y1="3" x2="0" y2="0"/>
+    </element>
+  </construction>
+</geogebra>"""
+
+        code_text.insert('1.0', example_latex)
+
+        # 格式切换时更新提示和示例
+        def _on_format_changed():
+            fmt = code_format_var.get()
+            if fmt == 'latex':
+                hint_label.config(text='在此粘贴 LaTeX/TikZ 代码（支持 \\begin{tikzpicture} 环境）')
+                code_text.delete('1.0', 'end')
+                code_text.insert('1.0', example_latex)
+            else:
+                hint_label.config(text='在此粘贴 GeoGebra XML 代码（geogebra.xml 内容）')
+                code_text.delete('1.0', 'end')
+                code_text.insert('1.0', example_ggb)
+
+        code_format_var.trace_add('write', lambda *_: _on_format_changed())
+
+        # --- 状态标签 ---
+        status_var = tk.StringVar(value='就绪')
+        status_label = tk.Label(
+            dialog, textvariable=status_var, bg=bg, fg='#888',
+            font=('Microsoft YaHei UI', 9), anchor='w',
+        )
+        status_label.pack(fill='x', padx=12, pady=(4, 2))
+
+        # --- 按钮行 ---
+        btn_frame = tk.Frame(dialog, bg=bg)
+        btn_frame.pack(fill='x', padx=12, pady=(4, 10))
+
+        def _do_import():
+            raw_code = code_text.get('1.0', 'end').strip()
+            if not raw_code:
+                status_var.set('请先粘贴代码')
+                return
+
+            fmt = code_format_var.get()
+            try:
+                import tempfile
+                if fmt == 'latex':
+                    # 写入临时 .tex 文件
+                    suffix = '.tex'
+                    tmp = tempfile.NamedTemporaryFile(
+                        mode='w', suffix=suffix, delete=False, encoding='utf-8'
+                    )
+                    tmp.write(raw_code)
+                    tmp_path = tmp.name
+                    tmp.close()
+                else:
+                    # GGB：写入临时 ZIP
+                    suffix = '.ggb'
+                    import zipfile
+                    tmp = tempfile.NamedTemporaryFile(
+                        mode='wb', suffix=suffix, delete=False
+                    )
+                    # 如果用户粘贴的是完整 geogebra.xml 内容
+                    zf = zipfile.ZipFile(tmp.name, 'w')
+                    zf.writestr('geogebra.xml', raw_code.encode('utf-8'))
+                    zf.close()
+                    tmp_path = tmp.name
+
+                # 导入并预览
+                from core.importer import import_file
+                canvas_data = import_file(tmp_path)
+
+                # 添加到文件列表（使用临时文件路径）
+                filename = f'pasted_code_{fmt}.{suffix}'
+                # 检查是否已有同名
+                existing = [i for i, f in enumerate(self._files) if f['name'] == filename]
+                if existing:
+                    idx = existing[0]
+                    self._files[idx] = {'path': tmp_path, 'name': filename, 'status': '待处理',
+                                        'tmp_file': True}
+                else:
+                    self._files.append({
+                        'path': tmp_path,
+                        'name': filename,
+                        'status': '待处理',
+                        'tmp_file': True,
+                    })
+                    self.file_tree.insert('', 'end', text=filename, values=('待处理',))
+
+                # 预览
+                self._current_file_index = len(self._files) - 1
+                children = self.file_tree.get_children()
+                if children:
+                    self.file_tree.selection_set(children[-1])
+
+                self.preview_panel.set_svg_original(canvas_data)
+                shape_count = len(canvas_data.shapes)
+                ann_count = len(canvas_data.annotations)
+                status_var.set(f'导入成功: {shape_count} 个图形, {ann_count} 个标注')
+
+                # 关闭弹窗
+                dialog.destroy()
+
+            except Exception as e:
+                status_var.set(f'导入失败: {e}')
+
+        ttk.Button(btn_frame, text='导入并预览', command=_do_import, width=14).pack(side='left', padx=(0, 8))
+        ttk.Button(btn_frame, text='取消', command=dialog.destroy, width=8).pack(side='right')
+
+        # 焦点到代码输入框
+        code_text.focus_set()
 
     def _on_remove_file(self):
         """移除选中的文件"""
