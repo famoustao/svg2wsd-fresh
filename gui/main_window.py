@@ -1464,85 +1464,58 @@ class MainWindow:
 
     def _open_code_import_dialog(self):
         """打开代码导入弹窗（自动识别 LaTeX / GeoGebra 脚本 / GeoGebra XML）"""
+        import tkinter.simpledialog
+
         dialog = tk.Toplevel(self.root)
         dialog.title('粘贴代码（自动识别格式）')
-        dialog.geometry('520x460')
-        dialog.transient(self.root)
-        dialog.grab_set()
+        dialog.geometry('540x500')
         dialog.resizable(True, True)
+        # 确保弹窗在最前面
+        dialog.attributes('-topmost', True)
+        dialog.after(100, lambda: dialog.attributes('-topmost', False))
 
         bg = get_color('card')
-        fg = get_color('text')
 
         # --- 提示标签 ---
-        hint = '在此粘贴 LaTeX/TikZ、GeoGebra 脚本或 GeoGebra XML 代码，自动识别格式'
-        hint_label = tk.Label(
-            dialog, text=hint, bg=bg, fg='#888',
-            font=('Microsoft YaHei UI', 9), anchor='w',
-        )
-        hint_label.pack(fill='x', padx=12, pady=(10, 4))
+        tk.Label(
+            dialog, text='粘贴 LaTeX/TikZ、GeoGebra 脚本代码，自动识别格式',
+            bg=bg, fg='#888', font=('Microsoft YaHei UI', 9), anchor='w',
+        ).pack(fill='x', padx=12, pady=(10, 4))
 
         # --- 代码输入区 ---
-        code_frame = tk.Frame(dialog, bg=bg)
-        code_frame.pack(fill='both', expand=True, padx=12, pady=4)
-
         from tkinter.scrolledtext import ScrolledText
         code_text = ScrolledText(
-            code_frame,
-            wrap='word',
-            font=('Consolas', 11),
-            bg='#1e1e2e',
-            fg='#cdd6f4',
-            insertbackground='#cdd6f4',
-            selectbackground='#45475a',
-            relief='flat',
-            bd=2,
+            dialog, wrap='word', font=('Consolas', 11),
+            bg='#1e1e2e', fg='#cdd6f4', insertbackground='#cdd6f4',
+            selectbackground='#45475a', relief='flat', bd=2,
         )
-        code_text.pack(fill='both', expand=True)
+        code_text.pack(fill='both', expand=True, padx=12, pady=4)
 
-        # 预填示例代码
-        example = r"""\begin{tikzpicture}
+        # 预填示例
+        code_text.insert('1.0', r"""\begin{tikzpicture}
   \draw (0,0) -- (4,0) -- (2,3.46) -- cycle;
   \draw (2,1) circle (0.5);
-\end{tikzpicture}"""
-        code_text.insert('1.0', example)
+\end{tikzpicture}""")
 
         # --- 状态标签 ---
         status_var = tk.StringVar(value='就绪')
-        status_label = tk.Label(
+        tk.Label(
             dialog, textvariable=status_var, bg=bg, fg='#888',
             font=('Microsoft YaHei UI', 9), anchor='w',
-        )
-        status_label.pack(fill='x', padx=12, pady=(4, 2))
+        ).pack(fill='x', padx=12, pady=(4, 2))
 
-        # --- 按钮行 ---
-        btn_frame = tk.Frame(dialog, bg=bg)
-        btn_frame.pack(fill='x', padx=12, pady=(4, 10))
-
-        # 导入是否已完成的标记
+        # --- 按钮行（直接pack到dialog，不嵌套额外Frame） ---
         _import_done = [False]
 
         def _detect_format(code):
-            """自动识别代码格式: 'latex' / 'ggb_script' / 'ggb_xml'"""
             stripped = code.strip()
-            # GeoGebra XML: 以 <?xml 或 <geogebra 开头
             if stripped.startswith('<?xml') or stripped.lower().startswith('<geogebra'):
                 return 'ggb_xml'
-            # LaTeX/TikZ: 包含 \draw, \node, \coordinate, \begin{tikzpicture} 等
-            if any(kw in stripped for kw in
-                   ['\\draw', '\\node', '\\coordinate', '\\fill',
-                    '\\begin{tikzpicture}', '\\path']):
+            if any(kw in stripped for kw in ['\\draw','\\node','\\coordinate','\\fill','\\begin{tikzpicture}','\\path']):
                 return 'latex'
-            # GeoGebra 脚本: 包含 Segment(, Circle(, Line(, PerpendicularLine(,
-            # Intersect(, SetLabel(, CircleThroughThreePoints(, Point( 等
-            ggb_keywords = [
-                'Segment(', 'Circle(', 'Line(', 'PerpendicularLine(',
-                'Intersect(', 'SetLabel(', 'CircleThroughThreePoints(',
-                'Point(', 'Midpoint(', 'Ray(',
-            ]
-            if any(kw in stripped for kw in ggb_keywords):
+            ggb_kw = ['Segment(','Circle(','Line(','PerpendicularLine(','Intersect(','SetLabel(','CircleThroughThreePoints(','Point(','Midpoint(','Ray(']
+            if any(kw in stripped for kw in ggb_kw):
                 return 'ggb_script'
-            # 默认当作 LaTeX
             return 'latex'
 
         def _do_import():
@@ -1550,122 +1523,66 @@ class MainWindow:
             if not raw_code:
                 status_var.set('请先粘贴代码')
                 return
-
             fmt = _detect_format(raw_code)
             status_var.set(f'检测到格式: {fmt} — 正在导入...')
             dialog.update_idletasks()
-
             try:
                 import tempfile
-
+                canvas_data = None
+                tmp_path = None
                 if fmt == 'latex':
                     from core.importer import import_latex
-                    suffix = '.tex'
-                    tmp = tempfile.NamedTemporaryFile(
-                        mode='w', suffix=suffix, delete=False, encoding='utf-8'
-                    )
-                    tmp.write(raw_code)
-                    tmp_path = tmp.name
-                    tmp.close()
+                    tmp = tempfile.NamedTemporaryFile(mode='w', suffix='.tex', delete=False, encoding='utf-8')
+                    tmp.write(raw_code); tmp.close(); tmp_path = tmp.name
                     canvas_data = import_latex(tmp_path)
-
                     filename = 'pasted_code.tex'
-                    existing = [i for i, f in enumerate(self._files) if f['name'] == filename]
-                    if existing:
-                        idx = existing[0]
-                        self._files[idx] = {'path': tmp_path, 'name': filename, 'status': '待处理',
-                                            'tmp_file': True, 'canvas_data': canvas_data}
-                    else:
-                        self._files.append({
-                            'path': tmp_path,
-                            'name': filename,
-                            'status': '待处理',
-                            'tmp_file': True,
-                            'canvas_data': canvas_data,
-                        })
-                        self.file_tree.insert('', 'end', text=filename, values=('待处理',))
-
-                    self._current_file_index = len(self._files) - 1
-                    children = self.file_tree.get_children()
-                    if children:
-                        self.file_tree.selection_set(children[-1])
-
-                    self.preview_panel.set_latex_preview(canvas_data)
-
                 elif fmt == 'ggb_script':
                     from core.importer import import_ggb_script
                     canvas_data = import_ggb_script(raw_code)
-
                     filename = 'pasted_code.ggb'
-                    existing = [i for i, f in enumerate(self._files) if f['name'] == filename]
-                    if existing:
-                        idx = existing[0]
-                        self._files[idx] = {'path': None, 'name': filename, 'status': '待处理',
-                                            'tmp_file': True, 'canvas_data': canvas_data}
-                    else:
-                        self._files.append({
-                            'path': None,
-                            'name': filename,
-                            'status': '待处理',
-                            'tmp_file': True,
-                            'canvas_data': canvas_data,
-                        })
-                        self.file_tree.insert('', 'end', text=filename, values=('待处理',))
-
-                    self._current_file_index = len(self._files) - 1
-                    children = self.file_tree.get_children()
-                    if children:
-                        self.file_tree.selection_set(children[-1])
-
-                    self.preview_panel.set_ggb_preview(canvas_data)
-
-                else:  # ggb_xml
-                    suffix = '.ggb'
+                else:
                     import zipfile
-                    tmp = tempfile.NamedTemporaryFile(
-                        mode='wb', suffix=suffix, delete=False
-                    )
+                    tmp = tempfile.NamedTemporaryFile(mode='wb', suffix='.ggb', delete=False)
                     zf = zipfile.ZipFile(tmp.name, 'w')
-                    zf.writestr('geogebra.xml', raw_code.encode('utf-8'))
-                    zf.close()
+                    zf.writestr('geogebra.xml', raw_code.encode('utf-8')); zf.close()
                     tmp_path = tmp.name
-
                     from core.importer import import_file
                     canvas_data = import_file(tmp_path)
-
                     filename = 'pasted_code.ggb'
-                    existing = [i for i, f in enumerate(self._files) if f['name'] == filename]
-                    if existing:
-                        idx = existing[0]
-                        self._files[idx] = {'path': tmp_path, 'name': filename, 'status': '待处理',
-                                            'tmp_file': True, 'canvas_data': canvas_data}
-                    else:
-                        self._files.append({
-                            'path': tmp_path,
-                            'name': filename,
-                            'status': '待处理',
-                            'tmp_file': True,
-                            'canvas_data': canvas_data,
-                        })
-                        self.file_tree.insert('', 'end', text=filename, values=('待处理',))
 
-                    self._current_file_index = len(self._files) - 1
-                    children = self.file_tree.get_children()
-                    if children:
-                        self.file_tree.selection_set(children[-1])
+                if canvas_data is None:
+                    status_var.set('导入失败: 无法解析')
+                    return
 
+                # 更新文件列表
+                existing = [i for i, f in enumerate(self._files) if f['name'] == filename]
+                file_entry = {'path': tmp_path, 'name': filename, 'status': '待处理',
+                              'tmp_file': True, 'canvas_data': canvas_data}
+                if existing:
+                    self._files[existing[0]] = file_entry
+                else:
+                    self._files.append(file_entry)
+                    self.file_tree.insert('', 'end', text=filename, values=('待处理',))
+
+                self._current_file_index = len(self._files) - 1
+                children = self.file_tree.get_children()
+                if children:
+                    self.file_tree.selection_set(children[-1])
+
+                # 预览
+                if fmt == 'latex':
+                    self.preview_panel.set_latex_preview(canvas_data)
+                else:
                     self.preview_panel.set_ggb_preview(canvas_data)
 
-                shape_count = len(canvas_data.shapes)
-                ann_count = len(canvas_data.annotations)
-                status_var.set(f'导入成功: {shape_count} 个图形, {ann_count} 个标注 — 点击"开始转换并导出"生成WSD')
+                sc = len(canvas_data.shapes)
+                ac = len(canvas_data.annotations)
+                status_var.set(f'导入成功: {sc} 个图形, {ac} 个标注 — 点击"开始转换并导出"生成WSD')
                 _import_done[0] = True
-
             except Exception as e:
                 status_var.set(f'导入失败: {e}')
 
         def _on_close():
-            """关闭或取消时，如果代码区有内容且未导入，提示确认"""
             raw_code = code_text.get('1.0', 'end').strip()
             if raw_code and not _import_done[0]:
                 from tkinter import messagebox
@@ -1675,12 +1592,15 @@ class MainWindow:
 
         dialog.protocol('WM_DELETE_WINDOW', _on_close)
 
-        # 按钮：粘贴 | 确认导入 | 取消
-        ttk.Button(btn_frame, text='粘贴', command=lambda: code_text.event_generate('<<Paste>>'), width=8).pack(side='left', padx=(0, 4))
-        ttk.Button(btn_frame, text='确认导入', command=_do_import, width=10).pack(side='left', padx=4)
-        ttk.Button(btn_frame, text='取消', command=_on_close, width=8).pack(side='right')
+        # 按钮直接pack到dialog底部
+        btn_row = tk.Frame(dialog, bg=bg)
+        btn_row.pack(fill='x', padx=12, pady=(4, 10))
+        ttk.Button(btn_row, text='粘贴', command=lambda: code_text.event_generate('<<Paste>>'), width=8).pack(side='left', padx=(0, 6))
+        ttk.Button(btn_row, text='确认导入', command=_do_import, width=10).pack(side='left', padx=6)
+        ttk.Button(btn_row, text='取消', command=_on_close, width=8).pack(side='right')
 
         code_text.focus_set()
+        dialog.grab_set()
 
     def _on_remove_file(self):
         """移除选中的文件"""
