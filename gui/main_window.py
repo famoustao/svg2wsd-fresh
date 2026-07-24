@@ -1688,6 +1688,23 @@ class MainWindow:
                     return
             dialog.destroy()
 
+        # 粘贴代码后自动导入（延迟300ms防抖，等待粘贴完成）
+        def _on_text_change(event=None):
+            if _import_done[0]:
+                return
+            if hasattr(_on_text_change, '_after_id'):
+                dialog.after_cancel(_on_text_change._after_id)
+            _on_text_change._after_id = dialog.after(300, _auto_import)
+
+        def _auto_import():
+            raw_code = code_text.get('1.0', 'end').strip()
+            if not raw_code or _import_done[0]:
+                return
+            _do_import()
+
+        code_text.bind('<KeyRelease>', _on_text_change)
+        code_text.bind('<<Paste>>', _on_text_change)
+
         ttk.Button(btn_frame, text='确认导入', command=_do_import, width=12).pack(side='left', padx=(0, 8))
         ttk.Button(btn_frame, text='取消', command=_on_close_or_cancel, width=8).pack(side='right')
 
