@@ -2338,9 +2338,54 @@ class GeometryMode:
 
         self.params = params
 
-        # 判断是否为 SVG 文件
+        # 判断是否为非图像格式文件（SVG / LaTeX / GGB）
         ext = os.path.splitext(image_path)[1].lower()
-        if ext == '.svg':
+
+        if ext in ('.tex', '.tikz', '.latex'):
+            # ---- LaTeX/TikZ 文件 ----
+            from core.importer import import_latex
+            from core.vertex_labeler import auto_label_vertices
+
+            try:
+                canvas_data = import_latex(image_path)
+            except Exception as e:
+                raise ValueError(f"导入LaTeX文件失败: {e}")
+
+            # 自动标注端点
+            auto_label_enabled = params.get('auto_label', True)
+            if auto_label_enabled and canvas_data.shapes:
+                canvas_data = auto_label_vertices(canvas_data)
+
+            # 应用颜色模式
+            color_mode = params.get('color_mode', COLOR_MODE_LINE_ART)
+            if color_mode != COLOR_MODE_ACTUAL:
+                canvas_data.shapes = _apply_geo_color_mode(canvas_data.shapes, color_mode)
+
+            return canvas_data
+
+        elif ext == '.ggb':
+            # ---- GeoGebra 文件 ----
+            from core.importer import import_ggb
+            from core.vertex_labeler import auto_label_vertices
+
+            try:
+                canvas_data = import_ggb(image_path)
+            except Exception as e:
+                raise ValueError(f"导入GeoGebra文件失败: {e}")
+
+            # 自动标注端点
+            auto_label_enabled = params.get('auto_label', True)
+            if auto_label_enabled and canvas_data.shapes:
+                canvas_data = auto_label_vertices(canvas_data)
+
+            # 应用颜色模式
+            color_mode = params.get('color_mode', COLOR_MODE_LINE_ART)
+            if color_mode != COLOR_MODE_ACTUAL:
+                canvas_data.shapes = _apply_geo_color_mode(canvas_data.shapes, color_mode)
+
+            return canvas_data
+
+        elif ext == '.svg':
             # SVG 文件直接解析路径，不做几何识别
             _ensure_geo_loaded()
             try:
@@ -2487,6 +2532,12 @@ class GeometryMode:
                 ys = [p[1] for p in all_points]
                 canvas_data.bbox = (min(xs), min(ys), max(xs), max(ys))
 
+            # SVG 也支持自动标注端点
+            auto_label_enabled = params.get('auto_label', True)
+            if auto_label_enabled and canvas_data.shapes:
+                from core.vertex_labeler import auto_label_vertices
+                canvas_data = auto_label_vertices(canvas_data)
+
             return canvas_data
 
         # 1. 读取图像
@@ -2530,6 +2581,44 @@ class GeometryMode:
         # 这里通过 annotations 附带或单独保存
 
         return canvas_data
+
+
+# ============================================================
+# 模块级辅助函数（供非图像格式导入使用）
+# ============================================================
+
+def _apply_geo_color_mode(shapes: List[Shape], color_mode: str) -> List[Shape]:
+    """
+    模块级颜色模式应用函数（供 LaTeX/GGB 导入分支使用）
+
+    简化版的颜色模式处理，不依赖 GeometryMode 实例。
+
+    参数:
+        shapes: 形状列表
+        color_mode: 颜色模式字符串
+
+    返回:
+        处理后的形状列表（就地修改）
+    """
+    if color_mode == COLOR_MODE_LINE_ART:
+        for shape in shapes:
+            shape.line_color = (0, 0, 0)
+            shape.fill_color = None
+    elif color_mode == COLOR_MODE_COLOR_FILL:
+        import colorsys
+        count = max(len(shapes), 1)
+        for i, shape in enumerate(shapes):
+            if shape.type in (ShapeType.POLYGON, ShapeType.TRIANGLE,
+                              ShapeType.RECTANGLE, ShapeType.CIRCLE,
+                              ShapeType.ELLIPSE):
+                hue = (i * 360 / count) % 360
+                h = hue / 360.0
+                r, g, b = colorsys.hsv_to_rgb(h, 0.8, 0.95)
+                shape.fill_color = (int(b * 255), int(g * 255), int(r * 255))
+            shape.line_color = (0, 0, 0)
+    # COLOR_MODE_ACTUAL: 保留原始颜色，不做处理
+
+    return shapes
 
 
 # ============================================================

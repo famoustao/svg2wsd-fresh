@@ -1423,9 +1423,11 @@ class MainWindow:
     def _on_add_file(self):
         """添加文件按钮"""
         filepaths = filedialog.askopenfilenames(
-            title='选择图片文件',
+            title='选择文件',
             filetypes=[
                 ('图片文件', '*.png *.jpg *.jpeg *.bmp *.gif *.tiff *.svg'),
+                ('几何文件', '*.tex *.tikz *.latex *.ggb'),
+                ('所有支持的文件', '*.png *.jpg *.jpeg *.bmp *.gif *.tiff *.svg *.tex *.tikz *.latex *.ggb'),
                 ('所有文件', '*.*'),
             ],
         )

@@ -138,6 +138,7 @@ class CanvasData:
     bbox: Tuple[float, float, float, float] = (0.0, 0.0, 0.0, 0.0)
     source_file: str = ""
     image_data: Optional[Any] = None  # 图片格式导入时的原始图像数据
+    extra_info: Dict[str, Any] = field(default_factory=dict)  # 额外信息（警告、元数据等）
 
     def copy(self) -> 'CanvasData':
         """创建画布数据的深拷贝"""
@@ -146,7 +147,8 @@ class CanvasData:
             annotations=[a.copy() for a in self.annotations],
             bbox=self.bbox,
             source_file=self.source_file,
-            image_data=self.image_data
+            image_data=self.image_data,
+            extra_info=dict(self.extra_info),
         )
 
 
