@@ -751,7 +751,7 @@ def process(image_path: str, mode_type: str, params: Optional[Dict[str, Any]] = 
 
     # SVG 文件直接解析，不经过图像处理流程
     if ext in svg_extensions:
-        subpaths, colors, bbox, is_stroke, stroke_widths, path_group_ids = svg2wsd_core._parse_svg_file(image_path)
+        subpaths, colors, bbox, is_stroke, stroke_widths, path_group_ids = svg2wsd_core._parse_svg_file(image_path)[:6]
         processor = ComicMode()
         processor.mode_type = mode_type
         processor.params = params

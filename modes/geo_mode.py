@@ -2394,7 +2394,7 @@ class GeometryMode:
                 import svg2wsd_core
                 _parse_svg_file = svg2wsd_core._parse_svg_file
 
-            subpaths, colors, bbox, is_stroke, stroke_widths, path_group_ids = _parse_svg_file(image_path)
+            subpaths, colors, bbox, is_stroke, stroke_widths, path_group_ids = _parse_svg_file(image_path)[:6]
 
             # 颜色格式归一化：各种 SVG 颜色格式 -> BGR 元组
             def _to_bgr(color):
