@@ -2702,15 +2702,10 @@ class MainWindow:
         elif size == 'A3':
             return (420.0, 297.0)
         elif size == '正方形':
-            base = 140.0
+            return (140.0, 140.0)
         else:
-            base = 140.0
-
-        # 几何模式下使用 1/4 正方形（35mm）
-        if self._current_mode == 'geo':
-            base = base / 4.0
-
-        return (base, base)
+            # 自定义 - 使用默认正方形
+            return (140.0, 140.0)
 
     # ============================================================
     # 主循环
