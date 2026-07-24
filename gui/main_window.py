@@ -1426,8 +1426,8 @@ class MainWindow:
             title='选择文件',
             filetypes=[
                 ('图片文件', '*.png *.jpg *.jpeg *.bmp *.gif *.tiff *.svg'),
-                ('几何文件', '*.tex *.tikz *.latex *.ggb'),
-                ('所有支持的文件', '*.png *.jpg *.jpeg *.bmp *.gif *.tiff *.svg *.tex *.tikz *.latex *.ggb'),
+                ('几何文件', '*.tex *.ggb'),
+                ('所有支持的文件', '*.png *.jpg *.jpeg *.bmp *.gif *.tiff *.svg *.tex *.ggb'),
                 ('所有文件', '*.*'),
             ],
         )
@@ -1597,6 +1597,25 @@ class MainWindow:
                 except Exception as e:
                     self.preview_panel.set_image(None)
                     self._update_status(f'SVG预览失败: {e}')
+        elif ext in ('.tex', '.ggb'):
+            # LaTeX / GeoGebra 文件：导入为 CanvasData 后在矢量预览画布上显示
+            try:
+                from core.importer import import_file
+                canvas_data = import_file(filepath)
+                self.preview_panel.set_svg_original(canvas_data)
+
+                from collections import Counter
+                shape_types = [s.type.name for s in canvas_data.shapes]
+                if shape_types:
+                    shape_info = ', '.join(f'{t}({c})' for t, c in Counter(shape_types).items())
+                else:
+                    shape_info = '无图形'
+                ann_info = f'{len(canvas_data.annotations)} 个标注' if canvas_data.annotations else '无标注'
+                self._update_status(
+                    f'已加载预览: {file_info["name"]} — {shape_info}，{ann_info}'
+                )
+            except Exception as e:
+                self._update_status(f'加载预览失败: {e}')
         else:
             # 普通图片文件
             try:

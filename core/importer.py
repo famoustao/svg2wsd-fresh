@@ -6,7 +6,7 @@
 支持的格式:
     - 图片格式: PNG, JPG, BMP, TIFF, WEBP（返回原始图像数据）
     - SVG: 可缩放矢量图形（解析路径转换为Shape列表）
-    - LaTeX/TikZ: .tex, .tikz（提取tikzpicture环境）
+    - LaTeX/TikZ: .tex（提取tikzpicture环境）
     - GGB: GeoGebra文件（暂留空实现）
     - WSD: 万氏画板文件（调用wsd_parser解析）
 """
@@ -27,7 +27,7 @@ from core.data_model import CanvasData, Shape, TextAnnotation, ShapeType
 # 格式分类
 IMAGE_EXTENSIONS = {'.png', '.jpg', '.jpeg', '.bmp', '.tif', '.tiff', '.webp'}
 SVG_EXTENSIONS = {'.svg'}
-LATEX_EXTENSIONS = {'.tex', '.tikz', '.latex'}
+LATEX_EXTENSIONS = {'.tex'}
 GGB_EXTENSIONS = {'.ggb'}
 WSD_EXTENSIONS = {'.wsd'}
 
@@ -464,7 +464,7 @@ def import_latex(filepath: str) -> CanvasData:
     调用tikz_utils提取tikzpicture环境，转换为CanvasData。
 
     参数:
-        filepath: LaTeX文件路径（.tex或.tikz）
+        filepath: LaTeX文件路径（.tex）
 
     返回:
         CanvasData 对象

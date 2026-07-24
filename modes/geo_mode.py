@@ -2341,7 +2341,7 @@ class GeometryMode:
         # 判断是否为非图像格式文件（SVG / LaTeX / GGB）
         ext = os.path.splitext(image_path)[1].lower()
 
-        if ext in ('.tex', '.tikz', '.latex'):
+        if ext == '.tex':
             # ---- LaTeX/TikZ 文件 ----
             from core.importer import import_latex
             from core.vertex_labeler import auto_label_vertices
