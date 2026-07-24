@@ -1664,7 +1664,7 @@ class MainWindow:
             try:
                 import svg2wsd_core
                 subpaths, colors, bbox, is_stroke, stroke_widths, path_group_ids = \
-                    svg2wsd_core._parse_svg_file(filepath)
+                    svg2wsd_core._parse_svg_file(filepath)[:6]
                 # 构建 CanvasData（使用 SVG 原始颜色）
                 from core.data_model import CanvasData, Shape, ShapeType
                 canvas_data = CanvasData()
