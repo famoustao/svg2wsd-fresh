@@ -1555,9 +1555,10 @@ class PreviewPanel(ttk.Frame):
         # 更新选项卡图标（选中时彩色emoji，未选中时无图标）
         self._update_preview_tab_icons(tab_widget)
 
-        # 同步缩放显示
+        # 同步缩放显示并自动适应视图
         if self._active_canvas is not None:
             self._update_zoom_display(self._active_canvas.get_zoom())
+            self._active_canvas.fit_to_view()
 
     def _update_preview_tab_icons(self, active_tab_widget):
         """更新预览选项卡图标：选中时彩色emoji，未选中时无图标"""
