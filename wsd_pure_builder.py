@@ -1844,8 +1844,8 @@ def build_text_record(text, x, y, mode=TEXT_NORMAL,
     else:
         rec[0x1c] = rec[0x1c] & 0x7f  # bit7 清零
 
-    # 关联类型（低3位）
-    rec[0x1c] = (rec[0x1c] & 0xf8) | (assoc_type & 0x07)
+    # 关联类型（低4位，支持0-8共9个区域）
+    rec[0x1c] = (rec[0x1c] & 0xe0) | (assoc_type & 0x0f)
 
     # 关联子类型 (+0x1d)
     rec[0x1d] = assoc_b1d & 0xff
