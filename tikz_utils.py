@@ -167,6 +167,16 @@ def _parse_coord(coord_str):
             y = radius * math.sin(angle_rad)
             return (x, y, coord_type)
 
+    # ---- 命名坐标查找 ----
+    # 检查是否是命名坐标引用（如 "A", "B", "O" 等单个标识符）
+    clean = coord_str.strip()
+    if re.match(r'^[a-zA-Z]\w*$', clean):
+        # 纯标识符，可能是命名坐标
+        if hasattr(_parse_coord, '_named_coords') and _parse_coord._named_coords:
+            pt = _parse_coord._named_coords.get(clean)
+            if pt:
+                return (pt[0], pt[1], coord_type)
+    
     # 分割 x, y
     parts = coord_str.split(',')
     if len(parts) != 2:
@@ -624,21 +634,20 @@ def _parse_path_body(body_str, options):
 
 def _add_circle_to_subpath(subpath, cx, cy, r, segments=72):
     """将圆分解为近似的点列（多边形近似）
-    注意：调用前应确保子路径中没有 move 操作，或已设置当前点
+    
+    第一个 move 点是圆心 (cx, cy)，后续 line 点在圆弧上。
+    这样 _convert_tikz_shapes 中的圆形检测逻辑可以通过第一个点
+    判断是否为圆心，从而准确还原圆的参数。
     """
-    points = []
+    # 如果子路径为空，先 move 到圆心
+    if not subpath:
+        subpath.append(('move', (cx, cy)))
+    # 添加圆弧上的采样点
     for i in range(segments):
         angle = 2 * math.pi * i / segments
         x = cx + r * math.cos(angle)
         y = cy + r * math.sin(angle)
-        points.append((x, y))
-
-    # 如果子路径为空，先添加 move
-    if not subpath:
-        subpath.append(('move', points[0]))
-    # 否则用 line 连接到第一个点（覆盖 move 的起始点差异）
-    for p in points[1:]:
-        subpath.append(('line', p))
+        subpath.append(('line', (x, y)))
     subpath.append(('close', None))
 
 
@@ -692,6 +701,11 @@ def parse_tikz_code(tikz_code):
 
     # 去掉注释
     body = re.sub(r'%.*', '', body)
+
+    # 提取命名坐标 (\coordinate 命令)
+    named_coords = extract_named_coordinates(tikz_code)
+    # 注入到 _parse_coord 的静态属性中供查找
+    _parse_coord._named_coords = named_coords
 
     # 提取 \draw, \fill, \filldraw, \path 命令
     # 匹配到分号结束（注意括号嵌套）
@@ -848,6 +862,36 @@ def extract_tikz_from_tex(tex_content):
         tikz_codes.append(full_code)
 
     return tikz_codes
+
+
+def extract_named_coordinates(tikz_code):
+    """
+    从TikZ代码中提取 \\coordinate 命令定义的命名坐标
+    
+    返回: dict, name -> (x, y) 坐标映射
+    """
+    coords = {}
+    # 去掉注释
+    body = re.sub(r'%.*', '', tikz_code)
+    
+    # 提取 tikzpicture 环境内内容
+    env_match = re.search(
+        r'\\begin\{tikzpicture\}(\[.*?\])?\s*(.*?)\\end\{tikzpicture\}',
+        body, re.DOTALL
+    )
+    if env_match:
+        body = env_match.group(2)
+    
+    # 匹配 \coordinate (name) at (x,y);
+    for m in re.finditer(r'\\coordinate\s*\((\w+)\)\s*at\s*\(([^)]+)\)\s*;', body):
+        name = m.group(1)
+        coord_str = m.group(2).strip()
+        coord = _parse_coord(coord_str)
+        if coord:
+            x, y, _ = coord
+            coords[name] = (x, y)
+    
+    return coords
 
 
 def read_tikz_file(file_path):
@@ -1041,6 +1085,10 @@ def extract_tikz_nodes(tikz_code):
     # 去掉注释
     body = re.sub(r'%.*', '', tikz_code)
     
+    # 提取命名坐标
+    named_coords = extract_named_coordinates(tikz_code)
+    _parse_coord._named_coords = named_coords
+    
     # 提取 tikzpicture 环境内的内容
     env_match = re.search(
         r'\\begin\{tikzpicture\}(\[.*?\])?\s*(.*?)\\end\{tikzpicture\}',
@@ -1153,12 +1201,15 @@ def extract_tikz_nodes(tikz_code):
             node = TikZNode()
             node.name = node_name
             node.text = content
+            # 清理 LaTeX 数学模式符号
+            node.text = node.text.replace('$', '').strip()
+            node.text = node.text.replace('\\', '')
             node.x = x
             node.y = y
             node.options = _parse_options(opt_str)
             
             # 解析上下标
-            base, sup, sub, has_sup, has_sub = _parse_node_text(content)
+            base, sup, sub, has_sup, has_sub = _parse_node_text(node.text)
             node.base_text = base
             node.superscript = sup
             node.subscript = sub

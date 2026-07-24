@@ -7,7 +7,8 @@
     - 图片格式: PNG, JPG, BMP, TIFF, WEBP（返回原始图像数据）
     - SVG: 可缩放矢量图形（解析路径转换为Shape列表）
     - LaTeX/TikZ: .tex（提取tikzpicture环境）
-    - GGB: GeoGebra文件（暂留空实现）
+    - GGB: GeoGebra文件（ZIP+XML解析）
+    - GGB Script: GeoGebra命令式脚本（文本代码）
     - WSD: 万氏画板文件（调用wsd_parser解析）
 """
 
@@ -29,6 +30,7 @@ IMAGE_EXTENSIONS = {'.png', '.jpg', '.jpeg', '.bmp', '.tif', '.tiff', '.webp'}
 SVG_EXTENSIONS = {'.svg'}
 LATEX_EXTENSIONS = {'.tex'}
 GGB_EXTENSIONS = {'.ggb'}
+GGB_SCRIPT_EXTENSIONS = {'.ggb script', '.ggs'}
 WSD_EXTENSIONS = {'.wsd'}
 
 
@@ -79,6 +81,7 @@ def get_supported_formats() -> dict:
         "SVG": sorted(SVG_EXTENSIONS),
         "LaTeX/TikZ": sorted(LATEX_EXTENSIONS),
         "GeoGebra": sorted(GGB_EXTENSIONS),
+        "GeoGebra脚本": sorted(GGB_SCRIPT_EXTENSIONS),
         "WSD画板": sorted(WSD_EXTENSIONS),
     }
 
@@ -762,12 +765,39 @@ def _convert_tikz_annotations(tikz_nodes) -> list:
     """
     annotations = []
     for node in tikz_nodes:
+        # 解析 anchor 方向偏移
+        dx, dy = 0.0, 0.0
+        anchor_offset = 0.3  # 偏移距离（cm单位）
+        opts = node.options if hasattr(node, 'options') else {}
+        for key in opts:
+            key_lower = key.lower()
+            if key_lower == 'above':
+                dy = -anchor_offset
+            elif key_lower == 'below':
+                dy = anchor_offset
+            elif key_lower == 'left':
+                dx = -anchor_offset
+            elif key_lower == 'right':
+                dx = anchor_offset
+            elif key_lower == 'above left' or key_lower == 'left above':
+                dx = -anchor_offset
+                dy = -anchor_offset
+            elif key_lower == 'above right' or key_lower == 'right above':
+                dx = anchor_offset
+                dy = -anchor_offset
+            elif key_lower == 'below left' or key_lower == 'left below':
+                dx = -anchor_offset
+                dy = anchor_offset
+            elif key_lower == 'below right' or key_lower == 'right below':
+                dx = anchor_offset
+                dy = anchor_offset
+        
         ann = TextAnnotation(
             text=node.text,
-            x=node.x,
-            y=node.y,
+            x=node.x + dx,
+            y=node.y + dy,
             font_size=14.0,
-            bold=False,
+            bold=True,
         )
         # 处理上下标
         if node.has_superscript:
@@ -1247,3 +1277,35 @@ def import_ggb(filepath: str) -> CanvasData:
         bbox = (0, 0, 0, 0)
 
     return CanvasData(shapes=shapes, annotations=annotations, bbox=bbox, source_file=filepath)
+
+
+# ============================================================
+# GeoGebra 脚本格式导入
+# ============================================================
+
+def import_ggb_script(filepath_or_code: str) -> CanvasData:
+    """
+    导入 GeoGebra 命令式脚本文件
+
+    读取文本文件中的 GeoGebra 脚本代码，调用 ggb_script_parser 解析。
+
+    参数:
+        filepath_or_code: 脚本文件路径，或直接传入脚本代码字符串
+
+    返回:
+        CanvasData 对象
+    """
+    from .ggb_script_parser import parse_ggb_script
+
+    # 判断是文件路径还是直接代码
+    if os.path.exists(filepath_or_code):
+        with open(filepath_or_code, 'r', encoding='utf-8') as f:
+            code = f.read()
+        source = filepath_or_code
+    else:
+        code = filepath_or_code
+        source = None
+
+    canvas_data = parse_ggb_script(code)
+    canvas_data.source_file = source
+    return canvas_data

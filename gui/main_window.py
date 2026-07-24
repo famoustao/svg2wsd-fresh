@@ -1496,7 +1496,7 @@ class MainWindow:
 
         code_format_var = tk.StringVar(value='latex')
 
-        for text, val in [('LaTeX/TikZ', 'latex'), ('GeoGebra XML', 'ggb')]:
+        for text, val in [('LaTeX/TikZ', 'latex'), ('GeoGebra XML', 'ggb'), ('GeoGebra脚本', 'ggb_script')]:
             rb = tk.Radiobutton(
                 top_frame, text=text, variable=code_format_var, value=val,
                 bg=bg, fg=fg, font=('Microsoft YaHei UI', 10),
@@ -1570,6 +1570,23 @@ class MainWindow:
   </construction>
 </geogebra>"""
 
+        example_ggb_script = """# 定义基础点坐标
+A=(0,6)
+B=(-4,0)
+C=(4,0)
+# 外接圆
+circ = CircleThroughThreePoints(A,B,C)
+O = Center(circ)
+# 线段
+segBC = Segment(B,C)
+segAB = Segment(A,B)
+segAC = Segment(A,C)
+# 标签
+SetLabel(A,"A")
+SetLabel(B,"B")
+SetLabel(C,"C")
+SetLabel(O,"O")"""
+
         code_text.insert('1.0', example_latex)
 
         # 格式切换时更新提示和示例
@@ -1579,6 +1596,10 @@ class MainWindow:
                 hint_label.config(text='在此粘贴 LaTeX/TikZ 代码（支持 \\begin{tikzpicture} 环境）')
                 code_text.delete('1.0', 'end')
                 code_text.insert('1.0', example_latex)
+            elif fmt == 'ggb_script':
+                hint_label.config(text='在此粘贴 GeoGebra 命令式脚本代码（如 Segment(A,B)）')
+                code_text.delete('1.0', 'end')
+                code_text.insert('1.0', example_ggb_script)
             else:
                 hint_label.config(text='在此粘贴 GeoGebra XML 代码（geogebra.xml 内容）')
                 code_text.delete('1.0', 'end')
@@ -1616,6 +1637,40 @@ class MainWindow:
                     tmp.write(raw_code)
                     tmp_path = tmp.name
                     tmp.close()
+                elif fmt == 'ggb_script':
+                    # GeoGebra脚本：直接调用 import_ggb_script
+                    from core.importer import import_ggb_script
+                    canvas_data = import_ggb_script(raw_code)
+
+                    # 添加到文件列表
+                    filename = 'pasted_code_ggb_script.txt'
+                    existing = [i for i, f in enumerate(self._files) if f['name'] == filename]
+                    if existing:
+                        idx = existing[0]
+                        self._files[idx] = {'path': None, 'name': filename, 'status': '待处理',
+                                            'tmp_file': True, 'canvas_data': canvas_data}
+                    else:
+                        self._files.append({
+                            'path': None,
+                            'name': filename,
+                            'status': '待处理',
+                            'tmp_file': True,
+                            'canvas_data': canvas_data,
+                        })
+                        self.file_tree.insert('', 'end', text=filename, values=('待处理',))
+
+                    # 预览
+                    self._current_file_index = len(self._files) - 1
+                    children = self.file_tree.get_children()
+                    if children:
+                        self.file_tree.selection_set(children[-1])
+
+                    self.preview_panel.set_svg_original(canvas_data)
+                    shape_count = len(canvas_data.shapes)
+                    ann_count = len(canvas_data.annotations)
+                    status_var.set(f'导入成功: {shape_count} 个图形, {ann_count} 个标注')
+                    dialog.destroy()
+                    return
                 else:
                     # GGB：写入临时 ZIP
                     suffix = '.ggb'
