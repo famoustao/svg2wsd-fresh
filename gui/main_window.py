@@ -549,7 +549,8 @@ class MainWindow:
             btn_frame1,
             text='添加',
             command=self._on_add_file,
-            width=5,
+            style='Small.TButton',
+            width=4,
         )
         self.add_file_btn.pack(side='left', padx=(0, 2))
 
@@ -557,7 +558,8 @@ class MainWindow:
             btn_frame1,
             text='粘贴',
             command=self._on_paste_code,
-            width=5,
+            style='Small.TButton',
+            width=4,
         )
         self.paste_code_btn.pack(side='left', padx=2)
 
@@ -565,7 +567,8 @@ class MainWindow:
             btn_frame1,
             text='移除',
             command=self._on_remove_file,
-            width=5,
+            style='Small.TButton',
+            width=4,
         )
         self.remove_file_btn.pack(side='left', padx=2)
 
@@ -573,7 +576,8 @@ class MainWindow:
             btn_frame1,
             text='清空',
             command=self._on_clear_files,
-            width=5,
+            style='Small.TButton',
+            width=4,
         )
         self.clear_file_btn.pack(side='left', padx=2)
 
@@ -1481,6 +1485,7 @@ class MainWindow:
         dialog.transient(self.root)
         dialog.grab_set()
         dialog.resizable(True, True)
+        dialog.protocol('WM_DELETE_WINDOW', lambda: _on_close_or_cancel())
 
         bg = get_color('card')
         fg = get_color('text')
@@ -1529,6 +1534,9 @@ class MainWindow:
         # --- 按钮行 ---
         btn_frame = tk.Frame(dialog, bg=bg)
         btn_frame.pack(fill='x', padx=12, pady=(4, 10))
+
+        # 导入是否已完成的标记
+        _import_done = [False]
 
         def _detect_format(code):
             """自动识别代码格式: 'latex' / 'ggb_script' / 'ggb_xml'"""
@@ -1665,13 +1673,23 @@ class MainWindow:
                 shape_count = len(canvas_data.shapes)
                 ann_count = len(canvas_data.annotations)
                 status_var.set(f'导入成功: {fmt} — {shape_count} 个图形, {ann_count} 个标注')
+                _import_done[0] = True
                 dialog.destroy()
 
             except Exception as e:
                 status_var.set(f'导入失败: {e}')
 
-        ttk.Button(btn_frame, text='导入并预览', command=_do_import, width=14).pack(side='left', padx=(0, 8))
-        ttk.Button(btn_frame, text='取消', command=dialog.destroy, width=8).pack(side='right')
+        def _on_close_or_cancel():
+            """关闭或取消时，如果代码区有内容且未导入，提示确认"""
+            raw_code = code_text.get('1.0', 'end').strip()
+            if raw_code and not _import_done[0]:
+                from tkinter import messagebox
+                if not messagebox.askyesno('确认关闭', '代码尚未导入，确定要关闭吗？'):
+                    return
+            dialog.destroy()
+
+        ttk.Button(btn_frame, text='确认导入', command=_do_import, width=12).pack(side='left', padx=(0, 8))
+        ttk.Button(btn_frame, text='取消', command=_on_close_or_cancel, width=8).pack(side='right')
 
         code_text.focus_set()
 

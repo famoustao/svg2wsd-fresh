@@ -280,6 +280,31 @@ def _configure_buttons(style):
             ('pressed', COLOR_PRESSED),
         ],
     )
+    # 小号按钮（用于文件列表等紧凑场景）
+    style.configure(
+        'Small.TButton',
+        background=COLOR_CARD,
+        foreground=COLOR_TEXT,
+        font=('Microsoft YaHei UI', 8),
+        padding=(6, 2),
+        borderwidth=1,
+        relief='solid',
+        bordercolor=COLOR_BORDER,
+    )
+    style.map(
+        'Small.TButton',
+        background=[
+            ('active', COLOR_ACCENT),
+            ('pressed', COLOR_PRESSED),
+        ],
+        foreground=[
+            ('active', '#ffffff'),
+        ],
+        bordercolor=[
+            ('active', COLOR_ACCENT),
+            ('pressed', COLOR_PRESSED),
+        ],
+    )
 
     # 主按钮样式 - 大按钮、蓝色填充、突出显示
     style.configure(
