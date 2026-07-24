@@ -2072,6 +2072,10 @@ class PureWSDBuilder:
         """添加一条路径记录"""
         self.records.append(('path', path_record))
 
+    def add_circle(self, circle_record):
+        """添加一条圆形记录（原生圆，非贝塞尔近似）"""
+        self.records.append(('path', circle_record))
+
     def add_text(self, text_record):
         """添加一条文字记录"""
         self.records.append(('text', text_record))

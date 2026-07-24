@@ -31,6 +31,7 @@ SVG_EXTENSIONS = {'.svg'}
 LATEX_EXTENSIONS = {'.tex'}
 GGB_EXTENSIONS = {'.ggb'}
 GGB_SCRIPT_EXTENSIONS = {'.ggb script', '.ggs'}
+TXT_EXTENSIONS = {'.txt'}
 WSD_EXTENSIONS = {'.wsd'}
 
 
@@ -63,6 +64,8 @@ def import_file(filepath: str) -> CanvasData:
         return import_latex(filepath)
     elif ext in GGB_EXTENSIONS:
         return import_ggb(filepath)
+    elif ext in TXT_EXTENSIONS:
+        return import_txt(filepath)
     elif ext in WSD_EXTENSIONS:
         return import_wsd(filepath)
     else:
@@ -82,6 +85,7 @@ def get_supported_formats() -> dict:
         "LaTeX/TikZ": sorted(LATEX_EXTENSIONS),
         "GeoGebra": sorted(GGB_EXTENSIONS),
         "GeoGebra脚本": sorted(GGB_SCRIPT_EXTENSIONS),
+        "TXT代码": sorted(TXT_EXTENSIONS),
         "WSD画板": sorted(WSD_EXTENSIONS),
     }
 
@@ -1277,6 +1281,184 @@ def import_ggb(filepath: str) -> CanvasData:
         bbox = (0, 0, 0, 0)
 
     return CanvasData(shapes=shapes, annotations=annotations, bbox=bbox, source_file=filepath)
+
+
+# ============================================================
+# TXT 代码格式导入（自动识别）
+# ============================================================
+
+def _detect_code_format(text: str) -> str:
+    """
+    自动检测文本中的代码格式
+
+    支持:
+        - latex: LaTeX/TikZ 代码（\\draw, \\node, \\begin{tikzpicture} 等）
+        - ggb_script: GeoGebra 脚本（Segment(, Circle(, Point( 等）
+        - ggb_xml: GeoGebra XML（以 <?xml 或 <geogebra 开头）
+        - unknown: 无法识别
+
+    参数:
+        text: 待检测的文本内容
+
+    返回:
+        格式标识字符串: 'latex', 'ggb_script', 'ggb_xml', 'unknown'
+    """
+    stripped = text.strip()
+
+    # GeoGebra XML 检测
+    if stripped.startswith('<?xml') or stripped.lower().startswith('<geogebra'):
+        return 'ggb_xml'
+
+    # LaTeX/TikZ 检测
+    latex_keywords = [
+        '\\draw', '\\node', '\\coordinate', '\\fill', '\\filldraw',
+        '\\path', '\\begin{tikzpicture}', '\\end{tikzpicture}',
+        '\\begin{document}', '\\usepackage',
+    ]
+    if any(kw in stripped for kw in latex_keywords):
+        return 'latex'
+
+    # GeoGebra 脚本检测
+    ggb_keywords = [
+        'Segment(', 'Circle(', 'Line(', 'PerpendicularLine(',
+        'Intersect(', 'SetLabel(', 'CircleThroughThreePoints(',
+        'Point(', 'Midpoint(', 'Ray(', 'Polygon(', 'Vector(',
+        'Angle(', 'Tangent(', 'Function(', 'Text(',
+        'Arc(', 'Semicircle(', 'Ellipse(', 'Parabola(',
+        'Hyperbola(', 'PolyLine(', 'FillPolygon(',
+    ]
+    if any(kw in stripped for kw in ggb_keywords):
+        return 'ggb_script'
+
+    return 'unknown'
+
+
+def import_txt(filepath: str) -> CanvasData:
+    """
+    导入 TXT 文件（自动识别代码格式）
+
+    读取文本文件内容，自动检测是否为 LaTeX/TikZ 或 GeoGebra 脚本代码，
+    然后调用对应的解析器进行处理。
+
+    参数:
+        filepath: TXT 文件路径
+
+    返回:
+        CanvasData 对象
+
+    异常:
+        ValueError: 无法识别 TXT 中的代码格式
+    """
+    with open(filepath, 'r', encoding='utf-8') as f:
+        content = f.read()
+
+    fmt = _detect_code_format(content)
+
+    if fmt == 'latex':
+        # 调用 LaTeX 导入逻辑
+        return _import_txt_as_latex(content, filepath)
+    elif fmt == 'ggb_script':
+        # 调用 GeoGebra 脚本导入
+        from .ggb_script_parser import parse_ggb_script
+        canvas_data = parse_ggb_script(content)
+        canvas_data.source_file = filepath
+        return canvas_data
+    elif fmt == 'ggb_xml':
+        # GeoGebra XML → 写入临时 .ggb 再解析
+        import tempfile, zipfile
+        tmp = tempfile.NamedTemporaryFile(mode='wb', suffix='.ggb', delete=False)
+        try:
+            zf = zipfile.ZipFile(tmp.name, 'w')
+            zf.writestr('geogebra.xml', content.encode('utf-8'))
+            zf.close()
+            result = import_file(tmp.name)
+            result.source_file = filepath
+            return result
+        finally:
+            if os.path.exists(tmp.name):
+                os.unlink(tmp.name)
+    else:
+        raise ValueError(
+            f"无法识别 TXT 文件中的代码格式。"
+            f"支持: LaTeX/TikZ（\\draw, \\node 等）、GeoGebra 脚本（Circle(, Segment( 等）、GeoGebra XML"
+        )
+
+
+def _import_txt_as_latex(content: str, filepath: str) -> CanvasData:
+    """
+    将 TXT 中的 LaTeX/TikZ 代码解析为 CanvasData
+
+    如果内容不包含 tikzpicture 环境，则自动包裹一层。
+
+    参数:
+        content: LaTeX/TikZ 文本内容
+        filepath: 原始文件路径
+
+    返回:
+        CanvasData 对象
+    """
+    import sys
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+    from tikz_utils import extract_tikz_from_tex, parse_tikz_code, extract_tikz_nodes
+
+    # 提取 tikzpicture 环境块
+    tikz_blocks = extract_tikz_from_tex(content)
+
+    # 如果没有找到 tikzpicture 环境，尝试把整个内容当作 tikzpicture
+    if not tikz_blocks:
+        # 检查是否包含基本的 TikZ 绘图命令但没有环境包裹
+        tikz_commands = ['\\draw', '\\fill', '\\filldraw', '\\path', '\\node']
+        has_tikz_cmd = any(cmd in content for cmd in tikz_commands)
+        if has_tikz_cmd:
+            # 自动包裹 tikzpicture 环境
+            wrapped = f'\\begin{{tikzpicture}}\n{content}\n\\end{{tikzpicture}}'
+            tikz_blocks = extract_tikz_from_tex(wrapped)
+        else:
+            # 没有任何可识别的 TikZ 内容
+            raise ValueError("TXT 中未找到可解析的 LaTeX/TikZ 代码")
+
+    shapes = []
+    annotations = []
+    all_x = []
+    all_y = []
+
+    for tikz_code in tikz_blocks:
+        tikz_paths = parse_tikz_code(tikz_code)
+        block_shapes = _convert_tikz_shapes(tikz_paths)
+        shapes.extend(block_shapes)
+
+        tikz_nodes = extract_tikz_nodes(tikz_code)
+        block_annotations = _convert_tikz_annotations(tikz_nodes)
+        annotations.extend(block_annotations)
+
+    # 收集所有坐标计算 bbox
+    for s in shapes:
+        if s.type == ShapeType.CIRCLE:
+            cx, cy = s.points[0]
+            r = s.extra.get('radius', 0)
+            all_x.extend([cx - r, cx + r])
+            all_y.extend([cy - r, cy + r])
+        else:
+            for p in s.points:
+                all_x.append(p[0])
+                all_y.append(p[1])
+
+    for a in annotations:
+        all_x.append(a.x)
+        all_y.append(a.y)
+
+    if all_x and all_y:
+        bbox = (min(all_x), min(all_y), max(all_x), max(all_y))
+    else:
+        bbox = (0.0, 0.0, 0.0, 0.0)
+
+    return CanvasData(
+        shapes=shapes,
+        annotations=annotations,
+        bbox=bbox,
+        source_file=filepath,
+    )
 
 
 # ============================================================

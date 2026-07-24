@@ -1424,7 +1424,8 @@ class MainWindow:
             filetypes=[
                 ('图片文件', '*.png *.jpg *.jpeg *.bmp *.gif *.tiff *.svg'),
                 ('几何文件', '*.tex *.ggb'),
-                ('所有支持的文件', '*.png *.jpg *.jpeg *.bmp *.gif *.tiff *.svg *.tex *.ggb'),
+                ('TXT代码文件', '*.txt'),
+                ('所有支持的文件', '*.png *.jpg *.jpeg *.bmp *.gif *.tiff *.svg *.tex *.ggb *.txt'),
                 ('所有文件', '*.*'),
             ],
         )
@@ -1464,15 +1465,10 @@ class MainWindow:
 
     def _open_code_import_dialog(self):
         """打开代码导入弹窗（自动识别 LaTeX / GeoGebra 脚本 / GeoGebra XML）"""
-        import tkinter.simpledialog
-
         dialog = tk.Toplevel(self.root)
         dialog.title('粘贴代码（自动识别格式）')
         dialog.geometry('540x500')
         dialog.resizable(True, True)
-        # 确保弹窗在最前面
-        dialog.attributes('-topmost', True)
-        dialog.after(100, lambda: dialog.attributes('-topmost', False))
 
         bg = get_color('card')
 
@@ -1482,20 +1478,15 @@ class MainWindow:
             bg=bg, fg='#888', font=('Microsoft YaHei UI', 9), anchor='w',
         ).pack(fill='x', padx=12, pady=(10, 4))
 
-        # --- 代码输入区 ---
+        # --- 代码输入区（不使用 expand，给按钮留空间） ---
         from tkinter.scrolledtext import ScrolledText
         code_text = ScrolledText(
             dialog, wrap='word', font=('Consolas', 11),
             bg='#1e1e2e', fg='#cdd6f4', insertbackground='#cdd6f4',
             selectbackground='#45475a', relief='flat', bd=2,
+            height=15,
         )
-        code_text.pack(fill='both', expand=True, padx=12, pady=4)
-
-        # 预填示例
-        code_text.insert('1.0', r"""\begin{tikzpicture}
-  \draw (0,0) -- (4,0) -- (2,3.46) -- cycle;
-  \draw (2,1) circle (0.5);
-\end{tikzpicture}""")
+        code_text.pack(fill='both', padx=12, pady=4)
 
         # --- 状态标签 ---
         status_var = tk.StringVar(value='就绪')
@@ -1504,7 +1495,7 @@ class MainWindow:
             font=('Microsoft YaHei UI', 9), anchor='w',
         ).pack(fill='x', padx=12, pady=(4, 2))
 
-        # --- 按钮行（直接pack到dialog，不嵌套额外Frame） ---
+        # --- 按钮行 ---
         _import_done = [False]
 
         def _detect_format(code):
@@ -1592,7 +1583,7 @@ class MainWindow:
 
         dialog.protocol('WM_DELETE_WINDOW', _on_close)
 
-        # 按钮直接pack到dialog底部
+        # 按钮行
         btn_row = tk.Frame(dialog, bg=bg)
         btn_row.pack(fill='x', padx=12, pady=(4, 10))
         ttk.Button(btn_row, text='粘贴', command=lambda: code_text.event_generate('<<Paste>>'), width=8).pack(side='left', padx=(0, 6))
@@ -1791,6 +1782,39 @@ class MainWindow:
                 )
             except Exception as e:
                 self._update_status(f'加载 GGB 预览失败: {e}')
+        elif ext in ('.txt',):
+            # TXT 代码文件：自动识别格式后导入预览
+            try:
+                from core.importer import import_file, _detect_code_format
+
+                # 先读取内容检测格式
+                with open(filepath, 'r', encoding='utf-8') as f:
+                    content = f.read()
+                fmt = _detect_code_format(content)
+
+                canvas_data = import_file(filepath)
+
+                from collections import Counter
+                shape_types = [s.type.name for s in canvas_data.shapes]
+                if shape_types:
+                    shape_info = ', '.join(f'{t}({c})' for t, c in Counter(shape_types).items())
+                else:
+                    shape_info = '无图形'
+                ann_info = f'{len(canvas_data.annotations)} 个标注' if canvas_data.annotations else '无标注'
+
+                # 根据检测格式选择预览方式
+                if fmt == 'latex':
+                    self.preview_panel.set_latex_preview(canvas_data)
+                    self._update_status(
+                        f'已加载 TXT→LaTeX 预览: {file_info["name"]} — {shape_info}，{ann_info}'
+                    )
+                else:
+                    self.preview_panel.set_ggb_preview(canvas_data)
+                    self._update_status(
+                        f'已加载 TXT→GeoGebra 预览: {file_info["name"]} — {shape_info}，{ann_info}'
+                    )
+            except Exception as e:
+                self._update_status(f'加载 TXT 代码预览失败: {e}')
         else:
             # 普通图片文件
             try:

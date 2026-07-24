@@ -680,9 +680,17 @@ def export_wsd_single(canvas_data: CanvasData,
         # 应用覆盖颜色
         if override_bgr is not None:
             transformed.line_color = override_bgr
-        rec = _shape_to_path_record(transformed, linewidth=linewidth, line_alpha=line_alpha)
-        if rec is not None:
-            builder.add_path(rec)
+
+        # 圆形走原生圆记录
+        if transformed.type == ShapeType.CIRCLE and transformed.points:
+            cx, cy = int(transformed.points[0][0]), int(transformed.points[0][1])
+            radius = int(transformed.extra.get('radius', 50))
+            rec = build_circle_record(cx, cy, radius, linewidth=linewidth)
+            builder.add_circle(rec)
+        else:
+            rec = _shape_to_path_record(transformed, linewidth=linewidth, line_alpha=line_alpha)
+            if rec is not None:
+                builder.add_path(rec)
 
     # 构建文字记录（坐标变换后）
     for annotation in canvas_data.annotations:
