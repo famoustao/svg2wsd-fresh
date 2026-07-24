@@ -541,7 +541,7 @@ class MainWindow:
 
         content = self._file_card.content
 
-        # 第一行按钮：添加、移除、清空、粘贴
+        # 第一行按钮：添加、粘贴、移除、清空
         btn_frame1 = tk.Frame(content, bg=get_color('card'))
         btn_frame1.pack(fill='x', pady=(0, 6))
 
@@ -552,6 +552,14 @@ class MainWindow:
             width=5,
         )
         self.add_file_btn.pack(side='left', padx=(0, 2))
+
+        self.paste_code_btn = ttk.Button(
+            btn_frame1,
+            text='粘贴',
+            command=self._on_paste_code,
+            width=5,
+        )
+        self.paste_code_btn.pack(side='left', padx=2)
 
         self.remove_file_btn = ttk.Button(
             btn_frame1,
@@ -568,14 +576,6 @@ class MainWindow:
             width=5,
         )
         self.clear_file_btn.pack(side='left', padx=2)
-
-        self.paste_code_btn = ttk.Button(
-            btn_frame1,
-            text='粘贴',
-            command=self._on_paste_code,
-            width=5,
-        )
-        self.paste_code_btn.pack(side='left', padx=2)
 
         # 第二行按钮：更新预览、开始转换并导出
         btn_frame2 = tk.Frame(content, bg=get_color('card'))
