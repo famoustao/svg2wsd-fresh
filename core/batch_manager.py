@@ -65,7 +65,8 @@ class FileItem:
         error:    错误信息字符串，处理失败时记录异常描述
         progress: 处理进度（0-100），0 表示未开始，100 表示完成
     """
-    filepath: str
+    filepath: Optional[str] = None
+    display_name: Optional[str] = None  # 自定义显示/导出文件名
     status: FileStatus = FileStatus.PENDING
     result: Optional[CanvasData] = None
     error: str = ""
@@ -98,7 +99,11 @@ class FileItem:
     @property
     def filename(self) -> str:
         """获取文件名（不含路径）"""
-        return os.path.basename(self.filepath)
+        if self.display_name:
+            return self.display_name
+        if self.filepath:
+            return os.path.basename(self.filepath)
+        return 'pasted_code'
 
     # ========================================================
     # 状态变更方法
@@ -215,22 +220,28 @@ class BatchManager:
         """是否正在处理中"""
         return self._is_processing
 
-    def add_file(self, filepath: str) -> bool:
+    def add_file(self, filepath: Optional[str] = None, result: Optional[CanvasData] = None,
+                 display_name: Optional[str] = None) -> bool:
         """
         添加单个文件到队列
 
         参数:
-            filepath: 文件路径
+            filepath: 文件路径（可为 None，用于粘贴代码等无路径的场景）
+            result:   已有的处理结果（如粘贴代码已解析的 CanvasData）
 
         返回:
             bool: 添加成功返回 True，文件已存在返回 False
         """
-        # 检查文件是否已存在（按路径比较）
-        for f in self._files:
-            if os.path.abspath(f.filepath) == os.path.abspath(filepath):
-                return False
+        # 检查文件是否已存在（按路径比较，None 路径不比较）
+        if filepath is not None:
+            for f in self._files:
+                if f.filepath is not None and os.path.abspath(f.filepath) == os.path.abspath(filepath):
+                    return False
 
-        self._files.append(FileItem(filepath=filepath))
+        file_item = FileItem(filepath=filepath, display_name=display_name)
+        if result is not None:
+            file_item.set_done(result)
+        self._files.append(file_item)
         return True
 
     def add_files(self, filepaths: List[str]) -> int:
@@ -412,6 +423,17 @@ class BatchManager:
                         pass
 
                 try:
+                    # 跳过已有结果或无路径的文件（如粘贴代码已解析的）
+                    if file_item.result is not None:
+                        success += 1
+                        continue
+
+                    # 无路径的文件无法处理
+                    if file_item.filepath is None:
+                        file_item.set_failed('无文件路径，无法处理')
+                        failed += 1
+                        continue
+
                     # 根据模式类型调用对应的处理器
                     mode_type_lower = mode_type.lower()
 

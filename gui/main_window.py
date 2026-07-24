@@ -541,45 +541,44 @@ class MainWindow:
 
         content = self._file_card.content
 
-        # 第一行按钮：添加、粘贴、移除、清空
+        # 第一行按钮：添加、粘贴、移除、清空（等宽均分）
         btn_frame1 = tk.Frame(content, bg=get_color('card'))
         btn_frame1.pack(fill='x', pady=(0, 6))
+
+        btn_style = 'Small.TButton'
+        btn_pad = 2
 
         self.add_file_btn = ttk.Button(
             btn_frame1,
             text='添加',
             command=self._on_add_file,
-            style='Small.TButton',
-            width=4,
+            style=btn_style,
         )
-        self.add_file_btn.pack(side='left', padx=(0, 2))
+        self.add_file_btn.pack(side='left', fill='x', expand=True, padx=(0, btn_pad))
 
         self.paste_code_btn = ttk.Button(
             btn_frame1,
             text='粘贴',
             command=self._on_paste_code,
-            style='Small.TButton',
-            width=4,
+            style=btn_style,
         )
-        self.paste_code_btn.pack(side='left', padx=2)
+        self.paste_code_btn.pack(side='left', fill='x', expand=True, padx=btn_pad)
 
         self.remove_file_btn = ttk.Button(
             btn_frame1,
             text='移除',
             command=self._on_remove_file,
-            style='Small.TButton',
-            width=4,
+            style=btn_style,
         )
-        self.remove_file_btn.pack(side='left', padx=2)
+        self.remove_file_btn.pack(side='left', fill='x', expand=True, padx=btn_pad)
 
         self.clear_file_btn = ttk.Button(
             btn_frame1,
             text='清空',
             command=self._on_clear_files,
-            style='Small.TButton',
-            width=4,
+            style=btn_style,
         )
-        self.clear_file_btn.pack(side='left', padx=2)
+        self.clear_file_btn.pack(side='left', fill='x', expand=True, padx=(btn_pad, 0))
 
         # 第二行按钮：更新预览、开始转换并导出
         btn_frame2 = tk.Frame(content, bg=get_color('card'))
@@ -1485,7 +1484,6 @@ class MainWindow:
         dialog.transient(self.root)
         dialog.grab_set()
         dialog.resizable(True, True)
-        dialog.protocol('WM_DELETE_WINDOW', lambda: _on_close_or_cancel())
 
         bg = get_color('card')
         fg = get_color('text')
@@ -1568,7 +1566,7 @@ class MainWindow:
                 return
 
             fmt = _detect_format(raw_code)
-            status_var.set(f'检测到格式: {fmt}')
+            status_var.set(f'检测到格式: {fmt} — 正在导入...')
             dialog.update_idletasks()
 
             try:
@@ -1590,13 +1588,14 @@ class MainWindow:
                     if existing:
                         idx = existing[0]
                         self._files[idx] = {'path': tmp_path, 'name': filename, 'status': '待处理',
-                                            'tmp_file': True}
+                                            'tmp_file': True, 'canvas_data': canvas_data}
                     else:
                         self._files.append({
                             'path': tmp_path,
                             'name': filename,
                             'status': '待处理',
                             'tmp_file': True,
+                            'canvas_data': canvas_data,
                         })
                         self.file_tree.insert('', 'end', text=filename, values=('待处理',))
 
@@ -1611,7 +1610,7 @@ class MainWindow:
                     from core.importer import import_ggb_script
                     canvas_data = import_ggb_script(raw_code)
 
-                    filename = 'pasted_code_ggb.txt'
+                    filename = 'pasted_code.ggb'
                     existing = [i for i, f in enumerate(self._files) if f['name'] == filename]
                     if existing:
                         idx = existing[0]
@@ -1653,13 +1652,14 @@ class MainWindow:
                     if existing:
                         idx = existing[0]
                         self._files[idx] = {'path': tmp_path, 'name': filename, 'status': '待处理',
-                                            'tmp_file': True}
+                                            'tmp_file': True, 'canvas_data': canvas_data}
                     else:
                         self._files.append({
                             'path': tmp_path,
                             'name': filename,
                             'status': '待处理',
                             'tmp_file': True,
+                            'canvas_data': canvas_data,
                         })
                         self.file_tree.insert('', 'end', text=filename, values=('待处理',))
 
@@ -1672,14 +1672,13 @@ class MainWindow:
 
                 shape_count = len(canvas_data.shapes)
                 ann_count = len(canvas_data.annotations)
-                status_var.set(f'导入成功: {fmt} — {shape_count} 个图形, {ann_count} 个标注')
+                status_var.set(f'导入成功: {shape_count} 个图形, {ann_count} 个标注 — 点击"开始转换并导出"生成WSD')
                 _import_done[0] = True
-                dialog.destroy()
 
             except Exception as e:
                 status_var.set(f'导入失败: {e}')
 
-        def _on_close_or_cancel():
+        def _on_close():
             """关闭或取消时，如果代码区有内容且未导入，提示确认"""
             raw_code = code_text.get('1.0', 'end').strip()
             if raw_code and not _import_done[0]:
@@ -1688,25 +1687,12 @@ class MainWindow:
                     return
             dialog.destroy()
 
-        # 粘贴代码后自动导入（延迟300ms防抖，等待粘贴完成）
-        def _on_text_change(event=None):
-            if _import_done[0]:
-                return
-            if hasattr(_on_text_change, '_after_id'):
-                dialog.after_cancel(_on_text_change._after_id)
-            _on_text_change._after_id = dialog.after(300, _auto_import)
+        dialog.protocol('WM_DELETE_WINDOW', _on_close)
 
-        def _auto_import():
-            raw_code = code_text.get('1.0', 'end').strip()
-            if not raw_code or _import_done[0]:
-                return
-            _do_import()
-
-        code_text.bind('<KeyRelease>', _on_text_change)
-        code_text.bind('<<Paste>>', _on_text_change)
-
-        ttk.Button(btn_frame, text='确认导入', command=_do_import, width=12).pack(side='left', padx=(0, 8))
-        ttk.Button(btn_frame, text='取消', command=_on_close_or_cancel, width=8).pack(side='right')
+        # 按钮：粘贴 | 确认导入 | 取消
+        ttk.Button(btn_frame, text='粘贴', command=lambda: code_text.event_generate('<<Paste>>'), width=8).pack(side='left', padx=(0, 4))
+        ttk.Button(btn_frame, text='确认导入', command=_do_import, width=10).pack(side='left', padx=4)
+        ttk.Button(btn_frame, text='取消', command=_on_close, width=8).pack(side='right')
 
         code_text.focus_set()
 
@@ -2436,16 +2422,27 @@ class MainWindow:
         self._batch_manager.clear()
         cached_count = 0
         for idx, f in enumerate(self._files):
-            self._batch_manager.add_file(f['path'])
+            path = f.get('path')
+            cached_data = f.get('canvas_data')  # 粘贴代码已解析的数据
             
-            # 如果该文件有预览缓存且参数匹配，直接使用缓存，跳过处理
-            cache = f.get('preview_cache')
-            cache_params = f.get('preview_params')
-            if cache is not None and cache_params is not None and cache_params == params:
-                file_item = self._batch_manager.get_file(idx)
-                if file_item is not None:
-                    file_item.set_done(cache)
-                    cached_count += 1
+            if cached_data is not None:
+                # 粘贴代码已有 CanvasData，直接加入已完成队列
+                self._batch_manager.add_file(
+                    filepath=path, result=cached_data,
+                    display_name=f.get('name', 'pasted_code')
+                )
+                cached_count += 1
+            elif path is not None:
+                self._batch_manager.add_file(path)
+                
+                # 如果该文件有预览缓存且参数匹配，直接使用缓存，跳过处理
+                cache = f.get('preview_cache')
+                cache_params = f.get('preview_params')
+                if cache is not None and cache_params is not None and cache_params == params:
+                    file_item = self._batch_manager.get_file(idx)
+                    if file_item is not None:
+                        file_item.set_done(cache)
+                        cached_count += 1
 
         # 更新UI状态
         self.convert_btn.configure(state='disabled')
