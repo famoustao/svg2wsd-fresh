@@ -1015,6 +1015,34 @@ def _parse_svg_file(svg_path):
                 continue
             if tag == 'g':
                 _collect(child, g_fill, g_stroke, g_stroke_width, combined, child_in_defs)
+            elif tag == 'use':
+                # 处理 <use xlink:href="#id"/> 引用 defs 中的 <g>/<path>
+                href = child.get('{http://www.w3.org/1999/xlink}href', '') or child.get('href', '')
+                if href and href.startswith('#'):
+                    ref_id = href[1:]
+                    # 在 defs 中查找引用的元素
+                    ref_elem = root.find(f'.//*[@id="{ref_id}"]')
+                    if ref_elem is not None:
+                        ref_tag = ref_elem.tag.split('}')[-1] if '}' in ref_elem.tag else ref_elem.tag
+                        # 获取 use 元素自身的 transform
+                        use_transform = _parse_transform(child.get('transform', ''))
+                        use_combined = _concat_transform(combined, use_transform)
+                        if ref_tag == 'g':
+                            # 引用的是 <g>，递归收集其中的 path（使用 use 的 transform）
+                            _collect(ref_elem, g_fill, g_stroke, g_stroke_width, use_combined, in_defs=False)
+                        elif ref_tag == 'path':
+                            # 引用的是单个 <path>
+                            d = ref_elem.get('d', '')
+                            if d:
+                                fill = _get_fill(ref_elem, g_fill)
+                                stroke = _get_stroke(ref_elem, g_stroke)
+                                stroke_width = _get_stroke_width(ref_elem, g_stroke_width)
+                                t = _parse_transform(ref_elem.get('transform', ''))
+                                full_t = _concat_transform(use_combined, t)
+                                paths.append((d, fill, stroke, stroke_width, full_t))
+                        elif ref_tag == 'symbol':
+                            # 引用的是 <symbol>，递归收集
+                            _collect(ref_elem, g_fill, g_stroke, g_stroke_width, use_combined, in_defs=False)
             elif tag == 'path':
                 d = child.get('d', '')
                 fill = _get_fill(child, g_fill)
