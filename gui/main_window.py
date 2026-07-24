@@ -1422,10 +1422,7 @@ class MainWindow:
         filepaths = filedialog.askopenfilenames(
             title='选择文件',
             filetypes=[
-                ('图片文件', '*.png *.jpg *.jpeg *.bmp *.gif *.tiff *.svg'),
-                ('几何文件', '*.tex *.ggb'),
-                ('TXT代码文件', '*.txt'),
-                ('所有支持的文件', '*.png *.jpg *.jpeg *.bmp *.gif *.tiff *.svg *.tex *.ggb *.txt'),
+                ('所有支持的文件', '*.png *.jpg *.jpeg *.bmp *.gif *.tiff *.svg *.tex *.ggb *.ggb script *.ggs *.txt *.wsd'),
                 ('所有文件', '*.*'),
             ],
         )
@@ -1816,7 +1813,7 @@ class MainWindow:
             except Exception as e:
                 self._update_status(f'加载 TXT 代码预览失败: {e}')
         else:
-            # 普通图片文件
+            # 其他文件：尝试作为图片加载
             try:
                 from PIL import Image
                 img = Image.open(filepath)
