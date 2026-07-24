@@ -541,44 +541,30 @@ class MainWindow:
 
         content = self._file_card.content
 
-        # 第一行按钮：添加、粘贴、移除、清空（等宽均分）
+        # 第一行按钮：添加、粘贴、移除、清空（grid均分）
         btn_frame1 = tk.Frame(content, bg=get_color('card'))
         btn_frame1.pack(fill='x', pady=(0, 6))
-
-        btn_style = 'Small.TButton'
-        btn_pad = 2
+        btn_frame1.columnconfigure((0, 1, 2, 3), weight=1, uniform='btn1')
 
         self.add_file_btn = ttk.Button(
-            btn_frame1,
-            text='添加',
-            command=self._on_add_file,
-            style=btn_style,
+            btn_frame1, text='添加', command=self._on_add_file, style='Small.TButton',
         )
-        self.add_file_btn.pack(side='left', fill='x', expand=True, padx=(0, btn_pad))
+        self.add_file_btn.grid(row=0, column=0, sticky='ew', padx=(0, 2))
 
         self.paste_code_btn = ttk.Button(
-            btn_frame1,
-            text='粘贴',
-            command=self._on_paste_code,
-            style=btn_style,
+            btn_frame1, text='粘贴', command=self._on_paste_code, style='Small.TButton',
         )
-        self.paste_code_btn.pack(side='left', fill='x', expand=True, padx=btn_pad)
+        self.paste_code_btn.grid(row=0, column=1, sticky='ew', padx=2)
 
         self.remove_file_btn = ttk.Button(
-            btn_frame1,
-            text='移除',
-            command=self._on_remove_file,
-            style=btn_style,
+            btn_frame1, text='移除', command=self._on_remove_file, style='Small.TButton',
         )
-        self.remove_file_btn.pack(side='left', fill='x', expand=True, padx=btn_pad)
+        self.remove_file_btn.grid(row=0, column=2, sticky='ew', padx=2)
 
         self.clear_file_btn = ttk.Button(
-            btn_frame1,
-            text='清空',
-            command=self._on_clear_files,
-            style=btn_style,
+            btn_frame1, text='清空', command=self._on_clear_files, style='Small.TButton',
         )
-        self.clear_file_btn.pack(side='left', fill='x', expand=True, padx=(btn_pad, 0))
+        self.clear_file_btn.grid(row=0, column=3, sticky='ew', padx=(2, 0))
 
         # 第二行按钮：更新预览、开始转换并导出
         btn_frame2 = tk.Frame(content, bg=get_color('card'))
