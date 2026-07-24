@@ -110,6 +110,12 @@ class GeoGebraScriptParser:
                              'SetFilled', 'SetColor', 'SetLineOpacity',
                              'Angle', 'RightAngle'):
                 self._parse_command(args_str, func_name)
+            elif func_name in ('SetLineStyle', 'SetPointStyle'):
+                self._parse_command(args_str, func_name)
+            else:
+                # 其他函数调用（如 Polygon, Segment 等）也当作函数处理
+                result = self._call_func(func_name, args_str)
+                # 函数调用结果不赋值给变量（但可能已产生 shape）
             return
 
     def _eval_expr(self, expr: str) -> Any:
@@ -220,6 +226,28 @@ class GeoGebraScriptParser:
                     self._all_x.extend([p1[0], p2[0]])
                     self._all_y.extend([p1[1], p2[1]])
                     return {'type': 'segment', 'p1': p1, 'p2': p2}
+
+        elif func_name == 'Polygon':
+            # Polygon(A,B,C,D,...) — 闭合多边形
+            if len(args) >= 3:
+                pts = []
+                for arg in args:
+                    pt = self._resolve_point(arg)
+                    if pt:
+                        pts.append(pt)
+                if len(pts) >= 3:
+                    shape = Shape(
+                        type=ShapeType.POLYGON,
+                        points=pts,
+                        line_color=(0, 0, 0),
+                        fill_color=None,
+                        line_width=1.0,
+                    )
+                    self._shapes.append(shape)
+                    for pt in pts:
+                        self._all_x.append(pt[0])
+                        self._all_y.append(pt[1])
+                    return {'type': 'polygon', 'points': pts}
 
         elif func_name == 'Line':
             if len(args) == 2:
@@ -392,6 +420,33 @@ class GeoGebraScriptParser:
                             self._shapes[idx].line_width = width
                 except (ValueError, TypeError):
                     pass
+
+        elif func_name == 'SetLineStyle':
+            # SetLineStyle(obj, style): 0=实线, 1=虚线, 2=点线, 等
+            # GeoGebra 中 style=2 是长虚线，在 WSD 中暂通过 extra 标记
+            if len(args) >= 2:
+                obj_arg = args[0].strip()
+                try:
+                    style = int(float(args[1].strip()))
+                    # obj_arg 可能是变量名，也可能是嵌套函数调用如 Segment(B,F)
+                    obj = self._vars.get(obj_arg)
+                    if obj is None:
+                        # 嵌套调用：先记录当前 shape 数量，调用函数，然后撤销新增 shape
+                        shapes_before = len(self._shapes)
+                        obj = self._eval_expr(obj_arg)
+                        # 如果创建了新的 shape（返回值与已有 shape 匹配），移除它
+                        if isinstance(obj, dict) and len(self._shapes) > shapes_before:
+                            self._shapes.pop()  # 移除重复创建的 shape
+                    if isinstance(obj, dict):
+                        idx = self._find_shape_index(obj)
+                        if idx >= 0:
+                            self._shapes[idx].extra['line_style'] = style
+                except (ValueError, TypeError):
+                    pass
+
+        elif func_name == 'SetPointStyle':
+            # SetPointStyle(obj, style): 点样式（暂不生成可见点图形）
+            pass
 
         elif func_name == 'SetVisible':
             # 忽略可见性设置
