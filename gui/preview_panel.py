@@ -1440,7 +1440,7 @@ class PreviewPanel(ttk.Frame):
         # --- LaTeX 预览页 ---
         self.latex_tab = ttk.Frame(self.notebook)
         self.notebook.add(self.latex_tab, text=' LaTeX ')
-        self.latex_canvas = PlaceholderPreviewCanvas(self.latex_tab, title='LaTeX')
+        self.latex_canvas = WsdPreviewCanvas(self.latex_tab)
         self.latex_canvas.pack(fill=tk.BOTH, expand=True)
         self.latex_canvas.on_zoom_changed(self._on_zoom_changed)
 
@@ -1448,7 +1448,7 @@ class PreviewPanel(ttk.Frame):
         self.ggb_tab = ttk.Frame(self.notebook)
         self.ggb_tab_text = ' GGB '
         self.notebook.add(self.ggb_tab, text=' GGB ')
-        self.ggb_canvas = PlaceholderPreviewCanvas(self.ggb_tab, title='GGB')
+        self.ggb_canvas = WsdPreviewCanvas(self.ggb_tab)
         self.ggb_canvas.pack(fill=tk.BOTH, expand=True)
         self.ggb_canvas.on_zoom_changed(self._on_zoom_changed)
 
@@ -1673,6 +1673,30 @@ class PreviewPanel(ttk.Frame):
         """
         self._switch_image_tab_mode('svg')
         self.svg_original_canvas.set_canvas_data(canvas_data)
+
+    def set_latex_preview(self, canvas_data: CanvasData):
+        """
+        设置 LaTeX 预览页数据
+
+        Args:
+            canvas_data: CanvasData 对象
+        """
+        self.latex_canvas.set_canvas_data(canvas_data)
+        # 自动切换到 LaTeX 标签页
+        idx = self.notebook.index(self.latex_tab)
+        self.notebook.select(idx)
+
+    def set_ggb_preview(self, canvas_data: CanvasData):
+        """
+        设置 GGB 预览页数据
+
+        Args:
+            canvas_data: CanvasData 对象
+        """
+        self.ggb_canvas.set_canvas_data(canvas_data)
+        # 自动切换到 GGB 标签页
+        idx = self.notebook.index(self.ggb_tab)
+        self.notebook.select(idx)
 
     def _switch_image_tab_mode(self, mode: str):
         """

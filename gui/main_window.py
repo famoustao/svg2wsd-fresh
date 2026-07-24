@@ -1665,7 +1665,7 @@ SetLabel(O,"O")"""
                     if children:
                         self.file_tree.selection_set(children[-1])
 
-                    self.preview_panel.set_svg_original(canvas_data)
+                    self.preview_panel.set_ggb_preview(canvas_data)
                     shape_count = len(canvas_data.shapes)
                     ann_count = len(canvas_data.annotations)
                     status_var.set(f'导入成功: {shape_count} 个图形, {ann_count} 个标注')
@@ -1711,7 +1711,7 @@ SetLabel(O,"O")"""
                 if children:
                     self.file_tree.selection_set(children[-1])
 
-                self.preview_panel.set_svg_original(canvas_data)
+                self.preview_panel.set_ggb_preview(canvas_data)
                 shape_count = len(canvas_data.shapes)
                 ann_count = len(canvas_data.annotations)
                 status_var.set(f'导入成功: {shape_count} 个图形, {ann_count} 个标注')
@@ -1776,6 +1776,21 @@ SetLabel(O,"O")"""
         file_info = self._files[index]
         filepath = file_info['path']
         self._update_status(f'加载预览: {file_info["name"]}')
+
+        # 如果文件有缓存的 canvas_data（如粘贴代码导入），直接使用
+        if 'canvas_data' in file_info and file_info['canvas_data'] is not None:
+            canvas_data = file_info['canvas_data']
+            name = file_info['name'].lower()
+            if 'latex' in name or name.endswith('.tex'):
+                self.preview_panel.set_latex_preview(canvas_data)
+            else:
+                self.preview_panel.set_ggb_preview(canvas_data)
+            self._update_status(
+                f'已加载预览: {file_info["name"]} — '
+                f'{len(canvas_data.shapes)} 个图形, {len(canvas_data.annotations)} 个标注'
+            )
+            self._on_param_changed()
+            return
 
         # 尝试加载原图预览
         ext = os.path.splitext(filepath)[1].lower()
@@ -1864,12 +1879,12 @@ SetLabel(O,"O")"""
                 except Exception as e:
                     self.preview_panel.set_image(None)
                     self._update_status(f'SVG预览失败: {e}')
-        elif ext in ('.tex', '.ggb'):
-            # LaTeX / GeoGebra 文件：导入为 CanvasData 后在矢量预览画布上显示
+        elif ext in ('.tex',):
+            # LaTeX 文件：导入为 CanvasData 后在 LaTeX 预览画布上显示
             try:
                 from core.importer import import_file
                 canvas_data = import_file(filepath)
-                self.preview_panel.set_svg_original(canvas_data)
+                self.preview_panel.set_latex_preview(canvas_data)
 
                 from collections import Counter
                 shape_types = [s.type.name for s in canvas_data.shapes]
@@ -1879,10 +1894,29 @@ SetLabel(O,"O")"""
                     shape_info = '无图形'
                 ann_info = f'{len(canvas_data.annotations)} 个标注' if canvas_data.annotations else '无标注'
                 self._update_status(
-                    f'已加载预览: {file_info["name"]} — {shape_info}，{ann_info}'
+                    f'已加载 LaTeX 预览: {file_info["name"]} — {shape_info}，{ann_info}'
                 )
             except Exception as e:
-                self._update_status(f'加载预览失败: {e}')
+                self._update_status(f'加载 LaTeX 预览失败: {e}')
+        elif ext in ('.ggb',):
+            # GeoGebra 文件：导入为 CanvasData 后在 GGB 预览画布上显示
+            try:
+                from core.importer import import_file
+                canvas_data = import_file(filepath)
+                self.preview_panel.set_ggb_preview(canvas_data)
+
+                from collections import Counter
+                shape_types = [s.type.name for s in canvas_data.shapes]
+                if shape_types:
+                    shape_info = ', '.join(f'{t}({c})' for t, c in Counter(shape_types).items())
+                else:
+                    shape_info = '无图形'
+                ann_info = f'{len(canvas_data.annotations)} 个标注' if canvas_data.annotations else '无标注'
+                self._update_status(
+                    f'已加载 GGB 预览: {file_info["name"]} — {shape_info}，{ann_info}'
+                )
+            except Exception as e:
+                self._update_status(f'加载 GGB 预览失败: {e}')
         else:
             # 普通图片文件
             try:
