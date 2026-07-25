@@ -1542,6 +1542,11 @@ class MainWindow:
                     status_var.set('导入失败: 无法解析')
                     return
 
+                # 自动标注端点（如果启用且导入结果有图形）
+                if self.auto_label_var.get() and canvas_data.shapes:
+                    from core.vertex_labeler import auto_label_vertices
+                    canvas_data = auto_label_vertices(canvas_data)
+
                 # 更新文件列表
                 existing = [i for i, f in enumerate(self._files) if f['name'] == filename]
                 file_entry = {'path': tmp_path, 'name': filename, 'status': '待处理',
