@@ -987,12 +987,28 @@ class WsdPreviewCanvas(ZoomableCanvas):
         """
         绘制文字标注
 
+        支持 WSD 关联标注机制：
+        - associated=True 时，根据 assoc_type（9宫格区域）和
+          assoc_f1/assoc_f2（偏移参数）计算实际绘制位置
+        - associated=False 时，直接在锚点坐标绘制
+
         Args:
             ann: TextAnnotation 对象
         """
-        x = self._to_canvas_x(ann.x)
-        y = self._to_canvas_y(ann.y)
         font_size = max(6, int(ann.font_size * self._zoom))
+
+        # 基础坐标
+        base_x = self._to_canvas_x(ann.x)
+        base_y = self._to_canvas_y(ann.y)
+
+        # 计算 WSD 关联标注偏移
+        if ann.associated:
+            offset_x, offset_y = self._compute_associated_offset(ann, font_size)
+            draw_x = base_x + offset_x
+            draw_y = base_y + offset_y
+        else:
+            draw_x = base_x
+            draw_y = base_y
 
         # 构造字体
         font_family = 'Microsoft YaHei UI'
@@ -1004,23 +1020,76 @@ class WsdPreviewCanvas(ZoomableCanvas):
         fill = '#000000'
 
         # 上标/下标效果：通过调整字体大小和位置实现
-        offset_y = 0
+        sub_offset_y = 0
         if ann.superscript:
-            offset_y = -font_size * 0.3
+            sub_offset_y = -font_size * 0.3
             adjusted_size = max(6, int(font_size * 0.7))
             font = (font_family, adjusted_size)
         elif ann.subscript:
-            offset_y = font_size * 0.3
+            sub_offset_y = font_size * 0.3
             adjusted_size = max(6, int(font_size * 0.7))
             font = (font_family, adjusted_size)
 
         self.canvas.create_text(
-            x, y + offset_y,
+            draw_x, draw_y + sub_offset_y,
             text=ann.text,
             fill=fill,
             font=font,
             anchor='center',
         )
+
+    def _compute_associated_offset(self, ann: TextAnnotation,
+                                   font_size: float) -> Tuple[float, float]:
+        """
+        计算 WSD 关联标注在预览中的像素偏移
+
+        根据 assoc_type（9宫格区域）和 assoc_f1/assoc_f2（偏移参数 0-400）
+        计算标注相对于锚点的偏移量。
+
+        偏移策略：
+          - f1/f2 是 WSD 中的偏移参数，范围 0-400（LABEL_PARAM_MAX）
+          - 在预览中，将 f1/f2 映射为像素偏移（基于字体大小的倍数）
+          - 基础偏移距离 = 字体大小 * 1.2（保证不与端点重合）
+
+        参数:
+            ann: TextAnnotation 对象
+            font_size: 当前缩放后的字体大小
+
+        返回:
+            (offset_x, offset_y): 像素偏移量
+        """
+        # 9宫格方向映射（屏幕坐标系：x右正，y下正）
+        # assoc_type: 0=左上, 1=上, 2=右上, 3=左, 4=中心, 5=右, 6=左下, 7=下, 8=右下
+        region = ann.assoc_type
+
+        # 基础偏移量（像素），保证字母不与锚点重合
+        base_offset = font_size * 1.2
+
+        # f1/f2 归一化到 0~1（WSD 参数范围 0~400）
+        f1_norm = min(1.0, max(0.0, ann.assoc_f1 / 400.0)) if ann.assoc_f1 else 0.5
+        f2_norm = min(1.0, max(0.0, ann.assoc_f2 / 400.0)) if ann.assoc_f2 else 0.5
+
+        # 根据区域计算偏移方向和大小
+        if region == 0:    # 左上
+            return (-base_offset * f1_norm, -base_offset * f2_norm)
+        elif region == 1:  # 上
+            return (0.0, -base_offset * f2_norm)
+        elif region == 2:  # 右上
+            return (base_offset * f1_norm, -base_offset * f2_norm)
+        elif region == 3:  # 左
+            return (-base_offset * f1_norm, 0.0)
+        elif region == 4:  # 中心
+            return (0.0, 0.0)
+        elif region == 5:  # 右
+            return (base_offset * f1_norm, 0.0)
+        elif region == 6:  # 左下
+            return (-base_offset * f1_norm, base_offset * f2_norm)
+        elif region == 7:  # 下
+            return (0.0, base_offset * f2_norm)
+        elif region == 8:  # 右下
+            return (base_offset * f1_norm, base_offset * f2_norm)
+        else:
+            return (0.0, -base_offset)
 
 
 # ============================================================
