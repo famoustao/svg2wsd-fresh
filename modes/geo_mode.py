@@ -2576,9 +2576,11 @@ class GeometryMode:
         # 计算边界框
         canvas_data.bbox = shapes_bbox(shapes)
 
-        # 保存对称性检测结果到 extra（如果有）
-        # 通过 CanvasData 的方式暂不支持 extra，后续可扩展
-        # 这里通过 annotations 附带或单独保存
+        # 7. 自动标注端点（普通图片也支持）
+        auto_label_enabled = params.get('auto_label', True)
+        if auto_label_enabled and canvas_data.shapes:
+            from core.vertex_labeler import auto_label_vertices
+            canvas_data = auto_label_vertices(canvas_data)
 
         return canvas_data
 

@@ -1660,6 +1660,9 @@ class MainWindow:
             return
 
         # 尝试加载原图预览
+        if not filepath:
+            self._update_status(f'无法加载预览: 文件路径为空')
+            return
         ext = os.path.splitext(filepath)[1].lower()
 
         if ext == '.svg':
@@ -1972,6 +1975,10 @@ class MainWindow:
         mode_type = 'comic' if self._current_mode == 'comic' else 'geo'
         sub_mode = self.comic_color_mode.get() if self._current_mode == 'comic' else None
 
+        if not filepath:
+            self._update_status('无法更新预览: 文件路径为空')
+            return
+
         # SVG 文件解析很快，直接在主线程处理，不经过后台线程
         ext = os.path.splitext(filepath)[1].lower()
         if ext == '.svg':
@@ -1987,7 +1994,9 @@ class MainWindow:
                 self._handle_preview_result(canvas_data)
             except Exception as e:
                 import traceback
+                tb = traceback.format_exc()
                 self._update_status(f'预览失败: {e}')
+                self._log_error(f'SVG预览失败: {e}\n{tb}')
             return
 
         self._update_status(f'正在生成预览: {file_info["name"]}...')
@@ -2099,18 +2108,29 @@ class MainWindow:
             return
         # 检查是否是错误结果
         if isinstance(result, dict) and 'error' in result:
-            self._update_status(f'预览失败: {result["error"]}')
+            err_msg = result.get('error', '未知错误')
+            tb = result.get('traceback', '')
+            self._update_status(f'预览失败: {err_msg}')
+            # 记录详细错误日志
+            self._log_error(f'预览失败: {err_msg}\n{tb}')
             return
-        
+
+        # 验证结果类型
+        from core.data_model import CanvasData
+        if not isinstance(result, CanvasData):
+            self._update_status(f'预览失败: 返回了意外的数据类型 {type(result).__name__}')
+            self._log_error(f'预览返回了非 CanvasData 类型: {type(result).__name__}, 值: {result}')
+            return
+
         # 应用用户选择的线条颜色（保持预览与导出一致）
         self._apply_line_color_override(result)
-        
+
         # 存入预览缓存，供导出时直接使用（避免重复计算）
         if self._current_file_index >= 0:
             file_info = self._files[self._current_file_index]
             file_info['preview_cache'] = result
             file_info['preview_params'] = self._get_current_params()
-        
+
         # 正常结果
         self.preview_panel.set_canvas_data(result)
         if self._current_file_index >= 0:
@@ -2687,6 +2707,20 @@ class MainWindow:
             })
 
         return params
+
+    def _log_error(self, message: str):
+        """记录错误日志到文件，便于调试"""
+        import traceback
+        import datetime
+        log_path = os.path.join(os.path.expanduser('~'), '.svg2wsd_errors.log')
+        try:
+            with open(log_path, 'a', encoding='utf-8') as f:
+                f.write(f'\n{"="*60}\n')
+                f.write(f'{datetime.datetime.now().isoformat()}\n')
+                f.write(message)
+                f.write('\n')
+        except Exception:
+            pass
 
     def _update_status(self, text: str):
         """更新状态栏文字"""

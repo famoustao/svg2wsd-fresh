@@ -507,8 +507,9 @@ class WsdPreviewCanvas(ZoomableCanvas):
     def _get_content_origin(self) -> Tuple[float, float]:
         """获取内容原点（bbox 的 min_x, min_y）"""
         if self._canvas_data is not None:
-            min_x, min_y, _, _ = self._canvas_data.bbox
-            return (min_x, min_y)
+            bbox = self._canvas_data.bbox
+            if bbox is not None and len(bbox) >= 2:
+                return (float(bbox[0]), float(bbox[1]))
         return (0.0, 0.0)
 
     def _to_canvas_x(self, x: float) -> float:
@@ -537,11 +538,12 @@ class WsdPreviewCanvas(ZoomableCanvas):
 
     def _get_content_size(self) -> Tuple[float, float]:
         if self._canvas_data is not None:
-            min_x, min_y, max_x, max_y = self._canvas_data.bbox
-            w = max_x - min_x
-            h = max_y - min_y
-            if w > 0 and h > 0:
-                return (w, h)
+            bbox = self._canvas_data.bbox
+            if bbox is not None and len(bbox) == 4:
+                w = float(bbox[2]) - float(bbox[0])
+                h = float(bbox[3]) - float(bbox[1])
+                if w > 0 and h > 0:
+                    return (w, h)
         return (100.0, 100.0)
 
     def _render_content(self):
@@ -557,15 +559,23 @@ class WsdPreviewCanvas(ZoomableCanvas):
             return
 
         # 绘制网格背景（淡灰色）
-        self._draw_grid()
+        try:
+            self._draw_grid()
+        except Exception as e:
+            import traceback
+            print(f"[WSDPreview] 绘制网格失败: {e}\n{traceback.format_exc()}")
 
         # 按 path_group_id 分组，处理复合路径（孔洞）
         groups = {}
         for shape in self._canvas_data.shapes:
-            gid = shape.extra.get('path_group_id', 0)
-            if gid not in groups:
-                groups[gid] = []
-            groups[gid].append(shape)
+            try:
+                gid = shape.extra.get('path_group_id', 0) if shape.extra else 0
+                if gid not in groups:
+                    groups[gid] = []
+                groups[gid].append(shape)
+            except Exception as e:
+                import traceback
+                print(f"[WSDPreview] 分组形状失败: {e}\n{traceback.format_exc()}")
 
         # 绘制每组形状
         for gid, group_shapes in groups.items():
@@ -573,27 +583,32 @@ class WsdPreviewCanvas(ZoomableCanvas):
                 # 单路径，直接绘制
                 try:
                     self._draw_shape(group_shapes[0])
-                except Exception:
-                    pass
+                except Exception as e:
+                    import traceback
+                    print(f"[WSDPreview] 绘制形状失败: {e}\n{traceback.format_exc()}")
             else:
                 # 复合路径：第一个是外框，其余是孔洞
                 try:
                     self._draw_compound_path(group_shapes)
-                except Exception:
+                except Exception as e:
                     # 复合路径绘制失败，回退到逐个绘制
+                    import traceback
+                    print(f"[WSDPreview] 绘制复合路径失败: {e}\n{traceback.format_exc()}")
                     for shape in group_shapes:
                         try:
                             self._draw_shape(shape)
-                        except Exception:
-                            pass
+                        except Exception as e2:
+                            import traceback
+                            print(f"[WSDPreview] 绘制形状(回退)失败: {e2}\n{traceback.format_exc()}")
 
         # 绘制所有文字标注
         for ann in self._canvas_data.annotations:
             try:
                 self._draw_annotation(ann)
-            except Exception:
-                # 单个标注绘制失败不影响整体预览
-                pass
+            except Exception as e:
+                # 单个标注绘制失败不影响整体预览，但记录日志
+                import traceback
+                print(f"[WSDPreview] 绘制标注失败: {e}\n{traceback.format_exc()}")
 
     def _draw_placeholder(self, text: str):
         """绘制占位文字"""
@@ -1285,48 +1300,68 @@ class SvgPreviewCanvas(WsdPreviewCanvas):
             return
 
         # 绘制白色背景矩形（与 SVG 导出一致）
-        self._draw_white_background()
+        try:
+            self._draw_white_background()
+        except Exception as e:
+            import traceback
+            print(f"[SVGPreview] 绘制白色背景失败: {e}\n{traceback.format_exc()}")
 
         # 按 path_group_id 分组，处理复合路径（孔洞）
         groups = {}
         for shape in self._canvas_data.shapes:
-            gid = shape.extra.get('pathGroupId', shape.extra.get('path_group_id', 0))
-            if gid not in groups:
-                groups[gid] = []
-            groups[gid].append(shape)
+            try:
+                gid = shape.extra.get('pathGroupId', shape.extra.get('path_group_id', 0)) if shape.extra else 0
+                if gid not in groups:
+                    groups[gid] = []
+                groups[gid].append(shape)
+            except Exception as e:
+                import traceback
+                print(f"[SVGPreview] 分组形状失败: {e}\n{traceback.format_exc()}")
 
         # 绘制每组形状
         for gid, group_shapes in groups.items():
             if len(group_shapes) == 1:
                 try:
                     self._draw_shape(group_shapes[0])
-                except Exception:
-                    pass
+                except Exception as e:
+                    import traceback
+                    print(f"[SVGPreview] 绘制形状失败: {e}\n{traceback.format_exc()}")
             else:
                 try:
                     self._draw_compound_path(group_shapes)
-                except Exception:
+                except Exception as e:
+                    import traceback
+                    print(f"[SVGPreview] 绘制复合路径失败: {e}\n{traceback.format_exc()}")
                     for shape in group_shapes:
                         try:
                             self._draw_shape(shape)
-                        except Exception:
-                            pass
+                        except Exception as e2:
+                            import traceback
+                            print(f"[SVGPreview] 绘制形状(回退)失败: {e2}\n{traceback.format_exc()}")
 
         # 绘制所有文字标注
         for ann in self._canvas_data.annotations:
             try:
                 self._draw_annotation(ann)
-            except Exception:
-                pass
+            except Exception as e:
+                import traceback
+                print(f"[SVGPreview] 绘制标注失败: {e}\n{traceback.format_exc()}")
 
         # 绘制 SVG 信息栏
-        self._draw_info_bar()
+        try:
+            self._draw_info_bar()
+        except Exception as e:
+            import traceback
+            print(f"[SVGPreview] 绘制信息栏失败: {e}\n{traceback.format_exc()}")
 
     def _draw_white_background(self):
         """绘制白色背景（与 SVG 导出的白色背景一致）"""
         if self._canvas_data is None:
             return
-        min_x, min_y, max_x, max_y = self._canvas_data.bbox
+        bbox = self._canvas_data.bbox
+        if bbox is None or len(bbox) != 4:
+            return
+        min_x, min_y, max_x, max_y = bbox
         x1 = self._to_canvas_x(min_x)
         y1 = self._to_canvas_y(min_y)
         x2 = self._to_canvas_x(max_x)
@@ -1348,9 +1383,12 @@ class SvgPreviewCanvas(WsdPreviewCanvas):
 
         path_count = len(self._canvas_data.shapes)
         ann_count = len(self._canvas_data.annotations)
-        min_x, min_y, max_x, max_y = self._canvas_data.bbox
-        cw = max_x - min_x
-        ch = max_y - min_y
+        bbox = self._canvas_data.bbox
+        if bbox is not None and len(bbox) == 4:
+            cw = float(bbox[2]) - float(bbox[0])
+            ch = float(bbox[3]) - float(bbox[1])
+        else:
+            cw, ch = 0, 0
 
         # 半透明信息栏背景（用浅灰色矩形模拟）
         bar_h = 28
