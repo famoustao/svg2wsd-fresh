@@ -69,6 +69,7 @@ class GeoGebraScriptParser:
 
         # 为所有点变量生成标签标注（使用原始变量名作为标签文字）
         # 跳过已通过 SetLabel 显式标注的变量，避免重复标注
+        # 注意：此处先创建标注，偏移方向在 Y轴翻转和bbox计算后统一应用智能偏移
         for var_name, value in self._vars.items():
             if isinstance(value, tuple) and len(value) == 2:
                 # 是一个点坐标
@@ -91,10 +92,10 @@ class GeoGebraScriptParser:
                         font_size=14.0,
                         bold=True,
                         associated=True,
-                        assoc_type=2,       # 右上区域
-                        assoc_f1=400.0,     # 水平靠外
-                        assoc_f2=400.0,     # 垂直靠外
-                        assoc_dir=0xB4,     # 右上方向
+                        assoc_type=2,       # 临时值，后续智能计算
+                        assoc_f1=400.0,
+                        assoc_f2=400.0,
+                        assoc_dir=0xB4,     # 临时值，后续智能计算
                     ))
 
         # GeoGebra 使用数学坐标系（Y向上），WSD 使用屏幕坐标系（Y向下）
@@ -118,6 +119,18 @@ class GeoGebraScriptParser:
         bbox = (0.0, 0.0, 0.0, 0.0)
         if all_x and all_y:
             bbox = (min(all_x), min(all_y), max(all_x), max(all_y))
+
+        # 对所有关联标注应用智能偏移方向（根据点在图中的位置）
+        from .vertex_labeler import compute_smart_label_offset
+        for a in self._annotations:
+            if a.associated:
+                region, assoc_dir, f1, f2 = compute_smart_label_offset(
+                    a.x, a.y, bbox, self._shapes
+                )
+                a.assoc_type = region
+                a.assoc_dir = assoc_dir
+                a.assoc_f1 = f1
+                a.assoc_f2 = f2
 
         return CanvasData(
             shapes=self._shapes,

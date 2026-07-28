@@ -561,6 +561,18 @@ def import_latex(filepath: str) -> CanvasData:
         else:
             bbox = (0.0, 0.0, 0.0, 0.0)
 
+        # 对所有关联标注应用智能偏移方向（根据点在图中的位置）
+        from core.vertex_labeler import compute_smart_label_offset
+        for a in annotations:
+            if a.associated:
+                region, assoc_dir, f1, f2 = compute_smart_label_offset(
+                    a.x, a.y, bbox, shapes
+                )
+                a.assoc_type = region
+                a.assoc_dir = assoc_dir
+                a.assoc_f1 = f1
+                a.assoc_f2 = f2
+
         return CanvasData(
             shapes=shapes,
             annotations=annotations,
@@ -1348,6 +1360,18 @@ def import_ggb(filepath: str) -> CanvasData:
     else:
         bbox = (0, 0, 0, 0)
 
+    # 对所有关联标注应用智能偏移方向（根据点在图中的位置）
+    from core.vertex_labeler import compute_smart_label_offset
+    for a in annotations:
+        if a.associated:
+            region, assoc_dir, f1, f2 = compute_smart_label_offset(
+                a.x, a.y, bbox, shapes
+            )
+            a.assoc_type = region
+            a.assoc_dir = assoc_dir
+            a.assoc_f1 = f1
+            a.assoc_f2 = f2
+
     return CanvasData(shapes=shapes, annotations=annotations, bbox=bbox, source_file=filepath)
 
 
@@ -1520,6 +1544,18 @@ def _import_txt_as_latex(content: str, filepath: str) -> CanvasData:
         bbox = (min(all_x), min(all_y), max(all_x), max(all_y))
     else:
         bbox = (0.0, 0.0, 0.0, 0.0)
+
+    # 对所有关联标注应用智能偏移方向（根据点在图中的位置）
+    from core.vertex_labeler import compute_smart_label_offset
+    for a in annotations:
+        if a.associated:
+            region, assoc_dir, f1, f2 = compute_smart_label_offset(
+                a.x, a.y, bbox, shapes
+            )
+            a.assoc_type = region
+            a.assoc_dir = assoc_dir
+            a.assoc_f1 = f1
+            a.assoc_f2 = f2
 
     return CanvasData(
         shapes=shapes,

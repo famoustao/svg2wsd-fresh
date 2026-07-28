@@ -13,6 +13,7 @@
 
 import os
 import sys
+import json
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 from typing import List, Optional, Dict, Any, Tuple
@@ -21,6 +22,9 @@ from typing import List, Optional, Dict, Any, Tuple
 _project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _project_root not in sys.path:
     sys.path.insert(0, _project_root)
+
+# 参数持久化配置文件路径
+_CONFIG_PATH = os.path.join(os.path.expanduser('~'), '.svg2wsd_config.json')
 
 # 导入同包内模块
 from gui.styles import setup_styles, get_color
@@ -359,8 +363,14 @@ class MainWindow:
         # 后台任务引用
         self._task_worker: Optional[TaskWorker] = None
 
+        # 参数保存防抖定时器ID
+        self._save_config_id: Optional[str] = None
+
         # 构建界面
         self._build_ui()
+
+        # 加载上次保存的参数
+        self._load_saved_params()
 
         # 初始化状态
         self._update_status('就绪')
@@ -2034,6 +2044,9 @@ class MainWindow:
         if hasattr(self, '_update_left_scroll_region'):
             self.root.after(100, self._update_left_scroll_region)
 
+        # 防抖保存参数（记忆上次使用的配置）
+        self._save_params_debounced()
+
     def _debounced_update_preview(self):
         """防抖后的预览更新"""
         self._debounce_id = None
@@ -2836,6 +2849,179 @@ class MainWindow:
 
         return params
 
+    # ============================================================
+    # 参数持久化（记忆上次使用的参数）
+    # ============================================================
+
+    def _get_all_param_vars(self) -> Dict[str, Any]:
+        """
+        获取所有需要持久化的参数变量及其当前值
+
+        返回:
+            dict: 参数名 -> 值
+        """
+        params = {
+            'mode': self._current_mode,
+            'line_width': self.line_width_var.get(),
+            'line_color': self.line_color_var.get(),
+            'line_color_none': self.line_color_none_var.get(),
+            'line_color_original': self.line_color_original_var.get(),
+            'canvas_size': self.canvas_size_var.get(),
+            'export_mode': self.export_mode_var.get(),
+            'export_format': self.export_format_var.get(),
+            'scale_mode': self.scale_mode_var.get(),
+            'scale_value': self.scale_value_var.get(),
+            # 漫画模式参数
+            'comic_color_mode': self.comic_color_mode.get(),
+            'threshold': self.threshold_scale.get(),
+            'min_area': self.min_area_scale.get(),
+            'smoothness': self.smoothness_scale.get(),
+            'color_count': self.color_count_var.get(),
+            'color_scheme': self.color_scheme_var.get(),
+            'compound_mode': self.compound_mode_var.get(),
+            # vtracer 参数
+            'vtracer_preset': self.vtracer_preset_var.get(),
+            'vtracer_colormode': self.vtracer_colormode_var.get(),
+            'vtracer_mode': self.vtracer_mode_var.get(),
+            'vtracer_speckle': self.vtracer_speckle_scale.get(),
+            'vtracer_precision': self.vtracer_precision_scale.get(),
+            'vtracer_layer_diff': self.vtracer_layer_diff_scale.get(),
+            'vtracer_corner': self.vtracer_corner_scale.get(),
+            'vtracer_splice': self.vtracer_splice_scale.get(),
+            # 几何模式参数
+            'geo_color_mode': self.geo_color_mode.get(),
+            'geo_min_area': self.geo_min_area_scale.get(),
+            'geo_approx': self.geo_approx_scale.get(),
+            'geo_hough': self.geo_hough_scale.get(),
+            'circle_count': self.circle_count_var.get(),
+            'enable_ocr': self.letter_recog_var.get(),
+            'auto_label': self.auto_label_var.get(),
+            'sym_axis': self.sym_axis_var.get(),
+            'sym_rotate': self.sym_rotate_var.get(),
+            'sym_center': self.sym_center_var.get(),
+            'sym_rightangle': self.sym_rightangle_var.get(),
+        }
+        return params
+
+    def _save_params(self):
+        """将当前所有参数保存到配置文件"""
+        try:
+            params = self._get_all_param_vars()
+            with open(_CONFIG_PATH, 'w', encoding='utf-8') as f:
+                json.dump(params, f, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
+
+    def _save_params_debounced(self):
+        """防抖保存参数（避免频繁IO）"""
+        if self._save_config_id is not None:
+            try:
+                self.root.after_cancel(self._save_config_id)
+            except Exception:
+                pass
+        self._save_config_id = self.root.after(1000, self._save_params)
+
+    def _load_saved_params(self):
+        """从配置文件加载上次保存的参数并应用到界面"""
+        try:
+            if not os.path.exists(_CONFIG_PATH):
+                return
+            with open(_CONFIG_PATH, 'r', encoding='utf-8') as f:
+                saved = json.load(f)
+        except Exception:
+            return
+
+        # 安全地设置每个变量（跳过不存在的键或类型不匹配的值）
+        def _safe_set(var, key, var_type=None):
+            if key not in saved:
+                return
+            val = saved[key]
+            try:
+                if var_type == 'int':
+                    var.set(int(val))
+                elif var_type == 'float':
+                    var.set(float(val))
+                elif var_type == 'bool':
+                    var.set(bool(val))
+                else:
+                    var.set(val)
+            except Exception:
+                pass
+
+        # 输出设置（两种模式共享）
+        _safe_set(self.line_width_var, 'line_width', 'int')
+        _safe_set(self.line_color_var, 'line_color')
+        _safe_set(self.line_color_none_var, 'line_color_none', 'bool')
+        _safe_set(self.line_color_original_var, 'line_color_original', 'bool')
+        _safe_set(self.canvas_size_var, 'canvas_size')
+        _safe_set(self.export_mode_var, 'export_mode')
+        _safe_set(self.export_format_var, 'export_format')
+        _safe_set(self.scale_mode_var, 'scale_mode')
+        _safe_set(self.scale_value_var, 'scale_value')
+
+        # 漫画模式参数
+        _safe_set(self.comic_color_mode, 'comic_color_mode')
+        _safe_set(self.threshold_scale, 'threshold', 'float')
+        _safe_set(self.min_area_scale, 'min_area', 'float')
+        _safe_set(self.smoothness_scale, 'smoothness', 'float')
+        _safe_set(self.color_count_var, 'color_count', 'int')
+        _safe_set(self.color_scheme_var, 'color_scheme')
+        _safe_set(self.compound_mode_var, 'compound_mode')
+
+        # vtracer 参数
+        _safe_set(self.vtracer_preset_var, 'vtracer_preset')
+        _safe_set(self.vtracer_colormode_var, 'vtracer_colormode')
+        _safe_set(self.vtracer_mode_var, 'vtracer_mode')
+        _safe_set(self.vtracer_speckle_scale, 'vtracer_speckle', 'float')
+        _safe_set(self.vtracer_precision_scale, 'vtracer_precision', 'float')
+        _safe_set(self.vtracer_layer_diff_scale, 'vtracer_layer_diff', 'float')
+        _safe_set(self.vtracer_corner_scale, 'vtracer_corner', 'float')
+        _safe_set(self.vtracer_splice_scale, 'vtracer_splice', 'float')
+
+        # 几何模式参数
+        _safe_set(self.geo_color_mode, 'geo_color_mode')
+        _safe_set(self.geo_min_area_scale, 'geo_min_area', 'float')
+        _safe_set(self.geo_approx_scale, 'geo_approx', 'float')
+        _safe_set(self.geo_hough_scale, 'geo_hough', 'float')
+        _safe_set(self.circle_count_var, 'circle_count', 'int')
+        _safe_set(self.letter_recog_var, 'enable_ocr', 'bool')
+        _safe_set(self.auto_label_var, 'auto_label', 'bool')
+        _safe_set(self.sym_axis_var, 'sym_axis', 'bool')
+        _safe_set(self.sym_rotate_var, 'sym_rotate', 'bool')
+        _safe_set(self.sym_center_var, 'sym_center', 'bool')
+        _safe_set(self.sym_rightangle_var, 'sym_rightangle', 'bool')
+
+        # 恢复模式选择
+        saved_mode = saved.get('mode', 'comic')
+        if saved_mode == 'geometry':
+            self.mode_notebook.select(1)
+            self._on_mode_changed(None)
+
+        # 触发界面联动更新
+        self._on_comic_mode_changed()
+        self._on_scale_mode_changed()
+        self._on_line_color_none_toggled()
+        self._on_line_color_original_toggled()
+        self._on_canvas_size_changed(None)
+        self._on_export_format_changed()
+
+        # 更新线宽颜色按钮显示
+        line_color = self.line_color_var.get()
+        if line_color and line_color.startswith('#'):
+            hex_str = line_color[1:]
+            if len(hex_str) == 6:
+                r = int(hex_str[0:2], 16)
+                g = int(hex_str[2:4], 16)
+                b = int(hex_str[4:6], 16)
+                brightness = (r * 299 + g * 587 + b * 114) / 1000
+                fg = '#ffffff' if brightness < 128 else '#000000'
+                color_name = f'  R={r} G={g} B={b}  '
+                self._line_color_btn.config(
+                    bg=line_color, fg=fg, text=color_name
+                )
+
+        self._on_param_changed()
+
     def _log_error(self, message: str):
         """记录错误日志到文件，便于调试"""
         import traceback
@@ -2880,7 +3066,14 @@ class MainWindow:
 
     def run(self):
         """启动主循环"""
+        # 窗口关闭时保存参数
+        self.root.protocol('WM_DELETE_WINDOW', self._on_window_close)
         self.root.mainloop()
+
+    def _on_window_close(self):
+        """窗口关闭时保存参数并退出"""
+        self._save_params()
+        self.root.destroy()
 
 
 # ============================================================

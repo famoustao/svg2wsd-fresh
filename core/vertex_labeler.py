@@ -382,6 +382,111 @@ _DEFAULT_F1 = 220.0
 _DEFAULT_F2 = 220.0
 
 
+def compute_smart_label_offset(x: float, y: float,
+                               bbox: Optional[Tuple[float, float, float, float]] = None,
+                               shapes: Optional[List[Shape]] = None
+                               ) -> Tuple[int, int, float, float]:
+    """
+    根据点在图中的位置智能计算标注偏移方向（9宫格区域+方向编码+f1/f2）
+
+    策略：
+      1. 如果提供了 shapes，优先使用"从图形重心指向端点"的方向（远离图形主体）
+      2. 如果没有 shapes 或无法判断方向，则根据点在 bbox 中的相对位置选择方向：
+         - 左侧 → 标注偏左
+         - 右侧 → 标注偏右
+         - 上方 → 标注偏上
+         - 下方 → 标注偏下
+         - 左上角 → 标注偏左上
+         - 以此类推
+      3. 这样标注会出现在"远离图形中心"的方向，更接近真实几何图标注习惯
+
+    参数:
+        x, y: 点坐标（屏幕坐标系：Y向下）
+        bbox: 画布边界 (min_x, min_y, max_x, max_y)，可为 None
+        shapes: 图形列表，用于计算"远离图形主体"方向，可为 None
+
+    返回:
+        (assoc_type, assoc_dir, assoc_f1, assoc_f2):
+            9宫格区域编码、方向编码（含type位）、水平偏移、垂直偏移
+    """
+    # 优先使用图形方向（如果有 shapes）
+    if shapes:
+        direction_vectors = []
+        for shape in shapes:
+            pts = shape.points
+            if not pts:
+                continue
+            # 检查点是否在形状顶点附近
+            is_vertex = False
+            near_threshold = 0.5
+            for px, py in pts:
+                if math.sqrt((px - x) ** 2 + (py - y) ** 2) < near_threshold:
+                    is_vertex = True
+                    break
+            if not is_vertex:
+                if shape.type in (ShapeType.CIRCLE, ShapeType.ELLIPSE):
+                    cx, cy = pts[0]
+                    if math.sqrt((cx - x) ** 2 + (cy - y) ** 2) < near_threshold:
+                        is_vertex = True
+                else:
+                    continue
+            if not is_vertex:
+                continue
+            dx, dy = _compute_single_shape_offset(x, y, shape, near_threshold)
+            if dx != 0 or dy != 0:
+                direction_vectors.append((dx, dy))
+
+        if direction_vectors:
+            avg_x = sum(d[0] for d in direction_vectors) / len(direction_vectors)
+            avg_y = sum(d[1] for d in direction_vectors) / len(direction_vectors)
+            region, direction = _direction_vector_to_region(avg_x, avg_y)
+            assoc_b1d = ((direction & 0x0f) << 4) | 0x04
+            return region, assoc_b1d, _OFFSET_F1, _OFFSET_F2
+
+    # 回退策略：根据点在 bbox 中的位置选择方向
+    if bbox and len(bbox) == 4:
+        min_x, min_y, max_x, max_y = bbox
+        w = max_x - min_x
+        h = max_y - min_y
+        if w < 1e-6:
+            w = 1.0
+        if h < 1e-6:
+            h = 1.0
+        # 点在 bbox 中的相对位置 (0~1)
+        rel_x = (x - min_x) / w
+        rel_y = (y - min_y) / h
+
+        # 根据相对位置选择方向（远离 bbox 中心）
+        # 屏幕坐标系：Y向下，所以 rel_y < 0.5 是上方
+        if rel_x < 0.33:
+            if rel_y < 0.33:
+                region, direction = REGION_TOP_LEFT, DIR_TOP_LEFT
+            elif rel_y > 0.67:
+                region, direction = REGION_BOTTOM_LEFT, DIR_BOTTOM_LEFT
+            else:
+                region, direction = REGION_LEFT, DIR_LEFT
+        elif rel_x > 0.67:
+            if rel_y < 0.33:
+                region, direction = REGION_TOP_RIGHT, DIR_TOP_RIGHT
+            elif rel_y > 0.67:
+                region, direction = REGION_BOTTOM_RIGHT, DIR_BOTTOM_RIGHT
+            else:
+                region, direction = REGION_RIGHT, DIR_RIGHT
+        else:
+            if rel_y < 0.33:
+                region, direction = REGION_TOP, DIR_TOP
+            elif rel_y > 0.67:
+                region, direction = REGION_BOTTOM, DIR_BOTTOM
+            else:
+                region, direction = REGION_TOP_RIGHT, DIR_TOP_RIGHT
+    else:
+        # 无 bbox 信息，默认右上方
+        region, direction = REGION_TOP_RIGHT, DIR_TOP_RIGHT
+
+    assoc_b1d = ((direction & 0x0f) << 4) | 0x04
+    return region, assoc_b1d, _OFFSET_F1, _OFFSET_F2
+
+
 def _direction_vector_to_region(dx: float, dy: float) -> Tuple[int, int]:
     """
     将方向向量转换为 WSD 9宫格区域和方向编码
