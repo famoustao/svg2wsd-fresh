@@ -73,7 +73,11 @@ def auto_label_vertices(canvas_data: CanvasData,
     vertices = sorted(vertices, key=lambda v: (v[0], v[1]))
 
     # 3. 确定已有标注覆盖的端点（避免重复标注）
+    # 使用更大的阈值来判定端点是否已被标注，避免在已有标注附近重复添加
     annotated_vertices = _get_annotated_vertices(canvas_data.annotations, threshold)
+    # 已有标注的覆盖范围使用更大的阈值（bbox对角线的5%），
+    # 确保已有标注附近的端点不会被重复标注
+    annotated_threshold = _compute_dedup_threshold(canvas_data, default=3.0) * 2.5
 
     # 4. 计算形状近端匹配阈值（自适应坐标尺度）
     near_threshold = _compute_near_threshold(canvas_data)
@@ -84,8 +88,8 @@ def auto_label_vertices(canvas_data: CanvasData,
 
     label_idx = 0
     for vx, vy in vertices:
-        # 跳过已有标注覆盖的端点
-        if _is_near_annotated(vx, vy, annotated_vertices, threshold):
+        # 跳过已有标注覆盖的端点（使用更大的阈值，避免重复标注）
+        if _is_near_annotated(vx, vy, annotated_vertices, annotated_threshold):
             continue
 
         label = label_prefix + _next_label(used_labels, label_idx)

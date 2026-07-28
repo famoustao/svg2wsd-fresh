@@ -43,6 +43,8 @@ class GeoGebraScriptParser:
         self._annotations: List[TextAnnotation] = []
         self._all_x: List[float] = []
         self._all_y: List[float] = []
+        # 记录已通过 SetLabel 显式标注过的变量名，避免后续自动标注重复
+        self._labeled_vars: set = set()
 
     def parse(self, code: str) -> CanvasData:
         """
@@ -66,11 +68,23 @@ class GeoGebraScriptParser:
                 continue
 
         # 为所有点变量生成标签标注（使用原始变量名作为标签文字）
+        # 跳过已通过 SetLabel 显式标注的变量，避免重复标注
         for var_name, value in self._vars.items():
             if isinstance(value, tuple) and len(value) == 2:
                 # 是一个点坐标
                 # 跳过非标识符名称或过长的名称
                 if len(var_name) == 1 and var_name.isalpha():
+                    # 跳过已被 SetLabel 显式标注的变量
+                    if var_name in self._labeled_vars:
+                        continue
+                    # 跳过坐标附近已有标注的点（防止其他方式产生的重复）
+                    already_annotated = False
+                    for a in self._annotations:
+                        if math.sqrt((a.x - value[0]) ** 2 + (a.y - value[1]) ** 2) < 0.5:
+                            already_annotated = True
+                            break
+                    if already_annotated:
+                        continue
                     self._annotations.append(TextAnnotation(
                         text=var_name,
                         x=value[0], y=value[1],
@@ -444,6 +458,8 @@ class GeoGebraScriptParser:
                 obj_name = args[0].strip()
                 label_text = self._eval_expr(args[-1])
                 if label_text and isinstance(label_text, str):
+                    # 记录该变量已被显式标注，后续自动标注将跳过
+                    self._labeled_vars.add(obj_name)
                     # 查找对象对应的坐标
                     obj = self._vars.get(obj_name)
                     pt = None
@@ -452,12 +468,28 @@ class GeoGebraScriptParser:
                     elif isinstance(obj, dict):
                         pt = obj.get('center') or obj.get('p1')
                     if pt:
-                        self._annotations.append(TextAnnotation(
-                            text=label_text,
-                            x=pt[0], y=pt[1],
-                            font_size=14.0,
-                            bold=True,
-                        ))
+                        # 检查是否已有该坐标的标注，有则更新文字，无则新增
+                        existing = None
+                        for a in self._annotations:
+                            if (math.sqrt((a.x - pt[0]) ** 2 + (a.y - pt[1]) ** 2) < 0.5):
+                                existing = a
+                                break
+                        if existing is not None:
+                            # 更新已有标注的文字
+                            existing.text = label_text
+                        else:
+                            # 新增标注（带关联偏移参数）
+                            self._annotations.append(TextAnnotation(
+                                text=label_text,
+                                x=pt[0], y=pt[1],
+                                font_size=14.0,
+                                bold=True,
+                                associated=True,
+                                assoc_type=2,       # 右上区域
+                                assoc_f1=400.0,     # 水平靠外
+                                assoc_f2=400.0,     # 垂直靠外
+                                assoc_dir=0xB4,     # 右上方向
+                            ))
 
         elif func_name == 'SetLineThickness':
             if len(args) >= 2:
