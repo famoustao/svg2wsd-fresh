@@ -525,10 +525,10 @@ def import_latex(filepath: str) -> CanvasData:
                             font_size=14.0,
                             bold=True,
                             associated=True,
-                            assoc_type=2,       # 右上区域
-                            assoc_f1=400.0,     # 水平靠外
-                            assoc_f2=400.0,     # 垂直靠外
-                            assoc_dir=0xB4,     # 右上方向
+                            assoc_type=2,       # 临时值，后续智能计算
+                            assoc_f1=200.0,
+                            assoc_f2=200.0,
+                            assoc_dir=0xB4,     # 临时值，后续智能计算
                         ))
                         all_x.append(cx)
                         all_y.append(cy)
@@ -1147,10 +1147,10 @@ def import_ggb(filepath: str) -> CanvasData:
                         text=label, x=x, y=y,
                         font_size=14, bold=True,
                         associated=True,
-                        assoc_type=2,       # 右上区域
-                        assoc_f1=400.0,     # 水平靠外
-                        assoc_f2=400.0,     # 垂直靠外
-                        assoc_dir=0xB4,     # 右上方向
+                        assoc_type=2,       # 临时值，后续智能计算
+                        assoc_f1=200.0,
+                        assoc_f2=200.0,
+                        assoc_dir=0xB4,     # 临时值，后续智能计算
                     ))
 
             elif elem_type == 'segment':

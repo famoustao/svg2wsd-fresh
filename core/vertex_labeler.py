@@ -26,10 +26,30 @@ _DEFAULT_LABELS = list('ABCDEFGHIJKLMNOPQRSTUVWXYZ')
 
 
 def _next_label(used: set, idx: int) -> str:
-    """获取下一个可用标签（A-Z, 然后用 A1-Z9 等）"""
-    if idx < 26:
-        return _DEFAULT_LABELS[idx]
-    return _DEFAULT_LABELS[idx % 26] + str(idx // 26)
+    """
+    获取下一个可用标签（A-Z, 然后用 A1-Z9 等）
+
+    会跳过 used 集合中已存在的标签，确保不重复。
+
+    参数:
+        used: 已使用的标签集合
+        idx: 起始索引（从此处开始向后搜索可用标签）
+
+    返回:
+        下一个未被使用的标签字符串
+    """
+    i = idx
+    while True:
+        if i < 26:
+            label = _DEFAULT_LABELS[i]
+        else:
+            label = _DEFAULT_LABELS[i % 26] + str(i // 26)
+        if label not in used:
+            return label
+        i += 1
+        # 安全上限，防止无限循环
+        if i > 260:
+            return label
 
 
 def auto_label_vertices(canvas_data: CanvasData,
@@ -373,9 +393,10 @@ _REGION_TO_DIR = {
 }
 
 # f1/f2 偏移参数（用于字母偏移锚点，避免与线重合）
-# 使用 LABEL_PARAM_MAX(400) 确保字母尽量靠外，保证不压在端点或线段上
-_OFFSET_F1 = 400.0
-_OFFSET_F2 = 400.0
+# 使用适中的值确保字母偏离端点但不至于飞出画布
+# LABEL_PARAM_MAX=400（=1mm），使用 200（=0.5mm）是合理的偏移距离
+_OFFSET_F1 = 200.0
+_OFFSET_F2 = 200.0
 
 # 旧默认值（保留兼容，不再用于自动标注）
 _DEFAULT_F1 = 220.0

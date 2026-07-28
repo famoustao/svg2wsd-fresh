@@ -93,8 +93,8 @@ class GeoGebraScriptParser:
                         bold=True,
                         associated=True,
                         assoc_type=2,       # 临时值，后续智能计算
-                        assoc_f1=400.0,
-                        assoc_f2=400.0,
+                        assoc_f1=200.0,
+                        assoc_f2=200.0,
                         assoc_dir=0xB4,     # 临时值，后续智能计算
                     ))
 
@@ -491,17 +491,17 @@ class GeoGebraScriptParser:
                             # 更新已有标注的文字
                             existing.text = label_text
                         else:
-                            # 新增标注（带关联偏移参数）
+                            # 新增标注（偏移参数后续由智能偏移统一计算）
                             self._annotations.append(TextAnnotation(
                                 text=label_text,
                                 x=pt[0], y=pt[1],
                                 font_size=14.0,
                                 bold=True,
                                 associated=True,
-                                assoc_type=2,       # 右上区域
-                                assoc_f1=400.0,     # 水平靠外
-                                assoc_f2=400.0,     # 垂直靠外
-                                assoc_dir=0xB4,     # 右上方向
+                                assoc_type=2,       # 临时值，后续智能计算
+                                assoc_f1=200.0,
+                                assoc_f2=200.0,
+                                assoc_dir=0xB4,     # 临时值，后续智能计算
                             ))
 
         elif func_name == 'SetLineThickness':

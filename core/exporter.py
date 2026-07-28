@@ -509,12 +509,13 @@ def _fit_canvas_to_wsd(canvas_data: CanvasData,
     bbox = shapes_bbox(shapes) if shapes else (0, 0, 0, 0)
     min_x, min_y, max_x, max_y = bbox
 
-    # 加入文字标注的边界
+    # 仅加入非关联标注的边界（关联标注锚点已在形状顶点上，不膨胀bbox）
     for ann in annotations:
-        min_x = min(min_x, ann.x)
-        min_y = min(min_y, ann.y)
-        max_x = max(max_x, ann.x)
-        max_y = max(max_y, ann.y)
+        if not ann.associated:
+            min_x = min(min_x, ann.x)
+            min_y = min(min_y, ann.y)
+            max_x = max(max_x, ann.x)
+            max_y = max(max_y, ann.y)
 
     content_w = max_x - min_x
     content_h = max_y - min_y
@@ -570,11 +571,13 @@ def _fit_canvas_to_fixed_length(canvas_data: CanvasData,
     bbox = shapes_bbox(shapes) if shapes else (0, 0, 0, 0)
     min_x, min_y, max_x, max_y = bbox
 
+    # 仅加入非关联标注的边界（关联标注锚点已在形状顶点上，不膨胀bbox）
     for ann in annotations:
-        min_x = min(min_x, ann.x)
-        min_y = min(min_y, ann.y)
-        max_x = max(max_x, ann.x)
-        max_y = max(max_y, ann.y)
+        if not ann.associated:
+            min_x = min(min_x, ann.x)
+            min_y = min(min_y, ann.y)
+            max_x = max(max_x, ann.x)
+            max_y = max(max_y, ann.y)
 
     content_w = max_x - min_x
     content_h = max_y - min_y
