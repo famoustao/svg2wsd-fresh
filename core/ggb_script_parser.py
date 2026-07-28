@@ -65,6 +65,20 @@ class GeoGebraScriptParser:
                 # 跳过无法解析的行
                 continue
 
+        # 为所有点变量生成标签标注（使用原始变量名作为标签文字）
+        for var_name, value in self._vars.items():
+            if isinstance(value, tuple) and len(value) == 2:
+                # 是一个点坐标
+                # 跳过非标识符名称或过长的名称
+                if len(var_name) == 1 and var_name.isalpha():
+                    self._annotations.append(TextAnnotation(
+                        text=var_name,
+                        x=value[0], y=value[1],
+                        font_size=14.0,
+                        bold=True,
+                        associated=True,
+                    ))
+
         bbox = (0.0, 0.0, 0.0, 0.0)
         if self._all_x and self._all_y:
             bbox = (min(self._all_x), min(self._all_y),
@@ -78,8 +92,8 @@ class GeoGebraScriptParser:
 
     def _parse_line(self, line: str):
         """解析单行命令"""
-        # 去掉行尾注释
-        comment_idx = line.find('#')
+        # 去掉行尾注释（但不处理引号内的 # 字符）
+        comment_idx = self._find_comment(line)
         if comment_idx > 0:
             line = line[:comment_idx].strip()
 
@@ -117,6 +131,23 @@ class GeoGebraScriptParser:
                 result = self._call_func(func_name, args_str)
                 # 函数调用结果不赋值给变量（但可能已产生 shape）
             return
+
+    @staticmethod
+    def _find_comment(line: str) -> int:
+        """查找行中注释的起始位置（# 不在引号内时才算注释）"""
+        in_quotes = False
+        quote_char = None
+        for i, ch in enumerate(line):
+            if ch in ('"', "'"):
+                if not in_quotes:
+                    in_quotes = True
+                    quote_char = ch
+                elif ch == quote_char:
+                    in_quotes = False
+                    quote_char = None
+            elif ch == '#' and not in_quotes:
+                return i
+        return -1
 
     def _eval_expr(self, expr: str) -> Any:
         """求值表达式"""
@@ -448,6 +479,49 @@ class GeoGebraScriptParser:
             # SetPointStyle(obj, style): 点样式（暂不生成可见点图形）
             pass
 
+        elif func_name == 'SetColor':
+            # SetColor(obj, "#rrggbb") 或 SetColor(obj, r, g, b)
+            if len(args) >= 2:
+                obj_name = args[0].strip()
+                color_val = args[1].strip()
+                # 解析颜色
+                bgr = None
+                if color_val.startswith('"#') or color_val.startswith("'#"):
+                    hex_str = color_val.strip('"\'').lstrip('#')
+                    if len(hex_str) == 6:
+                        r = int(hex_str[0:2], 16)
+                        g = int(hex_str[2:4], 16)
+                        b = int(hex_str[4:6], 16)
+                        bgr = (b, g, r)
+                elif color_val.startswith('"') or color_val.startswith("'"):
+                    # 命名颜色
+                    name = color_val.strip('"\'').lower()
+                    named = {
+                        'red': (0, 0, 255), 'green': (0, 128, 0),
+                        'blue': (255, 0, 0), 'yellow': (0, 255, 255),
+                        'cyan': (255, 255, 0), 'magenta': (255, 0, 255),
+                        'orange': (0, 165, 255), 'purple': (128, 0, 128),
+                        'black': (0, 0, 0), 'white': (255, 255, 255),
+                        'gray': (128, 128, 128), 'teal': (128, 128, 0),
+                    }
+                    if name in named:
+                        bgr = named[name]
+
+                if bgr is not None:
+                    # 查找对象并设置颜色
+                    # obj_name 可能是变量名或嵌套函数调用如 Segment(A,D)
+                    obj = self._vars.get(obj_name)
+                    if obj is None:
+                        # 嵌套调用：先记录当前 shape 数量，调用函数，然后撤销新增 shape
+                        shapes_before = len(self._shapes)
+                        obj = self._eval_expr(obj_name)
+                        if isinstance(obj, dict) and len(self._shapes) > shapes_before:
+                            self._shapes.pop()
+                    if isinstance(obj, dict):
+                        idx = self._find_shape_index(obj)
+                        if idx >= 0:
+                            self._shapes[idx].line_color = bgr
+
         elif func_name == 'SetVisible':
             # 忽略可见性设置
             pass
@@ -586,15 +660,15 @@ class GeoGebraScriptParser:
             d2x /= len2
             d2y /= len2
 
-        # 小正方形四个顶点
+        # 小正方形四个顶点（闭合）
         s = size
         m1 = (vertex[0] + d1x * s, vertex[1] + d1y * s)
         m2 = (vertex[0] + d1x * s + d2x * s, vertex[1] + d1y * s + d2y * s)
         m3 = (vertex[0] + d2x * s, vertex[1] + d2y * s)
 
         shape = Shape(
-            type=ShapeType.POLYLINE,
-            points=[m1, m2, m3],
+            type=ShapeType.POLYGON,
+            points=[m1, m2, m3, m1],  # 闭合多边形
             line_color=(0, 0, 0),
             line_width=1.0,
         )

@@ -480,7 +480,7 @@ def import_latex(filepath: str) -> CanvasData:
         import sys
         sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-        from tikz_utils import extract_tikz_from_tex, parse_tikz_code, extract_tikz_nodes
+        from tikz_utils import extract_tikz_from_tex, parse_tikz_code, extract_tikz_nodes, extract_coordinate_labels
 
         # 读取文件内容
         with open(filepath, "r", encoding="utf-8") as f:
@@ -507,6 +507,26 @@ def import_latex(filepath: str) -> CanvasData:
             tikz_nodes = extract_tikz_nodes(tikz_code)
             block_annotations = _convert_tikz_annotations(tikz_nodes)
             annotations.extend(block_annotations)
+
+            # 从 \coordinate[label=...] 提取标签标注
+            coord_labels = extract_coordinate_labels(tikz_code)
+            if coord_labels:
+                from tikz_utils import extract_named_coordinates
+                # extract_named_coordinates 会通过 _parse_coord 读取已设置的 _tikz_scale，
+                # 所以返回的坐标已经包含了 scale，无需再次乘以 scale
+                named_coords = extract_named_coordinates(tikz_code)
+
+                for coord_name, label_text in coord_labels.items():
+                    if coord_name in named_coords:
+                        cx, cy = named_coords[coord_name]
+                        annotations.append(TextAnnotation(
+                            text=label_text,
+                            x=cx, y=cy,
+                            font_size=14.0,
+                            bold=True,
+                        ))
+                        all_x.append(cx)
+                        all_y.append(cy)
 
         # 收集所有坐标计算bbox
         for s in shapes:

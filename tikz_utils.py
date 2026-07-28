@@ -176,7 +176,10 @@ def _parse_coord(coord_str):
             pt = _parse_coord._named_coords.get(clean)
             if pt:
                 return (pt[0], pt[1], coord_type)
-    
+
+    # 获取 tikz scale（如果有）
+    tikz_scale = getattr(_parse_coord, '_tikz_scale', 1.0)
+
     # 分割 x, y
     parts = coord_str.split(',')
     if len(parts) != 2:
@@ -187,6 +190,11 @@ def _parse_coord(coord_str):
 
     if x is None or y is None:
         return None
+
+    # 应用 tikz scale
+    if tikz_scale != 1.0:
+        x *= tikz_scale
+        y *= tikz_scale
 
     return (x, y, coord_type)
 
@@ -425,8 +433,8 @@ def _parse_path_body(body_str, options):
                 remaining = remaining[i+1:]
                 matched = True
 
-        # rectangle (x,y) 矩形
-        m = re.match(r'rectangle\s*\([^)]+\)', remaining)
+        # rectangle (x,y) 或 rectangle ++(x,y) 矩形
+        m = re.match(r'rectangle\s*(\+*)\s*\([^)]+\)', remaining)
         if m and not matched:
             coord_start = remaining.find('(')
             depth = 0
@@ -440,7 +448,10 @@ def _parse_path_body(body_str, options):
                         break
                 i += 1
             coord_str = remaining[coord_start:i+1]
-            result = _parse_coord(coord_str)
+            # 检查 ++ 或 + 前缀
+            rect_prefix = m.group(1) or ''
+            full_coord = rect_prefix + coord_str
+            result = _parse_coord(full_coord)
             if result:
                 rx, ry, ctype = result
                 if ctype == 'relative':
@@ -694,6 +705,14 @@ def parse_tikz_code(tikz_code):
         tikz_code, re.DOTALL
     )
 
+    # 解析 tikzpicture 选项中的 scale 参数
+    tikz_scale = 1.0
+    if tikz_env_match and tikz_env_match.group(1):
+        env_opts = tikz_env_match.group(1).strip('[]')
+        scale_match = re.search(r'scale\s*=\s*([\d.]+)', env_opts)
+        if scale_match:
+            tikz_scale = float(scale_match.group(1))
+
     if tikz_env_match:
         body = tikz_env_match.group(2)
     else:
@@ -704,8 +723,18 @@ def parse_tikz_code(tikz_code):
 
     # 提取命名坐标 (\coordinate 命令)
     named_coords = extract_named_coordinates(tikz_code)
+
+    # 应用 scale 到命名坐标
+    if tikz_scale != 1.0:
+        named_coords = {
+            name: (x * tikz_scale, y * tikz_scale)
+            for name, (x, y) in named_coords.items()
+        }
+
     # 注入到 _parse_coord 的静态属性中供查找
     _parse_coord._named_coords = named_coords
+    # 保存 scale 供路径解析时使用
+    _parse_coord._tikz_scale = tikz_scale
 
     # 提取 \draw, \fill, \filldraw, \path 命令
     # 匹配到分号结束（注意括号嵌套）
@@ -867,13 +896,18 @@ def extract_tikz_from_tex(tex_content):
 def extract_named_coordinates(tikz_code):
     """
     从TikZ代码中提取 \\coordinate 命令定义的命名坐标
-    
+
+    支持以下格式：
+      \\coordinate (A) at (2,3);
+      \\coordinate[label=above:$A$] (A) at (2,3);
+      \\coordinate[label=left:{B}] (B) at (0,0);
+
     返回: dict, name -> (x, y) 坐标映射
     """
     coords = {}
     # 去掉注释
     body = re.sub(r'%.*', '', tikz_code)
-    
+
     # 提取 tikzpicture 环境内内容
     env_match = re.search(
         r'\\begin\{tikzpicture\}(\[.*?\])?\s*(.*?)\\end\{tikzpicture\}',
@@ -881,17 +915,68 @@ def extract_named_coordinates(tikz_code):
     )
     if env_match:
         body = env_match.group(2)
-    
-    # 匹配 \coordinate (name) at (x,y);
-    for m in re.finditer(r'\\coordinate\s*\((\w+)\)\s*at\s*\(([^)]+)\)\s*;', body):
-        name = m.group(1)
-        coord_str = m.group(2).strip()
+
+    # 匹配 \coordinate [options] (name) at (x,y);  或  \coordinate (name) at (x,y);
+    # 可选的 [options] 部分用非贪婪匹配
+    for m in re.finditer(
+        r'\\coordinate\s*(?:\[([^\]]*)\])?\s*\((\w+)\)\s*at\s*\(([^)]+)\)\s*;',
+        body
+    ):
+        opt_str = m.group(1) or ''
+        name = m.group(2)
+        coord_str = m.group(3).strip()
         coord = _parse_coord(coord_str)
         if coord:
             x, y, _ = coord
             coords[name] = (x, y)
-    
+
     return coords
+
+
+def extract_coordinate_labels(tikz_code):
+    """
+    从TikZ代码中提取 \\coordinate 命令的标签文字
+
+    解析 \\coordinate[label=above:$A$] (A) at (2,3); 中的标签文字 A
+    以及 \\coordinate[label=left:{B}] (B) at (0,0); 中的标签文字 B
+
+    返回: dict, coord_name -> label_text
+    """
+    labels = {}
+    body = re.sub(r'%.*', '', tikz_code)
+
+    env_match = re.search(
+        r'\\begin\{tikzpicture\}(\[.*?\])?\s*(.*?)\\end\{tikzpicture\}',
+        body, re.DOTALL
+    )
+    if env_match:
+        body = env_match.group(2)
+
+    for m in re.finditer(
+        r'\\coordinate\s*(?:\[([^\]]*)\])?\s*\((\w+)\)\s*at\s*\(([^)]+)\)\s*;',
+        body
+    ):
+        opt_str = m.group(1) or ''
+        name = m.group(2)
+
+        # 从选项中提取 label=xxx
+        label_match = re.search(r'label\s*=\s*(.+)', opt_str)
+        if label_match:
+            label_val = label_match.group(1).strip()
+            # 去掉方向前缀: above:, below:, left:, right:, above left:, 等
+            label_val = re.sub(
+                r'^(above|below|left|right|above\s+left|above\s+right|below\s+left|below\s+right)\s*:\s*',
+                '', label_val, flags=re.IGNORECASE
+            )
+            # 去掉 $ 符号（数学模式）
+            label_val = label_val.replace('$', '').strip()
+            # 去掉花括号
+            if label_val.startswith('{') and label_val.endswith('}'):
+                label_val = label_val[1:-1].strip()
+            if label_val:
+                labels[name] = label_val
+
+    return labels
 
 
 def read_tikz_file(file_path):
