@@ -1391,16 +1391,17 @@ def build_polyline_record(points, closed=True, linewidth=None):
     return bytes(rec)
 
 
-def build_circle_record(cx, cy, radius, linewidth=None):
+def build_circle_record(cx, cy, radius, linewidth=None, line_color_bgra=None):
     """
     构建圆形记录
 
-    基于圆原型复制，修改cx/cy/r参数。
+    基于圆原型复制，修改cx/cy/r参数，支持自定义线条颜色。
 
     Args:
         cx, cy: 圆心坐标（WSD单位）
         radius: 半径（WSD单位）
         linewidth: 线宽，None=使用原型值
+        line_color_bgra: 线条颜色 (B, G, R, A) 4字节，None=使用原型默认色
 
     Returns:
         bytes: 完整的圆形记录
@@ -1411,6 +1412,14 @@ def build_circle_record(cx, cy, radius, linewidth=None):
     if linewidth is not None:
         struct.pack_into('<I', rec, 0x10, int(linewidth))
 
+    # 修改线条颜色（偏移0x08，4字节BGRA）
+    if line_color_bgra is not None:
+        if len(line_color_bgra) == 4:
+            rec[0x08:0x0c] = bytes(line_color_bgra)
+        elif len(line_color_bgra) == 3:
+            rec[0x08:0x0b] = bytes(line_color_bgra)
+            rec[0x0b] = 0xff  # alpha
+
     # 修改圆参数（float32）
     struct.pack_into('<f', rec, 0x20, float(cx))      # cx
     struct.pack_into('<f', rec, 0x24, float(cy))      # cy
@@ -1420,7 +1429,8 @@ def build_circle_record(cx, cy, radius, linewidth=None):
     return bytes(rec)
 
 
-def build_arc_record(cx, cy, radius, start_angle, end_angle, linewidth=None):
+def build_arc_record(cx, cy, radius, start_angle, end_angle, linewidth=None,
+                     line_color_bgra=None):
     """
     构建圆弧记录（原生圆弧格式，85字节）
 
@@ -1436,6 +1446,7 @@ def build_arc_record(cx, cy, radius, start_angle, end_angle, linewidth=None):
         start_angle: 起始角度（弧度，数学坐标系）
         end_angle: 终止角度（弧度，数学坐标系）
         linewidth: 线宽，None=使用默认值
+        line_color_bgra: 线条颜色 (B, G, R, A) 4字节，None=使用原型默认色
 
     Returns:
         bytes: 完整的圆弧记录
@@ -1480,7 +1491,7 @@ def build_arc_record(cx, cy, radius, start_angle, end_angle, linewidth=None):
     struct.pack_into('<H', rec, p, 0x330f); p += 2       # 标记
     rec[p:p+4] = bytes([0xff, 0x00, 0x07, 0x04]); p += 4  # 类型字 0x00FF + 0704
     struct.pack_into('<H', rec, p, 0xffff); p += 2        # 保留
-    rec[p:p+4] = bytes([0x01, 0xff, 0x00, 0x00]); p += 4  # 线条颜色（原型值）
+    rec[p:p+4] = bytes([0x01, 0xff, 0x00, 0x00]) if line_color_bgra is None else bytes(line_color_bgra[:4]); p += 4  # 线条颜色
     rec[p:p+4] = bytes(4); p += 4                           # 填充（无）
     struct.pack_into('<i', rec, p, int(linewidth) if linewidth else 80); p += 4  # 线宽
     rec[p] = 0x00; p += 1  # flag

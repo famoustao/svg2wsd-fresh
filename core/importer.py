@@ -524,6 +524,11 @@ def import_latex(filepath: str) -> CanvasData:
                             x=cx, y=cy,
                             font_size=14.0,
                             bold=True,
+                            associated=True,
+                            assoc_type=2,       # 右上区域
+                            assoc_f1=400.0,     # 水平靠外
+                            assoc_f2=400.0,     # 垂直靠外
+                            assoc_dir=0xB4,     # 右上方向
                         ))
                         all_x.append(cx)
                         all_y.append(cy)
@@ -823,6 +828,11 @@ def _convert_tikz_annotations(tikz_nodes) -> list:
                 dx = anchor_offset
                 dy = anchor_offset
         
+        # 如果没有指定锚点方向，默认右上方偏移
+        if dx == 0.0 and dy == 0.0:
+            dx = anchor_offset
+            dy = -anchor_offset
+
         ann = TextAnnotation(
             text=node.text,
             x=node.x + dx,
@@ -1123,7 +1133,12 @@ def import_ggb(filepath: str) -> CanvasData:
                     y = float(coords.get('y', 0))
                     annotations.append(TextAnnotation(
                         text=label, x=x, y=y,
-                        font_size=14, bold=True
+                        font_size=14, bold=True,
+                        associated=True,
+                        assoc_type=2,       # 右上区域
+                        assoc_f1=400.0,     # 水平靠外
+                        assoc_f2=400.0,     # 垂直靠外
+                        assoc_dir=0xB4,     # 右上方向
                     ))
 
             elif elem_type == 'segment':

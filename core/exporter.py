@@ -545,6 +545,63 @@ def _fit_canvas_to_wsd(canvas_data: CanvasData,
     return (scale, offset_x, offset_y)
 
 
+def _fit_canvas_to_fixed_length(canvas_data: CanvasData,
+                                canvas_size_mm: Tuple[float, float],
+                                target_length_mm: float,
+                                margin_ratio: float = 0.05
+                                ) -> Tuple[float, float, float]:
+    """
+    将图形最长边缩放到指定mm长度，保持居中
+
+    参数:
+        canvas_data: 画布数据
+        canvas_size_mm: 目标画布尺寸 (宽mm, 高mm)
+        target_length_mm: 目标长度（mm），图形最长边将缩放到此长度
+        margin_ratio: 边距比例，默认 0.05（5%）
+
+    返回:
+        (scale, offset_x, offset_y): 缩放比例和偏移量（WSD单位）
+    """
+    from core.data_model import shapes_bbox
+
+    shapes = canvas_data.shapes
+    annotations = canvas_data.annotations
+
+    bbox = shapes_bbox(shapes) if shapes else (0, 0, 0, 0)
+    min_x, min_y, max_x, max_y = bbox
+
+    for ann in annotations:
+        min_x = min(min_x, ann.x)
+        min_y = min(min_y, ann.y)
+        max_x = max(max_x, ann.x)
+        max_y = max(max_y, ann.y)
+
+    content_w = max_x - min_x
+    content_h = max_y - min_y
+
+    if content_w <= 0 or content_h <= 0:
+        w_wsd = canvas_size_mm[0] * MM_TO_WSD
+        h_wsd = canvas_size_mm[1] * MM_TO_WSD
+        return (1.0, w_wsd / 2, h_wsd / 2)
+
+    # 最长边
+    max_dim = max(content_w, content_h)
+    target_wsd = target_length_mm * MM_TO_WSD
+
+    # 缩放比例：使最长边等于目标长度
+    scale = target_wsd / max_dim
+
+    # 计算居中偏移
+    w_wsd = canvas_size_mm[0] * MM_TO_WSD
+    h_wsd = canvas_size_mm[1] * MM_TO_WSD
+    scaled_w = content_w * scale
+    scaled_h = content_h * scale
+    offset_x = (w_wsd - scaled_w) / 2 - min_x * scale
+    offset_y = (h_wsd - scaled_h) / 2 - min_y * scale
+
+    return (scale, offset_x, offset_y)
+
+
 def _transform_shape(shape: Shape, scale: float,
                      offset_x: float, offset_y: float) -> Shape:
     """
@@ -617,7 +674,9 @@ def export_wsd_single(canvas_data: CanvasData,
                       canvas_size_mm: Optional[Tuple[float, float]] = None,
                       linewidth: int = 80,
                       line_color_override: Optional[str] = None,
-                      line_alpha: int = 255) -> None:
+                      line_alpha: int = 255,
+                      scale_mode: str = 'auto',
+                      scale_value: float = 80.0) -> None:
     """
     单画布导出为单个 WSD 文件
 
@@ -643,6 +702,8 @@ def export_wsd_single(canvas_data: CanvasData,
         linewidth: 线宽（WSD单位），默认 80（0.2mm）
         line_color_override: 线条颜色覆盖（十六进制，如 '#ff0000'），None 则使用原始颜色
         line_alpha: 线条透明度（0-255），默认255（不透明），0为完全透明（无色）
+        scale_mode: 缩放模式 'auto'=自动适应, 'percent'=按百分比, 'fixed'=固定长度
+        scale_value: 缩放值（percent模式为百分比0-200，fixed模式为mm长度）
 
     返回:
         None（直接写入文件）
@@ -653,8 +714,22 @@ def export_wsd_single(canvas_data: CanvasData,
     if canvas_size_mm is None:
         canvas_size_mm = (DEFAULT_CANVAS_WIDTH_MM, DEFAULT_CANVAS_HEIGHT_MM)
 
-    # 计算坐标变换（像素 -> WSD单位，等比缩放居中）
-    scale, offset_x, offset_y = _fit_canvas_to_wsd(canvas_data, canvas_size_mm)
+    # 计算坐标变换（像素 -> WSD单位，根据缩放模式）
+    if scale_mode == 'auto':
+        scale, offset_x, offset_y = _fit_canvas_to_wsd(canvas_data, canvas_size_mm)
+    elif scale_mode == 'percent':
+        # 按百分比缩放：先自动适应，再乘以百分比
+        auto_scale, auto_ox, auto_oy = _fit_canvas_to_wsd(canvas_data, canvas_size_mm)
+        pct = max(0.1, float(scale_value)) / 100.0
+        scale = auto_scale * pct
+        offset_x = auto_ox
+        offset_y = auto_oy
+    elif scale_mode == 'fixed':
+        # 固定长度：将图形最长边缩放到指定mm长度
+        scale, offset_x, offset_y = _fit_canvas_to_fixed_length(
+            canvas_data, canvas_size_mm, float(scale_value))
+    else:
+        scale, offset_x, offset_y = _fit_canvas_to_wsd(canvas_data, canvas_size_mm)
 
     # 解析覆盖颜色（hex -> BGR tuple）
     override_bgr = None
@@ -685,7 +760,10 @@ def export_wsd_single(canvas_data: CanvasData,
         if transformed.type == ShapeType.CIRCLE and transformed.points:
             cx, cy = int(transformed.points[0][0]), int(transformed.points[0][1])
             radius = int(transformed.extra.get('radius', 50))
-            rec = build_circle_record(cx, cy, radius, linewidth=linewidth)
+            # 计算圆形的线条颜色（与_path_record一致）
+            circle_color_bgra = _bgr_to_bgra_bytes(transformed.line_color, alpha=line_alpha)
+            rec = build_circle_record(cx, cy, radius, linewidth=linewidth,
+                                      line_color_bgra=circle_color_bgra)
             builder.add_circle(rec)
         else:
             rec = _shape_to_path_record(transformed, linewidth=linewidth, line_alpha=line_alpha)

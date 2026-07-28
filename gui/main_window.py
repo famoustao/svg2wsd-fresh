@@ -469,10 +469,13 @@ class MainWindow:
             self._left_scroll_canvas.update_idletasks()
             bbox = self._left_scroll_canvas.bbox('all')
             if bbox:
-                # 添加 4px padding 使底部内容不被裁切
+                # 添加较大的底部padding，确保最下方的滑块可点击
                 self._left_scroll_canvas.configure(
-                    scrollregion=(0, 0, bbox[2] + 4, bbox[3] + 4)
+                    scrollregion=(0, 0, bbox[2] + 8, bbox[3] + 80)
                 )
+
+        # 保存为实例方法，供模式切换等场景调用
+        self._update_left_scroll_region = _update_scroll_region
 
         # Canvas 宽度变化时，同步 inner 宽度（减去滚动条宽度）
         def _on_canvas_configure(event):
@@ -1196,6 +1199,24 @@ class MainWindow:
         )
         self._line_color_none_chk.pack(side='left')
 
+        # 保留原始颜色复选框
+        self.line_color_original_var = tk.BooleanVar(value=False)
+        self._line_color_original_chk = tk.Checkbutton(
+            line_color_frame,
+            text='保留原色',
+            variable=self.line_color_original_var,
+            command=self._on_line_color_original_toggled,
+            bg=get_color('card'),
+            fg=get_color('text'),
+            activebackground=get_color('card'),
+            activeforeground=get_color('text'),
+            selectcolor=get_color('card'),
+            font=('Microsoft YaHei UI', 9),
+            bd=0,
+            highlightthickness=0,
+        )
+        self._line_color_original_chk.pack(side='left', padx=(4, 0))
+
         # 导出模式
         export_mode_frame = tk.Frame(content, bg=get_color('card'))
         export_mode_frame.pack(fill='x', pady=2)
@@ -1243,6 +1264,50 @@ class MainWindow:
             '<<ComboboxSelected>>',
             lambda e: self._on_export_format_changed(),
         )
+
+        # 缩放模式
+        scale_mode_frame = tk.Frame(content, bg=get_color('card'))
+        scale_mode_frame.pack(fill='x', pady=2)
+
+        tk.Label(
+            scale_mode_frame,
+            text='缩放模式:',
+            bg=get_color('card'),
+            fg=get_color('text'),
+            font=('Microsoft YaHei UI', 9),
+        ).pack(side='left')
+
+        self.scale_mode_var = tk.StringVar(value='auto')
+        scale_mode_combo = ttk.Combobox(
+            scale_mode_frame,
+            textvariable=self.scale_mode_var,
+            values=['自动适应', '按百分比', '固定长度'],
+            state='readonly',
+            width=10,
+        )
+        scale_mode_combo.pack(side='left', padx=4)
+        scale_mode_combo.bind(
+            '<<ComboboxSelected>>',
+            lambda e: self._on_scale_mode_changed(),
+        )
+
+        # 缩放值输入
+        self.scale_value_var = tk.StringVar(value='80')
+        self._scale_value_entry = ttk.Entry(
+            scale_mode_frame,
+            textvariable=self.scale_value_var,
+            width=6,
+        )
+        self._scale_value_entry.pack(side='left', padx=(4, 2))
+
+        self._scale_unit_label = tk.Label(
+            scale_mode_frame,
+            text='%',
+            bg=get_color('card'),
+            fg=get_color('text'),
+            font=('Microsoft YaHei UI', 9),
+        )
+        self._scale_unit_label.pack(side='left')
 
     def _build_action_buttons_card(self, parent):
         """构建操作按钮卡片（已弃用，按钮移至文件列表卡片）"""
@@ -1347,7 +1412,7 @@ class MainWindow:
         self._update_tab_icons()
 
         # 更新滚动区域（模式切换后内容高度变化）
-        self.root.after(50, self.scroll_frame.update_scroll_region)
+        self.root.after(50, self._update_left_scroll_region)
 
         self._update_status(f'已切换到{"漫画模式" if current == 0 else "几何模式"}')
         self._on_param_changed()
@@ -1369,6 +1434,23 @@ class MainWindow:
         if fmt == 'SVG':
             # SVG 不支持合并模式，禁用合并选项
             self.export_mode_var.set('separate')
+        self._on_param_changed()
+
+    def _on_scale_mode_changed(self):
+        """缩放模式变化时更新单位标签和默认值"""
+        mode = self.scale_mode_var.get()
+        if mode == '自动适应':
+            self._scale_value_entry.config(state='disabled')
+        else:
+            self._scale_value_entry.config(state='normal')
+            if mode == '按百分比':
+                self._scale_unit_label.config(text='%')
+                if not self.scale_value_var.get() or self.scale_value_var.get() == '0':
+                    self.scale_value_var.set('80')
+            elif mode == '固定长度':
+                self._scale_unit_label.config(text='mm')
+                if not self.scale_value_var.get() or self.scale_value_var.get() == '0':
+                    self.scale_value_var.set('100')
         self._on_param_changed()
 
     def _on_comic_mode_changed(self):
@@ -1405,7 +1487,7 @@ class MainWindow:
                 self._line_color_btn.config(state='normal')
 
         # 更新滚动区域（子模式切换后内容高度变化）
-        self.root.after(50, self.scroll_frame.update_scroll_region)
+        self.root.after(50, self._update_left_scroll_region)
 
         self._on_param_changed()
 
@@ -1516,18 +1598,21 @@ class MainWindow:
             dialog.update_idletasks()
             try:
                 import tempfile
+                import datetime
                 canvas_data = None
                 tmp_path = None
+                # 生成带时间戳的唯一文件名，避免多次粘贴导致重名
+                timestamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
                 if fmt == 'latex':
                     from core.importer import import_latex
                     tmp = tempfile.NamedTemporaryFile(mode='w', suffix='.tex', delete=False, encoding='utf-8')
                     tmp.write(raw_code); tmp.close(); tmp_path = tmp.name
                     canvas_data = import_latex(tmp_path)
-                    filename = 'pasted_code.tex'
+                    filename = f'pasted_code_{timestamp}.tex'
                 elif fmt == 'ggb_script':
                     from core.importer import import_ggb_script
                     canvas_data = import_ggb_script(raw_code)
-                    filename = 'pasted_code.ggb'
+                    filename = f'pasted_code_{timestamp}.ggb'
                 else:
                     import zipfile
                     tmp = tempfile.NamedTemporaryFile(mode='wb', suffix='.ggb', delete=False)
@@ -1536,7 +1621,7 @@ class MainWindow:
                     tmp_path = tmp.name
                     from core.importer import import_file
                     canvas_data = import_file(tmp_path)
-                    filename = 'pasted_code.ggb'
+                    filename = f'pasted_code_{timestamp}.ggb'
 
                 if canvas_data is None:
                     status_var.set('导入失败: 无法解析')
@@ -1548,14 +1633,18 @@ class MainWindow:
                     canvas_data = auto_label_vertices(canvas_data)
 
                 # 更新文件列表
-                existing = [i for i, f in enumerate(self._files) if f['name'] == filename]
+                # 确保文件名唯一：若已存在同名，追加序号
+                base_filename = filename
+                counter = 2
+                while any(f['name'] == filename for f in self._files):
+                    name_part, ext = os.path.splitext(base_filename)
+                    filename = f'{name_part}_{counter}{ext}'
+                    counter += 1
+
                 file_entry = {'path': tmp_path, 'name': filename, 'status': '待处理',
                               'tmp_file': True, 'canvas_data': canvas_data}
-                if existing:
-                    self._files[existing[0]] = file_entry
-                else:
-                    self._files.append(file_entry)
-                    self.file_tree.insert('', 'end', text=filename, values=('待处理',))
+                self._files.append(file_entry)
+                self.file_tree.insert('', 'end', text=filename, values=('待处理',))
 
                 self._current_file_index = len(self._files) - 1
                 children = self.file_tree.get_children()
@@ -1941,6 +2030,10 @@ class MainWindow:
             self._debounced_update_preview,
         )
 
+        # 延迟更新滚动区域（参数变化可能导致UI元素显隐变化）
+        if hasattr(self, '_update_left_scroll_region'):
+            self.root.after(100, self._update_left_scroll_region)
+
     def _debounced_update_preview(self):
         """防抖后的预览更新"""
         self._debounce_id = None
@@ -2310,6 +2403,21 @@ class MainWindow:
         if is_none:
             # 无色：禁用颜色按钮
             self._line_color_btn.config(state='disabled')
+            # 互斥：取消保留原色
+            if self.line_color_original_var.get():
+                self.line_color_original_var.set(False)
+        else:
+            self._line_color_btn.config(state='normal')
+        self._on_param_changed()
+
+    def _on_line_color_original_toggled(self):
+        """保留原始颜色复选框切换"""
+        is_original = self.line_color_original_var.get()
+        if is_original:
+            # 保留原色：禁用颜色按钮和无色
+            self._line_color_btn.config(state='disabled')
+            if self.line_color_none_var.get():
+                self.line_color_none_var.set(False)
         else:
             self._line_color_btn.config(state='normal')
         self._on_param_changed()
@@ -2448,8 +2556,23 @@ class MainWindow:
             # 2. 批量导出
             canvas_size_mm = self._get_canvas_size_mm()
             line_color_none = params.get('line_color_none', False)
+            line_color_original = params.get('line_color_original', False)
             line_color = params.get('line_color')
-            line_alpha = 0 if line_color_none else 255
+            # 保留原色时不覆盖颜色；无色时alpha=0
+            if line_color_original:
+                line_color = None  # 不覆盖颜色
+                line_alpha = 255
+            else:
+                line_alpha = 0 if line_color_none else 255
+            # 缩放模式参数
+            scale_mode_text = params.get('scale_mode', '自动适应')
+            scale_mode_map = {'自动适应': 'auto', '按百分比': 'percent', '固定长度': 'fixed'}
+            scale_mode = scale_mode_map.get(scale_mode_text, 'auto')
+            try:
+                scale_value = float(params.get('scale_value', '80'))
+            except (ValueError, TypeError):
+                scale_value = 80.0
+
             export_result = batch_mgr.export_all(
                 output_dir=output_dir,
                 format=export_format,
@@ -2458,6 +2581,8 @@ class MainWindow:
                 canvas_size_mm=canvas_size_mm,
                 line_color=line_color,
                 line_alpha=line_alpha,
+                scale_mode=scale_mode,
+                scale_value=scale_value,
             )
 
             if progress_callback:
@@ -2650,8 +2775,11 @@ class MainWindow:
             'line_width': self.line_width_var.get(),
             'line_color': self.line_color_var.get(),
             'line_color_none': self.line_color_none_var.get(),
+            'line_color_original': self.line_color_original_var.get(),
             'canvas_size': self.canvas_size_var.get(),
             'export_mode': self.export_mode_var.get(),
+            'scale_mode': self.scale_mode_var.get(),
+            'scale_value': self.scale_value_var.get(),
         }
 
         if self._current_mode == 'comic':

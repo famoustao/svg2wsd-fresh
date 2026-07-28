@@ -369,9 +369,9 @@ _REGION_TO_DIR = {
 }
 
 # f1/f2 偏移参数（用于字母偏移锚点，避免与线重合）
-# 360 ≈ LABEL_PARAM_MAX(400) * 0.9，足够靠外，保证字母不压在端点上
-_OFFSET_F1 = 360.0
-_OFFSET_F2 = 360.0
+# 使用 LABEL_PARAM_MAX(400) 确保字母尽量靠外，保证不压在端点或线段上
+_OFFSET_F1 = 400.0
+_OFFSET_F2 = 400.0
 
 # 旧默认值（保留兼容，不再用于自动标注）
 _DEFAULT_F1 = 220.0
@@ -382,11 +382,11 @@ def _direction_vector_to_region(dx: float, dy: float) -> Tuple[int, int]:
     """
     将方向向量转换为 WSD 9宫格区域和方向编码
 
-    方向向量表示"远离图形主体"的方向（数学坐标系：右为+x，上为+y）。
-    需要转换到屏幕坐标系（y轴向下），再映射到9宫格。
+    方向向量表示"远离图形主体"的方向。
+    注意：传入的坐标已经是屏幕坐标系（Y轴向下），无需再翻转。
 
     参数:
-        dx, dy: 方向向量（数学坐标系）
+        dx, dy: 方向向量（屏幕坐标系：右为+x，下为+y）
 
     返回:
         (region, direction): 9宫格区域编码和方向编码
@@ -396,9 +396,9 @@ def _direction_vector_to_region(dx: float, dy: float) -> Tuple[int, int]:
         # 无法判断方向，默认右上方
         return REGION_TOP_RIGHT, DIR_TOP_RIGHT
 
-    # 转换到屏幕坐标系（y取反）
+    # 坐标已经是屏幕坐标系，直接计算角度
     screen_dx = dx
-    screen_dy = -dy  # 数学y→屏幕y取反
+    screen_dy = dy
 
     # 计算屏幕角度（0°=右，顺时针增加）
     screen_angle = math.atan2(screen_dy, screen_dx)  # -pi ~ pi

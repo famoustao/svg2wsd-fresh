@@ -77,6 +77,10 @@ class GeoGebraScriptParser:
                         font_size=14.0,
                         bold=True,
                         associated=True,
+                        assoc_type=2,       # 右上区域
+                        assoc_f1=400.0,     # 水平靠外
+                        assoc_f2=400.0,     # 垂直靠外
+                        assoc_dir=0xB4,     # 右上方向
                     ))
 
         # GeoGebra 使用数学坐标系（Y向上），WSD 使用屏幕坐标系（Y向下）

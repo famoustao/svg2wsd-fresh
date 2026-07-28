@@ -490,7 +490,9 @@ class BatchManager:
                    merge_name: str = 'output.wsd',
                    canvas_size_mm: Optional[tuple] = None,
                    line_color: Optional[str] = None,
-                   line_alpha: int = 255) -> Dict[str, int]:
+                   line_alpha: int = 255,
+                   scale_mode: str = 'auto',
+                   scale_value: float = 80.0) -> Dict[str, int]:
         """
         批量导出所有已处理完成的文件
 
@@ -507,6 +509,8 @@ class BatchManager:
             canvas_size_mm: 画布尺寸 (宽mm, 高mm)，None 时使用默认尺寸
             line_color:    线条颜色覆盖（十六进制，如 '#ff0000'），None 则使用原始颜色
             line_alpha:    线条透明度（0-255），默认255（不透明），0为完全透明（无色）
+            scale_mode:    缩放模式 'auto'=自动适应, 'percent'=按百分比, 'fixed'=固定长度
+            scale_value:   缩放值（percent模式为百分比，fixed模式为mm长度）
 
         返回:
             dict: 导出统计结果，包含以下键：
@@ -619,6 +623,8 @@ class BatchManager:
                             canvas_size_mm,
                             line_color_override=line_color,
                             line_alpha=line_alpha,
+                            scale_mode=scale_mode,
+                            scale_value=scale_value,
                         )
                     elif format_lower == 'svg':
                         output_filename = base_name + '.svg'
