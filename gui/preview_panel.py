@@ -1058,11 +1058,12 @@ class WsdPreviewCanvas(ZoomableCanvas):
         """
         计算 WSD 关联标注在预览中的像素偏移
 
-        根据 assoc_type（9宫格区域）和 assoc_f1/assoc_f2（偏移参数 0-400）
+        根据 assoc_type（9宫格区域）和 assoc_f1/assoc_f2（偏移比例 0.0-1.0）
         计算标注相对于锚点的偏移量。
 
         偏移策略：
-          - f1/f2 是 WSD 中的偏移参数，范围 0-400（LABEL_PARAM_MAX）
+          - f1/f2 是 WSD 关联标注的比例值，范围 0.0-1.0
+          - 0.0=靠锚点，1.0=靠区域外边缘
           - 在预览中，将 f1/f2 映射为像素偏移（基于字体大小的倍数）
           - 基础偏移距离 = 字体大小 * 1.2（保证不与端点重合）
 
@@ -1080,9 +1081,9 @@ class WsdPreviewCanvas(ZoomableCanvas):
         # 基础偏移量（像素），保证字母不与锚点重合
         base_offset = font_size * 1.2
 
-        # f1/f2 归一化到 0~1（WSD 参数范围 0~400）
-        f1_norm = min(1.0, max(0.0, ann.assoc_f1 / 400.0)) if ann.assoc_f1 else 0.5
-        f2_norm = min(1.0, max(0.0, ann.assoc_f2 / 400.0)) if ann.assoc_f2 else 0.5
+        # f1/f2 已经是 0.0-1.0 的比例值，直接使用
+        f1_norm = min(1.0, max(0.0, ann.assoc_f1)) if ann.assoc_f1 else 0.5
+        f2_norm = min(1.0, max(0.0, ann.assoc_f2)) if ann.assoc_f2 else 0.5
 
         # 根据区域计算偏移方向和大小
         if region == 0:    # 左上

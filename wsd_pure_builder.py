@@ -1209,8 +1209,10 @@ _REGION_TO_DIR = {
     REGION_BOTTOM_RIGHT: DIR_BOTTOM_RIGHT,
 }
 
-# 标注参数范围（f1, f2 的安全范围，0~400）
-LABEL_PARAM_MAX = 400
+# 标注参数范围（f1, f2 的安全范围，0.0~1.0）
+# f1/f2 是关联标注的比例值，不是WSD单位
+# 0.0=靠锚点，1.0=靠区域外边缘
+LABEL_PARAM_MAX = 1.0
 
 
 # ========== 记录原型（硬编码，从几何模板提取） ==========

@@ -393,14 +393,15 @@ _REGION_TO_DIR = {
 }
 
 # f1/f2 偏移参数（用于字母偏移锚点，避免与线重合）
-# 使用适中的值确保字母偏离端点但不至于飞出画布
-# LABEL_PARAM_MAX=400（=1mm），使用 200（=0.5mm）是合理的偏移距离
-_OFFSET_F1 = 200.0
-_OFFSET_F2 = 200.0
+# f1/f2 是 WSD 关联标注的比例值，范围 0.0-1.0（不是WSD单位）
+# 0.0=靠锚点，1.0=靠区域外边缘
+# 使用 0.7 确保字母偏离端点但不至于飞出画布
+_OFFSET_F1 = 0.7
+_OFFSET_F2 = 0.7
 
 # 旧默认值（保留兼容，不再用于自动标注）
-_DEFAULT_F1 = 220.0
-_DEFAULT_F2 = 220.0
+_DEFAULT_F1 = 0.7
+_DEFAULT_F2 = 0.7
 
 
 def compute_smart_label_offset(x: float, y: float,

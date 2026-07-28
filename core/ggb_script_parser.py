@@ -93,8 +93,8 @@ class GeoGebraScriptParser:
                         bold=True,
                         associated=True,
                         assoc_type=2,       # 临时值，后续智能计算
-                        assoc_f1=200.0,
-                        assoc_f2=200.0,
+                        assoc_f1=0.7,       # 比例值 0-1，后续智能计算
+                        assoc_f2=0.7,       # 比例值 0-1，后续智能计算
                         assoc_dir=0xB4,     # 临时值，后续智能计算
                     ))
 
@@ -499,8 +499,8 @@ class GeoGebraScriptParser:
                                 bold=True,
                                 associated=True,
                                 assoc_type=2,       # 临时值，后续智能计算
-                                assoc_f1=200.0,
-                                assoc_f2=200.0,
+                                assoc_f1=0.7,       # 比例值 0-1，后续智能计算
+                                assoc_f2=0.7,       # 比例值 0-1，后续智能计算
                                 assoc_dir=0xB4,     # 临时值，后续智能计算
                             ))
 
