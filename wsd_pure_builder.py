@@ -2455,15 +2455,32 @@ class MultiCanvasWSDBuilder:
             return builder.build()
 
         # 多画布构建
+        #
+        # WSD 文件结构 (与 PureWSDBuilder 一致, 仅修改页数和块尾部):
+        #   [file_header (含 pre_block_tail 前50字节)]
+        #   [block_header (14字节, 补全 pre_block_tail 后14字节)]
+        #   [records (所有画布的记录连续存放)]
+        #   [block_tail (多画布结构: 画布尺寸头 + N-1中间页条目 + 最后页条目)]
+        #   [file_size (4字节) + FFFF (4字节)]
+        #
+        # 注意: pre_block_tail 的前50字节已在 file_header 中,
+        #   后14字节由 block_header 补全, 无需额外添加 pre_block_tail
+        page_count = len(self._canvases)
         result = bytearray()
 
-        # 1. 文件头
-        result.extend(self.file_header)
+        # 1. 文件头 (修改 pre_block_tail 中的页数)
+        # pre_block_tail 在 file_header 中, offset 14 是页数字段
+        fh = bytearray(self.file_header)
+        pre_bt_pattern = bytes.fromhex('0000800301000000010001000000')
+        pre_bt_pos = fh.find(pre_bt_pattern)
+        if pre_bt_pos >= 0:
+            struct.pack_into('<I', fh, pre_bt_pos + 14, page_count)
+        result.extend(fh)
 
-        # 2. 块头部（修改记录数为所有画布记录总和）
-        total_records = sum(len(c['records']) for c in self._canvases)
+        # 2. 块头部 (14字节, 补全 pre_block_tail 后14字节)
+        # 记录数设为0 (与真实WSD文件一致)
         block_header = bytearray(self.block_header)
-        struct.pack_into('<H', block_header, 0x0a, total_records)
+        struct.pack_into('<H', block_header, 0x0a, 0)
         result.extend(block_header)
 
         # 3. 记录区 (所有画布的记录连续存放)
@@ -2471,39 +2488,32 @@ class MultiCanvasWSDBuilder:
             for rec_type, rec_data in canvas['records']:
                 result.extend(rec_data)
 
-        # 4. 页索引前置结构 (64字节, 含页数)
-        pre_bt = bytearray(_PRE_BLOCK_TAIL_TEMPLATE)
-        page_count = len(self._canvases)
-        struct.pack_into('<I', pre_bt, 14, page_count)
-        result.extend(pre_bt)
-
-        # 5. 块尾部
-        # 5a. 画布尺寸头 (21字节: 8零 + 画布宽 + 画布高 + 5零)
+        # 4. 块尾部 (多画布结构)
+        # 4a. 画布尺寸头 (21字节: 8零 + 画布宽 + 画布高 + 5零)
+        # 使用最后一个画布的尺寸（与真实WSD文件一致）
         bt_header = bytearray(21)
-        # 使用第一个画布的尺寸
-        struct.pack_into('<I', bt_header, 8, self._canvases[0]['canvas_w'])
-        struct.pack_into('<I', bt_header, 12, self._canvases[0]['canvas_h'])
+        last_canvas = self._canvases[-1]
+        struct.pack_into('<I', bt_header, 8, last_canvas['canvas_w'])
+        struct.pack_into('<I', bt_header, 12, last_canvas['canvas_h'])
         result.extend(bt_header)
 
-        # 5b. 中间页条目 (每个78字节)
+        # 4b. 中间页条目 (每个78字节)
         # 每个中间页条目对应一个画布(第1页到第N-1页)
-        # offset 13: 页号 (u16, 1-based)
+        # offset 13: 画布数据块数 (固定为1)
         # offset 65: 画布宽度 (u32, WSD单位)
         # offset 69: 画布高度 (u32, WSD单位)
         for i in range(page_count - 1):
             entry = bytearray(_MID_PAGE_ENTRY_TEMPLATE)
-            # 设置页号
-            struct.pack_into('<H', entry, 13, i + 1)
-            # 设置该页对应的画布尺寸
+            struct.pack_into('<H', entry, 13, 1)
             canvas = self._canvases[i]
             struct.pack_into('<I', entry, 65, canvas['canvas_w'])
             struct.pack_into('<I', entry, 69, canvas['canvas_h'])
             result.extend(entry)
 
-        # 5c. 最后页条目 (99字节核心 + 4字节文件大小 + 4字节FFFF)
+        # 4c. 最后页条目 (99字节核心 + 4字节文件大小 + 4字节FFFF)
         result.extend(_LAST_PAGE_ENTRY_CORE)
 
-        # 文件大小字段
+        # 文件大小字段 + FFFF 结束标记
         file_size = len(result) + 8  # +4 (大小字段) + 4 (FFFF)
         result.extend(struct.pack('<I', file_size))
         result.extend(b'\xff\xff\xff\xff')
