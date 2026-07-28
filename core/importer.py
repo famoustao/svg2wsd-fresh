@@ -528,6 +528,13 @@ def import_latex(filepath: str) -> CanvasData:
                         all_x.append(cx)
                         all_y.append(cy)
 
+        # TikZ 使用数学坐标系（Y向上），WSD 使用屏幕坐标系（Y向下）
+        # 翻转 Y 轴：对所有坐标取反 Y
+        for s in shapes:
+            s.points = [(x, -y) for (x, y) in s.points]
+        for a in annotations:
+            a.y = -a.y
+
         # 收集所有坐标计算bbox
         for s in shapes:
             if s.type == ShapeType.CIRCLE:
@@ -1277,6 +1284,32 @@ def import_ggb(filepath: str) -> CanvasData:
                 _add_conic_shapes(xml_elem, ns, shapes, color, lw)
 
     # 计算所有 points 和所有 annotations 的 bbox
+    all_x = []
+    all_y = []
+
+    for s in shapes:
+        if s.type == ShapeType.CIRCLE:
+            cx, cy = s.points[0]
+            r = s.extra.get('radius', 0)
+            all_x.extend([cx - r, cx + r])
+            all_y.extend([cy - r, cy + r])
+        else:
+            for p in s.points:
+                all_x.append(p[0])
+                all_y.append(p[1])
+
+    for a in annotations:
+        all_x.append(a.x)
+        all_y.append(a.y)
+
+    # GeoGebra XML 使用数学坐标系（Y向上），WSD 使用屏幕坐标系（Y向下）
+    # 翻转 Y 轴
+    for s in shapes:
+        s.points = [(x, -y) for (x, y) in s.points]
+    for a in annotations:
+        a.y = -a.y
+
+    # 重新收集坐标计算 bbox
     all_x = []
     all_y = []
 

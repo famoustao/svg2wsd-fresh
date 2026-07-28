@@ -79,10 +79,27 @@ class GeoGebraScriptParser:
                         associated=True,
                     ))
 
+        # GeoGebra 使用数学坐标系（Y向上），WSD 使用屏幕坐标系（Y向下）
+        # 翻转 Y 轴：对所有坐标取反 Y
+        for s in self._shapes:
+            s.points = [(x, -y) for (x, y) in s.points]
+        for a in self._annotations:
+            a.y = -a.y
+
+        # 翻转后重新计算 bbox
+        all_x = []
+        all_y = []
+        for s in self._shapes:
+            for p in s.points:
+                all_x.append(p[0])
+                all_y.append(p[1])
+        for a in self._annotations:
+            all_x.append(a.x)
+            all_y.append(a.y)
+
         bbox = (0.0, 0.0, 0.0, 0.0)
-        if self._all_x and self._all_y:
-            bbox = (min(self._all_x), min(self._all_y),
-                    max(self._all_x), max(self._all_y))
+        if all_x and all_y:
+            bbox = (min(all_x), min(all_y), max(all_x), max(all_y))
 
         return CanvasData(
             shapes=self._shapes,
