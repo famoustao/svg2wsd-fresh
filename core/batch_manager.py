@@ -557,7 +557,9 @@ class BatchManager:
                     output_path = os.path.join(output_dir, merge_name)
                     export_wsd_multi(canvas_list, output_path, canvas_size_mm,
                                      line_color_override=line_color,
-                                     line_alpha=line_alpha)
+                                     line_alpha=line_alpha,
+                                     scale_mode=scale_mode,
+                                     scale_value=scale_value)
                 elif format_lower == 'svg':
                     # SVG 合并: 将多个 CanvasData 合并为一个 SVG
                     import xml.etree.ElementTree as ET

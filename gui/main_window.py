@@ -2489,7 +2489,9 @@ class MainWindow:
 
         params = self._get_current_params()
         mode_type = 'comic' if self._current_mode == 'comic' else 'geo'
-        export_mode = self.export_mode_var.get()  # separate 或 merge
+        # 将显示文本转换为 batch_manager 需要的模式值
+        export_mode_display = self.export_mode_var.get()
+        export_mode = 'merge' if '合并' in export_mode_display else 'separate'
 
         # 同步文件列表到 batch_manager
         self._batch_manager.clear()

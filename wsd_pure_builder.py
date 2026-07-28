@@ -2286,3 +2286,226 @@ def build_wsd_pure_based(geo_paths, text_annotations, skeleton_path=None,
         builder.add_text(rec)
 
     return builder.build()
+
+
+# ========== 多画布 WSD 构建器 ==========
+
+# 中间页条目模板 (78字节)
+# 结构: 11字节固定头 + 67字节可变数据
+# offset 13: 页号 (u16, 1-based)
+# offset 65: 画布宽度 (u32, WSD单位)
+# offset 69: 画布高度 (u32, WSD单位)
+# 从真实多画布WSD文件提取，画布尺寸字段已清零待填充
+_MID_PAGE_ENTRY_TEMPLATE = bytes.fromhex(
+    '0100320010f50000000000'   # offset  0: 固定头 (11字节)
+    '02000100000008004000'     # offset 11: 类型+固定参数 (10字节)
+    '0200'                      # offset 21: 固定参数 (2字节)
+    '00002020ffff10'           # offset 23: padding+块尾标记 (7字节)
+    '00010000000000000000'     # offset 30: 固定参数+零填充 (10字节)
+    '00000000000010000000'     # offset 40: 零填充+固定参数 (10字节)
+    '00000000000000000000'     # offset 50: 零填充 (10字节)
+    '00000000000000000000'     # offset 60: 零填充 (10字节, 画布尺寸待填充 at 65,69)
+    '0000000000000000'         # offset 70: 零填充+结尾 (8字节)
+)
+
+# 最后页条目核心 (99字节, 不含文件大小和FFFF)
+# 结构: 11字节固定头 + ff ff结束标记 + 86字节全局设置
+# 从真实多画布WSD文件提取，两个文件完全一致
+_LAST_PAGE_ENTRY_CORE = bytes.fromhex(
+    '0100320010f50000000000'   # 固定头 (11字节)
+    'ffff'                      # 结束标记
+    '010000000000000100010000' # 全局设置
+    '00b80b00000000000000'
+    '900100009001000000fa0000'
+    '000000001400240009000000'
+    '34089a0b3200320096009600'
+    'c800c8002700000032003200'
+    'fffeff04b70023006e00b700'
+    '00000000'
+)
+
+# 页索引前置结构模板 (64字节)
+# 从真实多画布WSD文件提取，3页和5页文件完全一致
+# offset 14: 页数 (u32, 待填充)
+_PRE_BLOCK_TAIL_TEMPLATE = bytes.fromhex(
+    '0000800301000000010001000000'   # 前导 (14字节, offset 0-13)
+    '00000000'                    # 页数占位 (u32, offset 14-17, 待填充)
+    '02000100000008004000'       # 固定参数 (offset 18-27)
+    '0200'                        # 固定参数 (offset 28-29)
+    '00002020ffff10000100'       # padding+块尾标记 (offset 30-39)
+    '0000000000000000'           # 零填充 (offset 40-47)
+    '0000000000100000'           # 零填充+固定参数 (offset 48-55)
+    '0000000000000000'           # 零填充 (offset 56-63)
+)
+
+
+class MultiCanvasWSDBuilder:
+    """
+    多画布 WSD 构建器
+
+    支持将多个画布的数据输出到同一个 WSD 文件的不同页面中。
+    每个画布有自己的形状和标注记录，通过页索引表进行管理。
+
+    文件结构:
+        1. 文件头 (与单画布相同)
+        2. 块头部 (记录数为所有画布记录总和)
+        3. 记录区 (所有画布的记录连续存放)
+        4. 页索引前置结构 (64字节, 含页数)
+        5. 块尾部:
+           - 画布尺寸 (21字节头)
+           - N个中间页条目 (每个78字节)
+           - 1个最后页条目 (99字节 + 4字节文件大小 + 4字节FFFF)
+    """
+
+    def __init__(self, skeleton_path=None):
+        """
+        多画布 WSD 构建器
+
+        使用与单画布相同的骨架数据（文件头、块头），无需外部模板文件。
+        """
+        file_header_bytes, block_header_bytes, _ = _get_skeleton()
+
+        self.file_header = bytes(file_header_bytes)
+        self.block_header = bytes(block_header_bytes)
+
+        # 画布尺寸偏移
+        self._canvas_offset = _CANVAS_SIZE_OFFSET
+
+        # 多画布数据: 每个元素是 (records_list, canvas_w, canvas_h)
+        self._canvases = []
+
+        # 默认画布尺寸
+        self._default_canvas_w = 56000   # 140mm
+        self._default_canvas_h = 56000   # 140mm
+
+    def set_default_canvas_size(self, width, height):
+        """设置默认画布尺寸（WSD单位）"""
+        self._default_canvas_w = int(width)
+        self._default_canvas_h = int(height)
+
+    def set_default_canvas_size_mm(self, width_mm, height_mm):
+        """设置默认画布尺寸（毫米）"""
+        self.set_default_canvas_size(width_mm * MM_TO_WSD, height_mm * MM_TO_WSD)
+
+    def add_canvas(self, canvas_size_wsd=None):
+        """
+        添加一个新画布，返回画布索引
+
+        参数:
+            canvas_size_wsd: (width, height) WSD单位，None使用默认值
+
+        返回:
+            int: 画布索引 (0-based)
+        """
+        if canvas_size_wsd is None:
+            w, h = self._default_canvas_w, self._default_canvas_h
+        else:
+            w, h = canvas_size_wsd
+
+        self._canvases.append({
+            'records': [],
+            'canvas_w': int(w),
+            'canvas_h': int(h),
+        })
+        return len(self._canvases) - 1
+
+    def add_path(self, path_record, canvas_idx=None):
+        """添加一条路径记录到指定画布（默认最后一个画布）"""
+        if canvas_idx is None:
+            canvas_idx = len(self._canvases) - 1
+        if canvas_idx < 0 or canvas_idx >= len(self._canvases):
+            raise IndexError(f"画布索引 {canvas_idx} 超出范围")
+        self._canvases[canvas_idx]['records'].append(('path', path_record))
+
+    def add_circle(self, circle_record, canvas_idx=None):
+        """添加一条圆形记录到指定画布"""
+        self.add_path(circle_record, canvas_idx)
+
+    def add_text(self, text_record, canvas_idx=None):
+        """添加一条文字记录到指定画布"""
+        if canvas_idx is None:
+            canvas_idx = len(self._canvases) - 1
+        if canvas_idx < 0 or canvas_idx >= len(self._canvases):
+            raise IndexError(f"画布索引 {canvas_idx} 超出范围")
+        self._canvases[canvas_idx]['records'].append(('text', text_record))
+
+    def build(self):
+        """
+        构建完整的多画布 WSD 文件
+
+        Returns:
+            bytes: 完整的 WSD 文件数据
+        """
+        if not self._canvases:
+            # 没有画布，返回空的单画布文件
+            builder = PureWSDBuilder()
+            builder.set_canvas_size(self._default_canvas_w, self._default_canvas_h)
+            return builder.build()
+
+        if len(self._canvases) == 1:
+            # 只有一个画布，使用单画布构建器（更简单可靠）
+            canvas = self._canvases[0]
+            builder = PureWSDBuilder()
+            builder.set_canvas_size(canvas['canvas_w'], canvas['canvas_h'])
+            for rec_type, rec_data in canvas['records']:
+                if rec_type == 'path':
+                    builder.add_path(rec_data)
+                elif rec_type == 'text':
+                    builder.add_text(rec_data)
+            return builder.build()
+
+        # 多画布构建
+        result = bytearray()
+
+        # 1. 文件头
+        result.extend(self.file_header)
+
+        # 2. 块头部（修改记录数为所有画布记录总和）
+        total_records = sum(len(c['records']) for c in self._canvases)
+        block_header = bytearray(self.block_header)
+        struct.pack_into('<H', block_header, 0x0a, total_records)
+        result.extend(block_header)
+
+        # 3. 记录区 (所有画布的记录连续存放)
+        for canvas in self._canvases:
+            for rec_type, rec_data in canvas['records']:
+                result.extend(rec_data)
+
+        # 4. 页索引前置结构 (64字节, 含页数)
+        pre_bt = bytearray(_PRE_BLOCK_TAIL_TEMPLATE)
+        page_count = len(self._canvases)
+        struct.pack_into('<I', pre_bt, 14, page_count)
+        result.extend(pre_bt)
+
+        # 5. 块尾部
+        # 5a. 画布尺寸头 (21字节: 8零 + 画布宽 + 画布高 + 5零)
+        bt_header = bytearray(21)
+        # 使用第一个画布的尺寸
+        struct.pack_into('<I', bt_header, 8, self._canvases[0]['canvas_w'])
+        struct.pack_into('<I', bt_header, 12, self._canvases[0]['canvas_h'])
+        result.extend(bt_header)
+
+        # 5b. 中间页条目 (每个78字节)
+        # 每个中间页条目对应一个画布(第1页到第N-1页)
+        # offset 13: 页号 (u16, 1-based)
+        # offset 65: 画布宽度 (u32, WSD单位)
+        # offset 69: 画布高度 (u32, WSD单位)
+        for i in range(page_count - 1):
+            entry = bytearray(_MID_PAGE_ENTRY_TEMPLATE)
+            # 设置页号
+            struct.pack_into('<H', entry, 13, i + 1)
+            # 设置该页对应的画布尺寸
+            canvas = self._canvases[i]
+            struct.pack_into('<I', entry, 65, canvas['canvas_w'])
+            struct.pack_into('<I', entry, 69, canvas['canvas_h'])
+            result.extend(entry)
+
+        # 5c. 最后页条目 (99字节核心 + 4字节文件大小 + 4字节FFFF)
+        result.extend(_LAST_PAGE_ENTRY_CORE)
+
+        # 文件大小字段
+        file_size = len(result) + 8  # +4 (大小字段) + 4 (FFFF)
+        result.extend(struct.pack('<I', file_size))
+        result.extend(b'\xff\xff\xff\xff')
+
+        return bytes(result)

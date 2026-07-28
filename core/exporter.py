@@ -797,40 +797,112 @@ def export_wsd_multi(canvas_list: List[CanvasData],
                      output_path: str,
                      canvas_size_mm: Optional[Tuple[float, float]] = None,
                      line_color_override: Optional[str] = None,
-                     line_alpha: int = 255) -> None:
+                     line_alpha: int = 255,
+                     linewidth: int = 80,
+                     scale_mode: str = 'auto',
+                     scale_value: float = 80.0) -> None:
     """
-    多个画布导出到同一个 WSD 文件的不同画布
+    多个画布导出到同一个 WSD 文件的不同画布（多页）
 
-    注意：当前版本为接口预留，基于模板的多画布机制后续完善。
-    暂时只导出第一个画布作为单画布文件。
+    使用 MultiCanvasWSDBuilder 将多个 CanvasData 输出到同一个 WSD 文件，
+    每个画布对应一个页面。支持 2 个或更多画布。
 
     参数:
         canvas_list: CanvasData 列表，每个元素对应一个画布
         output_path: 输出 WSD 文件路径
-        canvas_size_mm: 画布尺寸 (宽mm, 高mm)，None=默认A4横向
+        canvas_size_mm: 画布尺寸 (宽mm, 高mm)，None=默认正方形(140x140)
+        line_color_override: 线条颜色覆盖（十六进制，如 '#ff0000'），None 则使用原始颜色
+        line_alpha: 线条透明度（0-255），默认255（不透明）
+        linewidth: 线宽（WSD单位），默认 80（0.2mm）
+        scale_mode: 缩放模式 'auto'=自动适应, 'percent'=按百分比, 'fixed'=固定长度
+        scale_value: 缩放值（percent模式为百分比0-200，fixed模式为mm长度）
 
     返回:
         None（直接写入文件）
-
-    TODO:
-        - 实现多画布 WSD 格式支持
-        - 基于模板的多画布复制机制
-        - 画布间的相对位置和大小设置
     """
+    _ensure_wsb_loaded()
+
     if not canvas_list:
         raise ValueError("canvas_list 不能为空")
 
-    # TODO: 多画布机制
-    # 当前临时方案：只导出第一个画布
-    # 后续需要实现：
-    #   1. 读取多画布模板
-    #   2. 为每个画布创建独立的数据块
-    #   3. 正确设置画布间的索引和偏移
+    # 确定画布尺寸
+    if canvas_size_mm is None:
+        canvas_size_mm = (DEFAULT_CANVAS_WIDTH_MM, DEFAULT_CANVAS_HEIGHT_MM)
 
-    # 临时：导出第一个画布
-    export_wsd_single(canvas_list[0], output_path, canvas_size_mm,
-                      line_color_override=line_color_override,
-                      line_alpha=line_alpha)
+    # 解析覆盖颜色
+    override_bgr = None
+    if line_color_override:
+        h = line_color_override.lstrip('#')
+        if len(h) == 6:
+            r = int(h[0:2], 16)
+            g = int(h[2:4], 16)
+            b = int(h[4:6], 16)
+            override_bgr = (b, g, r)
+
+    # 导入多画布构建器
+    from wsd_pure_builder import MultiCanvasWSDBuilder
+
+    builder = MultiCanvasWSDBuilder()
+
+    # 设置默认画布尺寸
+    w_wsd, h_wsd = _get_canvas_size_wsd(canvas_size_mm)
+    builder.set_default_canvas_size(int(w_wsd), int(h_wsd))
+
+    # 为每个画布添加记录
+    for canvas_data in canvas_list:
+        # 计算坐标变换
+        if scale_mode == 'auto':
+            scale, offset_x, offset_y = _fit_canvas_to_wsd(canvas_data, canvas_size_mm)
+        elif scale_mode == 'percent':
+            auto_scale, auto_ox, auto_oy = _fit_canvas_to_wsd(canvas_data, canvas_size_mm)
+            pct = max(0.1, float(scale_value)) / 100.0
+            scale = auto_scale * pct
+            offset_x = auto_ox
+            offset_y = auto_oy
+        elif scale_mode == 'fixed':
+            scale, offset_x, offset_y = _fit_canvas_to_fixed_length(
+                canvas_data, canvas_size_mm, float(scale_value))
+        else:
+            scale, offset_x, offset_y = _fit_canvas_to_wsd(canvas_data, canvas_size_mm)
+
+        # 添加画布
+        canvas_idx = builder.add_canvas()
+
+        # 构建路径记录
+        for shape in canvas_data.shapes:
+            transformed = _transform_shape(shape, scale, offset_x, offset_y)
+            if override_bgr is not None:
+                transformed.line_color = override_bgr
+
+            if transformed.type == ShapeType.CIRCLE and transformed.points:
+                cx, cy = int(transformed.points[0][0]), int(transformed.points[0][1])
+                radius = int(transformed.extra.get('radius', 50))
+                circle_color_bgra = _bgr_to_bgra_bytes(transformed.line_color, alpha=line_alpha)
+                rec = build_circle_record(cx, cy, radius, linewidth=linewidth,
+                                          line_color_bgra=circle_color_bgra)
+                builder.add_circle(rec, canvas_idx)
+            else:
+                rec = _shape_to_path_record(transformed, linewidth=linewidth, line_alpha=line_alpha)
+                if rec is not None:
+                    builder.add_path(rec, canvas_idx)
+
+        # 构建文字记录
+        for annotation in canvas_data.annotations:
+            transformed = _transform_annotation(annotation, scale, offset_x, offset_y)
+            rec = _annotation_to_text_record(transformed)
+            if rec is not None:
+                builder.add_text(rec, canvas_idx)
+
+    # 构建 WSD 文件
+    wsd_data = builder.build()
+
+    # 确保输出目录存在
+    out_dir = os.path.dirname(output_path)
+    if out_dir and not os.path.exists(out_dir):
+        os.makedirs(out_dir, exist_ok=True)
+
+    with open(output_path, 'wb') as f:
+        f.write(wsd_data)
 
 
 # ============================================================
