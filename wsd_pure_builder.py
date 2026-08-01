@@ -1151,11 +1151,16 @@ _SKELETON_BLOCK_TAIL_B64 = (
 )
 
 def _get_skeleton():
-    """解码内置骨架数据（延迟加载，节省内存）"""
+    """解码内置骨架数据（延迟加载，节省内存）
+
+    注意: block_tail原始base64解码为124字节，但最后4字节是模板文件的
+    file_size字段（被误包含在block_tail中）。实际block_tail应为120字节，
+    file_size由PureWSDBuilder.build()单独追加。此处截断为120字节。
+    """
     import base64
     file_header = base64.b64decode(_SKELETON_FILE_HEADER_B64)
     block_header = base64.b64decode(_SKELETON_BLOCK_HEADER_B64)
-    block_tail = base64.b64decode(_SKELETON_BLOCK_TAIL_B64)
+    block_tail = base64.b64decode(_SKELETON_BLOCK_TAIL_B64)[:120]
     return file_header, block_header, block_tail
 
 # 画布尺寸在 block_tail 中的偏移
