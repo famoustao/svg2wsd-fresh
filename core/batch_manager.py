@@ -492,7 +492,8 @@ class BatchManager:
                    line_color: Optional[str] = None,
                    line_alpha: int = 255,
                    scale_mode: str = 'auto',
-                   scale_value: float = 80.0) -> Dict[str, int]:
+                   scale_value: float = 80.0,
+                   font_style: str = 'italic') -> Dict[str, int]:
         """
         批量导出所有已处理完成的文件
 
@@ -559,7 +560,8 @@ class BatchManager:
                                      line_color_override=line_color,
                                      line_alpha=line_alpha,
                                      scale_mode=scale_mode,
-                                     scale_value=scale_value)
+                                     scale_value=scale_value,
+                                     font_style=font_style)
                 elif format_lower == 'svg':
                     # SVG 合并: 将多个 CanvasData 合并为一个 SVG
                     import xml.etree.ElementTree as ET
@@ -627,6 +629,7 @@ class BatchManager:
                             line_alpha=line_alpha,
                             scale_mode=scale_mode,
                             scale_value=scale_value,
+                            font_style=font_style,
                         )
                     elif format_lower == 'svg':
                         output_filename = base_name + '.svg'

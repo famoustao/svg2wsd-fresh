@@ -172,6 +172,7 @@ def _annotation_to_dict(annotation: TextAnnotation) -> Optional[dict]:
         'assoc_f1': annotation.assoc_f1,
         'assoc_f2': annotation.assoc_f2,
         'assoc_b1d': annotation.assoc_dir,
+        'font_style': annotation.font_style,
     }
 
 
@@ -180,10 +181,17 @@ def _annotation_to_dict(annotation: TextAnnotation) -> Optional[dict]:
 # ============================================================
 
 def _bgr_to_bgra_bytes(bgr, alpha=255):
-    """BGR 元组 -> BGRA 4字节"""
+    """BGR 元组 -> BGRA 4字节
+
+    WSD格式中黑色编码为 01ff0000 (非标准BGRA),
+    其他颜色使用标准BGRA编码。
+    """
     if bgr is None:
         return None
     b, g, r = bgr[0], bgr[1], bgr[2]
+    # WSD原生黑色使用特殊编码 01ff0000
+    if b == 0 and g == 0 and r == 0:
+        return bytes([0x01, 0xff, 0x00, 0x00])
     return bytes([int(b) & 0xff, int(g) & 0xff, int(r) & 0xff, alpha & 0xff])
 
 
@@ -454,6 +462,68 @@ def _annotation_to_text_record(annotation: TextAnnotation) -> Optional[bytes]:
         assoc_f1=annotation.assoc_f1,
         assoc_f2=annotation.assoc_f2,
         assoc_b1d=annotation.assoc_dir,
+        font_style=annotation.font_style,
+    )
+
+
+def apply_smart_offset(canvas_data: CanvasData) -> CanvasData:
+    """
+    对画布中所有关联标注应用智能偏移
+
+    根据每个标注锚点附近的形状几何方向，自动计算9宫格区域和f1/f2偏移参数，
+    使标注字母偏离线条，避免重叠。
+
+    仅处理 associated=True 且锚点在形状顶点附近的标注。
+    已有自定义偏移（f1/f2非默认值）的标注不会被覆盖。
+
+    参数:
+        canvas_data: 原始画布数据
+
+    返回:
+        新的 CanvasData（annotations 更新了偏移参数）
+    """
+    from core.vertex_labeler import _compute_label_region, _compute_near_threshold
+
+    if not canvas_data.shapes or not canvas_data.annotations:
+        return canvas_data
+
+    # 计算自适应阈值
+    near_threshold = _compute_near_threshold(canvas_data)
+
+    new_annotations = []
+    for ann in canvas_data.annotations:
+        new_ann = ann.copy()
+
+        if not ann.associated:
+            new_annotations.append(new_ann)
+            continue
+
+        # 检查是否已有自定义偏移（非默认值则跳过）
+        is_default_offset = (
+            abs(ann.assoc_f1 - 0.5) < 0.01 and abs(ann.assoc_f2 - 0.06081081) < 0.01
+        )
+        if not is_default_offset:
+            new_annotations.append(new_ann)
+            continue
+
+        # 计算智能偏移区域和参数
+        region, assoc_dir, f1, f2 = _compute_label_region(
+            ann.x, ann.y, canvas_data.shapes, near_threshold
+        )
+
+        new_ann.assoc_type = region
+        new_ann.assoc_dir = assoc_dir
+        new_ann.assoc_f1 = f1
+        new_ann.assoc_f2 = f2
+        new_annotations.append(new_ann)
+
+    return CanvasData(
+        shapes=list(canvas_data.shapes),
+        annotations=new_annotations,
+        bbox=canvas_data.bbox,
+        source_file=canvas_data.source_file,
+        image_data=canvas_data.image_data,
+        extra_info=dict(canvas_data.extra_info) if hasattr(canvas_data, 'extra_info') else {},
     )
 
 
@@ -679,7 +749,8 @@ def export_wsd_single(canvas_data: CanvasData,
                       line_color_override: Optional[str] = None,
                       line_alpha: int = 255,
                       scale_mode: str = 'auto',
-                      scale_value: float = 80.0) -> None:
+                      scale_value: float = 80.0,
+                      font_style: str = 'italic') -> None:
     """
     单画布导出为单个 WSD 文件
 
@@ -712,6 +783,13 @@ def export_wsd_single(canvas_data: CanvasData,
         None（直接写入文件）
     """
     _ensure_wsb_loaded()
+
+    # 应用智能偏移（自动计算标注的9宫格区域和f1/f2，避免与线条重叠）
+    canvas_data = apply_smart_offset(canvas_data)
+
+    # 应用字体样式到所有标注
+    for ann in canvas_data.annotations:
+        ann.font_style = font_style
 
     # 确定画布尺寸
     if canvas_size_mm is None:
@@ -800,7 +878,8 @@ def export_wsd_multi(canvas_list: List[CanvasData],
                      line_alpha: int = 255,
                      linewidth: int = 80,
                      scale_mode: str = 'auto',
-                     scale_value: float = 80.0) -> None:
+                     scale_value: float = 80.0,
+                     font_style: str = 'italic') -> None:
     """
     多个画布导出到同一个 WSD 文件的不同画布（多页）
 
@@ -839,17 +918,27 @@ def export_wsd_multi(canvas_list: List[CanvasData],
             b = int(h[4:6], 16)
             override_bgr = (b, g, r)
 
-    # 导入多画布构建器
-    from wsd_pure_builder import MultiCanvasWSDBuilder
+    # 导入多画布构建器（使用模板替换法，确保文件结构正确可打开）
+    from multi_canvas_builder import MultiCanvasWSDBuilder
 
     builder = MultiCanvasWSDBuilder()
 
-    # 设置默认画布尺寸
+    # 计算画布尺寸（WSD单位）
     w_wsd, h_wsd = _get_canvas_size_wsd(canvas_size_mm)
-    builder.set_default_canvas_size(int(w_wsd), int(h_wsd))
+    canvas_width = int(w_wsd)
+    canvas_height = int(h_wsd)
 
-    # 为每个画布添加记录
+    # 为每个画布构建记录列表
+    canvas_records = []
+
     for canvas_data in canvas_list:
+        # 应用智能偏移（自动计算标注的9宫格区域和f1/f2，避免与线条重叠）
+        canvas_data = apply_smart_offset(canvas_data)
+
+        # 应用字体样式到所有标注
+        for ann in canvas_data.annotations:
+            ann.font_style = font_style
+
         # 计算坐标变换
         if scale_mode == 'auto':
             scale, offset_x, offset_y = _fit_canvas_to_wsd(canvas_data, canvas_size_mm)
@@ -865,8 +954,7 @@ def export_wsd_multi(canvas_list: List[CanvasData],
         else:
             scale, offset_x, offset_y = _fit_canvas_to_wsd(canvas_data, canvas_size_mm)
 
-        # 添加画布
-        canvas_idx = builder.add_canvas()
+        records = []
 
         # 构建路径记录
         for shape in canvas_data.shapes:
@@ -880,21 +968,23 @@ def export_wsd_multi(canvas_list: List[CanvasData],
                 circle_color_bgra = _bgr_to_bgra_bytes(transformed.line_color, alpha=line_alpha)
                 rec = build_circle_record(cx, cy, radius, linewidth=linewidth,
                                           line_color_bgra=circle_color_bgra)
-                builder.add_circle(rec, canvas_idx)
+                records.append(rec)
             else:
                 rec = _shape_to_path_record(transformed, linewidth=linewidth, line_alpha=line_alpha)
                 if rec is not None:
-                    builder.add_path(rec, canvas_idx)
+                    records.append(rec)
 
         # 构建文字记录
         for annotation in canvas_data.annotations:
             transformed = _transform_annotation(annotation, scale, offset_x, offset_y)
             rec = _annotation_to_text_record(transformed)
             if rec is not None:
-                builder.add_text(rec, canvas_idx)
+                records.append(rec)
 
-    # 构建 WSD 文件
-    wsd_data = builder.build()
+        canvas_records.append(records)
+
+    # 构建 WSD 文件（使用模板替换法，确保画布尺寸统一）
+    wsd_data = builder.build(canvas_records, canvas_width, canvas_height)
 
     # 确保输出目录存在
     out_dir = os.path.dirname(output_path)

@@ -1167,6 +1167,29 @@ class MainWindow:
             self._on_canvas_size_changed,
         )
 
+        # 字体样式（与线宽同行）
+        tk.Label(
+            row1_frame,
+            text='字体:',
+            bg=get_color('card'),
+            fg=get_color('text'),
+            font=('Microsoft YaHei UI', 9),
+        ).pack(side='left', padx=(12, 0))
+
+        self.font_style_var = tk.StringVar(value='斜体')
+        self.font_style_combo = ttk.Combobox(
+            row1_frame,
+            textvariable=self.font_style_var,
+            values=['斜体', '正体'],
+            state='readonly',
+            width=6,
+        )
+        self.font_style_combo.pack(side='left', padx=4)
+        self.font_style_combo.bind(
+            '<<ComboboxSelected>>',
+            lambda e: self._on_param_changed(),
+        )
+
         # 线条颜色（第二行）
         line_color_frame = tk.Frame(content, bg=get_color('card'))
         line_color_frame.pack(fill='x', pady=2)
@@ -2588,6 +2611,10 @@ class MainWindow:
             except (ValueError, TypeError):
                 scale_value = 80.0
 
+            # 字体样式：中文显示值转换为英文代码
+            font_style_display = params.get('font_style', '斜体')
+            font_style = 'upright' if '正' in font_style_display else 'italic'
+
             export_result = batch_mgr.export_all(
                 output_dir=output_dir,
                 format=export_format,
@@ -2598,6 +2625,7 @@ class MainWindow:
                 line_alpha=line_alpha,
                 scale_mode=scale_mode,
                 scale_value=scale_value,
+                font_style=font_style,
             )
 
             if progress_callback:
@@ -2792,6 +2820,7 @@ class MainWindow:
             'line_color_none': self.line_color_none_var.get(),
             'line_color_original': self.line_color_original_var.get(),
             'canvas_size': self.canvas_size_var.get(),
+            'font_style': self.font_style_var.get(),
             'export_mode': self.export_mode_var.get(),
             'scale_mode': self.scale_mode_var.get(),
             'scale_value': self.scale_value_var.get(),
@@ -2869,6 +2898,7 @@ class MainWindow:
             'line_color_none': self.line_color_none_var.get(),
             'line_color_original': self.line_color_original_var.get(),
             'canvas_size': self.canvas_size_var.get(),
+            'font_style': self.font_style_var.get(),
             'export_mode': self.export_mode_var.get(),
             'export_format': self.export_format_var.get(),
             'scale_mode': self.scale_mode_var.get(),
@@ -2956,6 +2986,7 @@ class MainWindow:
         _safe_set(self.line_color_none_var, 'line_color_none', 'bool')
         _safe_set(self.line_color_original_var, 'line_color_original', 'bool')
         _safe_set(self.canvas_size_var, 'canvas_size')
+        _safe_set(self.font_style_var, 'font_style')
         _safe_set(self.export_mode_var, 'export_mode')
         _safe_set(self.export_format_var, 'export_format')
         _safe_set(self.scale_mode_var, 'scale_mode')

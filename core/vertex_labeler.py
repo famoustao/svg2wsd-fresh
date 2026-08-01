@@ -393,15 +393,44 @@ _REGION_TO_DIR = {
 }
 
 # f1/f2 偏移参数（用于字母偏移锚点，避免与线重合）
-# f1/f2 是 WSD 关联标注的比例值，范围 0.0-1.0（不是WSD单位）
-# 0.0=靠锚点，1.0=靠区域外边缘
-# 使用 0.7 确保字母偏离端点但不至于飞出画布
-_OFFSET_F1 = 0.7
-_OFFSET_F2 = 0.7
+#
+# 原生WSD文件分析结果（triangle_abc_native.wsd）:
+#   - f1 控制水平方向偏移距离，f2 控制垂直方向偏移距离
+#   - 主偏移方向使用大值(600)将文字推离锚点，副方向用小值(0.3~0.5)居中
+#   - TOP区域: f1≈0.5(水平居中), f2=600(向上推远)
+#   - LEFT区域: f1=600(向左推远), f2≈0.33(垂直微调)
+#   - RIGHT区域: f1=600(向右推远), f2≈0.45(垂直微调)
+#   - 角区域: f1=600, f2=600(对角推远)
+#
+# 每个区域的 f1/f2 参数表
+_REGION_OFFSET_PARAMS = {
+    REGION_TOP_LEFT:    (600.0, 600.0),   # 左上角：双向推远
+    REGION_TOP:         (0.5,   600.0),   # 上方：水平居中，垂直推远
+    REGION_TOP_RIGHT:   (600.0, 600.0),   # 右上角：双向推远
+    REGION_LEFT:        (600.0, 0.4),     # 左方：水平推远，垂直微调
+    REGION_CENTER:      (0.5,   0.06081081),  # 中心：居中(原生值)
+    REGION_RIGHT:       (600.0, 0.4),     # 右方：水平推远，垂直微调
+    REGION_BOTTOM_LEFT: (600.0, 600.0),   # 左下角：双向推远
+    REGION_BOTTOM:      (0.5,   600.0),   # 下方：水平居中，垂直推远
+    REGION_BOTTOM_RIGHT:(600.0, 600.0),   # 右下角：双向推远
+}
 
 # 旧默认值（保留兼容，不再用于自动标注）
 _DEFAULT_F1 = 0.7
 _DEFAULT_F2 = 0.7
+
+
+def _get_region_offset_params(region: int) -> Tuple[float, float]:
+    """
+    根据9宫格区域返回对应的 f1/f2 偏移参数
+
+    参数:
+        region: 9宫格区域编码 (REGION_*)
+
+    返回:
+        (f1, f2): 水平和垂直偏移参数
+    """
+    return _REGION_OFFSET_PARAMS.get(region, (600.0, 600.0))
 
 
 def compute_smart_label_offset(x: float, y: float,
@@ -463,7 +492,8 @@ def compute_smart_label_offset(x: float, y: float,
             avg_y = sum(d[1] for d in direction_vectors) / len(direction_vectors)
             region, direction = _direction_vector_to_region(avg_x, avg_y)
             assoc_b1d = ((direction & 0x0f) << 4) | 0x04
-            return region, assoc_b1d, _OFFSET_F1, _OFFSET_F2
+            f1, f2 = _get_region_offset_params(region)
+            return region, assoc_b1d, f1, f2
 
     # 回退策略：根据点在 bbox 中的位置选择方向
     if bbox and len(bbox) == 4:
@@ -506,7 +536,8 @@ def compute_smart_label_offset(x: float, y: float,
         region, direction = REGION_TOP_RIGHT, DIR_TOP_RIGHT
 
     assoc_b1d = ((direction & 0x0f) << 4) | 0x04
-    return region, assoc_b1d, _OFFSET_F1, _OFFSET_F2
+    f1, f2 = _get_region_offset_params(region)
+    return region, assoc_b1d, f1, f2
 
 
 def _direction_vector_to_region(dx: float, dy: float) -> Tuple[int, int]:
@@ -622,7 +653,8 @@ def _compute_label_region(vx: float, vy: float,
     region, direction = _direction_vector_to_region(avg_x, avg_y)
     assoc_b1d = ((direction & 0x0f) << 4) | 0x04
 
-    return region, assoc_b1d, _OFFSET_F1, _OFFSET_F2
+    f1, f2 = _get_region_offset_params(region)
+    return region, assoc_b1d, f1, f2
 
 
 def _compute_label_offset(vx: float, vy: float,

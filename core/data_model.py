@@ -79,6 +79,7 @@ class TextAnnotation:
         font_size: 字号
         bold: 是否粗体
         italic: 是否斜体
+        font_style: 字体样式 ('italic'=斜体, 'upright'=正体), 默认'italic'
         superscript: 是否上标
         subscript: 是否下标
         associated: 是否有关联对象（如关联到某个形状）
@@ -93,12 +94,13 @@ class TextAnnotation:
     font_size: float = 12.0
     bold: bool = False
     italic: bool = False
+    font_style: str = 'italic'  # 'italic'=FS Math Type斜体, 'upright'=正体
     superscript: bool = False
     subscript: bool = False
-    associated: bool = False
+    associated: bool = True
     assoc_type: int = 4
-    assoc_f1: float = 0.5
-    assoc_f2: float = 0.5
+    assoc_f1: float = 0.5       # 水平比例 (0.0~1.0), 0.5=居中
+    assoc_f2: float = 0.06081081  # 垂直比例, 0.06081=居中(原生精确值, 不可用0.0608否则float32精度不同)
     assoc_dir: int = 0x54
 
     def copy(self) -> 'TextAnnotation':
@@ -110,6 +112,7 @@ class TextAnnotation:
             font_size=self.font_size,
             bold=self.bold,
             italic=self.italic,
+            font_style=self.font_style,
             superscript=self.superscript,
             subscript=self.subscript,
             associated=self.associated,

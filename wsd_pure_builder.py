@@ -1240,7 +1240,7 @@ CIRCLE_PROTO = bytes.fromhex(
 # 普通文字原型：52字节，单字符'A'
 TEXT_NORMAL_PROTO = bytes.fromhex(
     '093107100004ffff0d600001004c4500'  # +0x00 ~ +0x0f
-    '00692500004a00900101000084540000'  # +0x10 ~ +0x1f
+    '00692500004a00900101000084540000'  # +0x10 ~ +0x1f: +0x14=00(位置参数,不可改) +0x15=4a(FS Math Type斜体,原生值)
     '003fc214793d410001ff000000000000'  # +0x20 ~ +0x2f
     '50000000'                           # 分隔标志
 )
@@ -1249,7 +1249,7 @@ TEXT_NORMAL_PROTO = bytes.fromhex(
 # 下标文字原型：54字节，'C1'
 TEXT_SUBSCRIPT_PROTO = bytes.fromhex(
     '093107100004ffff0d600001001c9800'  # +0x00 ~ +0x0f
-    '00895a00004a00900101000185740000'  # +0x10 ~ +0x1f
+    '00895a00004a00900101000185740000'  # +0x10 ~ +0x1f: +0x14=00(位置参数,不可改) +0x15=4a(FS Math Type斜体,原生值)
     '1644cdcc0c3f4300310001ff00000000'  # +0x20 ~ +0x2f
     '000050000000'                       # 分隔标志
 )
@@ -1259,7 +1259,7 @@ TEXT_SUBSCRIPT_PROTO = bytes.fromhex(
 # 从画布+字母A+上标1.wsd提取
 TEXT_SUPERSCRIPT_PROTO = bytes.fromhex(
     '093107100004ffff0d600001000c5800'  # +0x00 ~ +0x0f
-    '00d92300004a00900101010084040000'  # +0x10 ~ +0x1f
+    '00d92300004a00900101010084040000'  # +0x10 ~ +0x1f: +0x14=00(位置参数,不可改) +0x15=4a(FS Math Type斜体,原生值)
     '0000000000004100310001ff00000000'  # +0x20 ~ +0x2f
     '000050000000'                       # 分隔标志
 )
@@ -1606,7 +1606,8 @@ def build_bezier_chain(segments,
         bytes: 完整的贝塞尔曲线路径记录
     """
     if line_color_bgra is None:
-        line_color_bgra = bytes([0x00, 0x00, 0x00, 0xff])
+        # 原生黑色: 01 ff 00 00 (非标准BGRA, WSD格式特有)
+        line_color_bgra = bytes([0x01, 0xff, 0x00, 0x00])
     if linewidth is None:
         linewidth = DEFAULT_LINEWIDTH
 
@@ -1789,7 +1790,7 @@ def build_arrow_record(x1, y1, x2, y2,
 def build_text_record(text, x, y, mode=TEXT_NORMAL,
                       associated=True, assoc_type=4,
                       assoc_f1=0.5, assoc_f2=0.5,
-                      assoc_b1d=0x54):
+                      assoc_b1d=0x54, font_style='italic'):
     """
     构建文字标注记录
 
@@ -1804,6 +1805,7 @@ def build_text_record(text, x, y, mode=TEXT_NORMAL,
         assoc_type: 关联类型 (0-7)
         assoc_f1, assoc_f2: 关联锚点比例
         assoc_b1d: 关联子类型
+        font_style: 字体样式 ('italic'=斜体0x4a, 'upright'=正体0x4b)
 
     Returns:
         bytes: 完整的文字记录
@@ -1817,6 +1819,14 @@ def build_text_record(text, x, y, mode=TEXT_NORMAL,
         proto = TEXT_NORMAL_PROTO
 
     rec = bytearray(proto)
+
+    # 设置字体样式 (+0x15)
+    # 0x4a = FS Math Type 斜体 (原生默认, 画布+字母B.wsd)
+    # 0x4b = FS Math Type 正体 (原生值, 画布+字母A.wsd)
+    if font_style == 'upright':
+        rec[0x15] = 0x4b
+    else:
+        rec[0x15] = 0x4a
 
     # 修改坐标（u16 @ +0x0d, +0x11）
     struct.pack_into('<H', rec, 0x0d, int(x) & 0xffff)
@@ -1874,7 +1884,8 @@ def build_label_record(text, anchor_x, anchor_y,
                        region=REGION_TOP_LEFT,
                        f1=None, f2=None,
                        direction=None,
-                       mode=TEXT_NORMAL):
+                       mode=TEXT_NORMAL,
+                       font_style='italic'):
     """
     构建关联标注文字记录（便捷函数）
 
@@ -1888,6 +1899,7 @@ def build_label_record(text, anchor_x, anchor_y,
         f2: 区域内垂直参数 (0~400)，None=自动（靠外）
         direction: 方向编码（DIR_*），None=根据region自动选择
         mode: 文字模式 'normal' | 'subscript' | 'superscript'
+        font_style: 字体样式 ('italic'=斜体, 'upright'=正体)
 
     Returns:
         bytes: 完整的文字标注记录
@@ -1921,6 +1933,7 @@ def build_label_record(text, anchor_x, anchor_y,
         assoc_f1=float(f1),
         assoc_f2=float(f2),
         assoc_b1d=assoc_b1d,
+        font_style=font_style,
     )
 
 
@@ -2274,6 +2287,7 @@ def build_wsd_pure_based(geo_paths, text_annotations, skeleton_path=None,
         assoc_f1 = ann.get('assoc_f1', 0.5)
         assoc_f2 = ann.get('assoc_f2', 0.5)
         assoc_b1d = ann.get('assoc_b1d', 0x54)
+        font_style = ann.get('font_style', 'italic')
 
         rec = build_text_record(
             text, x, y, mode=mode,
@@ -2282,6 +2296,7 @@ def build_wsd_pure_based(geo_paths, text_annotations, skeleton_path=None,
             assoc_f1=assoc_f1,
             assoc_f2=assoc_f2,
             assoc_b1d=assoc_b1d,
+            font_style=font_style,
         )
         builder.add_text(rec)
 
@@ -2291,90 +2306,116 @@ def build_wsd_pure_based(geo_paths, text_annotations, skeleton_path=None,
 # ========== 多画布 WSD 构建器 ==========
 
 # 中间页条目模板 (78字节)
-# 结构: 11字节固定头 + 67字节可变数据
-# offset 13: 页号 (u16, 1-based)
-# offset 65: 画布宽度 (u32, WSD单位)
-# offset 69: 画布高度 (u32, WSD单位)
-# 从真实多画布WSD文件提取，画布尺寸字段已清零待填充
+# 从WSTUDIO原生多画布WSD文件提取
+# offset 63: 画布宽度 (u32, WSD单位)
+# offset 67: 画布高度 (u32, WSD单位)
 _MID_PAGE_ENTRY_TEMPLATE = bytes.fromhex(
-    '0100320010f50000000000'   # offset  0: 固定头 (11字节)
-    '02000100000008004000'     # offset 11: 类型+固定参数 (10字节)
-    '0200'                      # offset 21: 固定参数 (2字节)
-    '00002020ffff10'           # offset 23: padding+块尾标记 (7字节)
-    '00010000000000000000'     # offset 30: 固定参数+零填充 (10字节)
-    '00000000000010000000'     # offset 40: 零填充+固定参数 (10字节)
-    '00000000000000000000'     # offset 50: 零填充 (10字节)
-    '00000000000000000000'     # offset 60: 零填充 (10字节, 画布尺寸待填充 at 65,69)
-    '0000000000000000'         # offset 70: 零填充+结尾 (8字节)
+    '320010f5000000000002000100000008004000020000002020ffff10000100'
+    '00000000000000000000000000100000000000000000000000000000000000'
+    '00c0da0000c0da000000000000000100'
 )
 
-# 最后页条目核心 (99字节, 不含文件大小和FFFF)
-# 结构: 11字节固定头 + ff ff结束标记 + 86字节全局设置
-# 从真实多画布WSD文件提取，两个文件完全一致
+# 最后页条目核心 (97字节, 不含文件大小和FFFF)
+# 从WSTUDIO原生多画布WSD文件提取
 _LAST_PAGE_ENTRY_CORE = bytes.fromhex(
-    '0100320010f50000000000'   # 固定头 (11字节)
-    'ffff'                      # 结束标记
-    '010000000000000100010000' # 全局设置
-    '00b80b00000000000000'
-    '900100009001000000fa0000'
-    '000000001400240009000000'
-    '34089a0b3200320096009600'
-    'c800c8002700000032003200'
-    'fffeff04b70023006e00b700'
+    '320010f50000000000ffff01000000000000010001000000b80b0000000000'
+    '0000900100009001000000fa000000000000140024000900000034089a0b32'
+    '00320096009600c800c8002700000032003200fffeff04b70023006e00b700'
     '00000000'
 )
 
-# 页索引前置结构模板 (64字节)
-# 从真实多画布WSD文件提取，3页和5页文件完全一致
-# offset 14: 页数 (u32, 待填充)
-_PRE_BLOCK_TAIL_TEMPLATE = bytes.fromhex(
-    '0000800301000000010001000000'   # 前导 (14字节, offset 0-13)
-    '00000000'                    # 页数占位 (u32, offset 14-17, 待填充)
-    '02000100000008004000'       # 固定参数 (offset 18-27)
-    '0200'                        # 固定参数 (offset 28-29)
-    '00002020ffff10000100'       # padding+块尾标记 (offset 30-39)
-    '0000000000000000'           # 零填充 (offset 40-47)
-    '0000000000100000'           # 零填充+固定参数 (offset 48-55)
-    '0000000000000000'           # 零填充 (offset 56-63)
-)
+
+def _load_multi_canvas_template(page_count):
+    """
+    加载WSTUDIO原生多画布WSD模板文件
+
+    参数:
+        page_count: 画布数量
+
+    返回:
+        (file_header_bytes, block_header_bytes, mid_entry_template, last_entry_template)
+        - file_header_bytes: 文件头 (含pre_block_tail, 59984字节)
+        - block_header_bytes: 块头部 (14字节, record_count=0)
+        - mid_entry_template: 中间页条目模板 (78字节)
+        - last_entry_template: 最后页条目模板 (97字节)
+    """
+    # 模板文件路径
+    template_dir = os.path.join(os.path.dirname(__file__), 'templates')
+
+    # 选择最合适的模板 (优先选择画布数匹配的, 否则选最大的)
+    candidates = []
+    if page_count == 2:
+        candidates.append(os.path.join(template_dir, 'multi_2canvas.wsd'))
+    if page_count == 3:
+        candidates.append(os.path.join(template_dir, 'multi_3canvas.wsd'))
+    # 回退: 使用任意可用的模板
+    candidates.append(os.path.join(template_dir, 'multi_3canvas.wsd'))
+    candidates.append(os.path.join(template_dir, 'multi_2canvas.wsd'))
+
+    template_path = None
+    for c in candidates:
+        if os.path.exists(c):
+            template_path = c
+            break
+
+    if template_path is None:
+        raise FileNotFoundError(f"找不到多画布模板文件, 搜索路径: {template_dir}")
+
+    with open(template_path, 'rb') as f:
+        template = f.read()
+
+    # 文件头: 0 到 0xEA50 (59984字节)
+    file_header = template[:0xEA50]
+
+    # 块头部: 0xEA50 到 0xEA5E (14字节)
+    block_header = template[0xEA50:0xEA5E]
+
+    # 查找page entry标记, 提取mid和last entry模板
+    pe_marker = bytes.fromhex('320010f5')
+    pe_positions = []
+    pos = 0xEA5E
+    while True:
+        idx = template.find(pe_marker, pos)
+        if idx < 0:
+            break
+        pe_positions.append(idx)
+        pos = idx + 1
+
+    if len(pe_positions) < 2:
+        raise ValueError(f"模板文件 {template_path} 中page entry不足")
+
+    file_size_pos = len(template) - 8
+
+    # mid entry: 第一个page entry (78字节)
+    mid_entry_template = template[pe_positions[0]:pe_positions[1]]
+
+    # last entry: 最后一个page entry到file_size_pos
+    last_entry_template = template[pe_positions[-1]:file_size_pos]
+
+    return file_header, block_header, mid_entry_template, last_entry_template
 
 
 class MultiCanvasWSDBuilder:
     """
-    多画布 WSD 构建器
+    多画布 WSD 构建器 (模板替换法)
 
-    支持将多个画布的数据输出到同一个 WSD 文件的不同页面中。
-    每个画布有自己的形状和标注记录，通过页索引表进行管理。
+    使用WSTUDIO原生多画布WSD文件作为模板, 只替换记录数据,
+    保持所有结构字节与原生文件完全一致。
 
     文件结构:
-        1. 文件头 (与单画布相同)
-        2. 块头部 (记录数为所有画布记录总和)
-        3. 记录区 (所有画布的记录连续存放)
-        4. 页索引前置结构 (64字节, 含页数)
+        1. 文件头 (59984字节, 含 pre_block_tail 和页数)
+        2. 块头部 (14字节, record_count=0, 与原生一致)
+        3. 记录区 (所有画布的记录连续存放, 无画布间分隔符)
+        4. 记录区终止符 (23字节, 含最后画布尺寸)
         5. 块尾部:
-           - 画布尺寸 (21字节头)
-           - N个中间页条目 (每个78字节)
-           - 1个最后页条目 (99字节 + 4字节文件大小 + 4字节FFFF)
+           - N-1个中间页条目 (每个78字节, offset 63/67存画布尺寸)
+           - 1个最后页条目 (97字节, 直接使用模板不修改)
+        6. 文件大小 (4字节) + FFFF (4字节)
     """
 
     def __init__(self, skeleton_path=None):
-        """
-        多画布 WSD 构建器
-
-        使用与单画布相同的骨架数据（文件头、块头），无需外部模板文件。
-        """
-        file_header_bytes, block_header_bytes, _ = _get_skeleton()
-
-        self.file_header = bytes(file_header_bytes)
-        self.block_header = bytes(block_header_bytes)
-
-        # 画布尺寸偏移
-        self._canvas_offset = _CANVAS_SIZE_OFFSET
-
-        # 多画布数据: 每个元素是 (records_list, canvas_w, canvas_h)
+        """多画布 WSD 构建器"""
         self._canvases = []
-
-        # 默认画布尺寸
         self._default_canvas_w = 56000   # 140mm
         self._default_canvas_h = 56000   # 140mm
 
@@ -2433,17 +2474,17 @@ class MultiCanvasWSDBuilder:
         """
         构建完整的多画布 WSD 文件
 
+        使用WSTUDIO原生模板文件, 只替换记录数据, 保持结构字节完全一致。
+
         Returns:
             bytes: 完整的 WSD 文件数据
         """
         if not self._canvases:
-            # 没有画布，返回空的单画布文件
             builder = PureWSDBuilder()
             builder.set_canvas_size(self._default_canvas_w, self._default_canvas_h)
             return builder.build()
 
         if len(self._canvases) == 1:
-            # 只有一个画布，使用单画布构建器（更简单可靠）
             canvas = self._canvases[0]
             builder = PureWSDBuilder()
             builder.set_canvas_size(canvas['canvas_w'], canvas['canvas_h'])
@@ -2454,67 +2495,50 @@ class MultiCanvasWSDBuilder:
                     builder.add_text(rec_data)
             return builder.build()
 
-        # 多画布构建
-        #
-        # WSD 文件结构 (与 PureWSDBuilder 一致, 仅修改页数和块尾部):
-        #   [file_header (含 pre_block_tail 前50字节)]
-        #   [block_header (14字节, 补全 pre_block_tail 后14字节)]
-        #   [records (所有画布的记录连续存放)]
-        #   [block_tail (多画布结构: 画布尺寸头 + N-1中间页条目 + 最后页条目)]
-        #   [file_size (4字节) + FFFF (4字节)]
-        #
-        # 注意: pre_block_tail 的前50字节已在 file_header 中,
-        #   后14字节由 block_header 补全, 无需额外添加 pre_block_tail
+        # 多画布构建: 使用原生模板替换法
         page_count = len(self._canvases)
+
+        # 加载原生模板
+        fh_bytes, bh_bytes, mid_entry_tmpl, last_entry_tmpl = _load_multi_canvas_template(page_count)
+
         result = bytearray()
 
-        # 1. 文件头 (修改 pre_block_tail 中的页数)
-        # pre_block_tail 在 file_header 中, offset 14 是页数字段
-        fh = bytearray(self.file_header)
+        # 1. 文件头 (修改页数)
+        fh = bytearray(fh_bytes)
         pre_bt_pattern = bytes.fromhex('0000800301000000010001000000')
         pre_bt_pos = fh.find(pre_bt_pattern)
         if pre_bt_pos >= 0:
             struct.pack_into('<I', fh, pre_bt_pos + 14, page_count)
         result.extend(fh)
 
-        # 2. 块头部 (14字节, 补全 pre_block_tail 后14字节)
-        # 记录数设为0 (与真实WSD文件一致)
-        block_header = bytearray(self.block_header)
-        struct.pack_into('<H', block_header, 0x0a, 0)
-        result.extend(block_header)
+        # 2. 块头部 (14字节, record_count=0, 直接使用模板不修改)
+        result.extend(bh_bytes)
 
         # 3. 记录区 (所有画布的记录连续存放)
         for canvas in self._canvases:
             for rec_type, rec_data in canvas['records']:
                 result.extend(rec_data)
 
-        # 4. 块尾部 (多画布结构)
-        # 4a. 画布尺寸头 (21字节: 8零 + 画布宽 + 画布高 + 5零)
-        # 使用最后一个画布的尺寸（与真实WSD文件一致）
-        bt_header = bytearray(21)
+        # 4. 记录区终止符 (23字节, 使用最后画布尺寸)
         last_canvas = self._canvases[-1]
-        struct.pack_into('<I', bt_header, 8, last_canvas['canvas_w'])
-        struct.pack_into('<I', bt_header, 12, last_canvas['canvas_h'])
-        result.extend(bt_header)
+        terminator = struct.pack('<8xII5x', last_canvas['canvas_w'], last_canvas['canvas_h'])
+        terminator += b'\x01\x00'
+        result.extend(terminator)
 
-        # 4b. 中间页条目 (每个78字节)
-        # 每个中间页条目对应一个画布(第1页到第N-1页)
-        # offset 13: 画布数据块数 (固定为1)
-        # offset 65: 画布宽度 (u32, WSD单位)
-        # offset 69: 画布高度 (u32, WSD单位)
+        # 5. 块尾部: N-1个mid entry + 1个last entry
+        # mid entry: 修改offset 63(画布宽) 和 67(画布高)
         for i in range(page_count - 1):
-            entry = bytearray(_MID_PAGE_ENTRY_TEMPLATE)
-            struct.pack_into('<H', entry, 13, 1)
+            entry = bytearray(mid_entry_tmpl)
             canvas = self._canvases[i]
-            struct.pack_into('<I', entry, 65, canvas['canvas_w'])
-            struct.pack_into('<I', entry, 69, canvas['canvas_h'])
+            struct.pack_into('<I', entry, 63, canvas['canvas_w'])
+            struct.pack_into('<I', entry, 67, canvas['canvas_h'])
             result.extend(entry)
 
-        # 4c. 最后页条目 (99字节核心 + 4字节文件大小 + 4字节FFFF)
-        result.extend(_LAST_PAGE_ENTRY_CORE)
+        # last entry: 直接使用模板, 不修改任何字段
+        result.extend(last_entry_tmpl)
 
-        # 文件大小字段 + FFFF 结束标记
-        file_size = len(result) + 8  # +4 (大小字段) + 4 (FFFF)
+        # 6. 文件大小 + FFFF
+        file_size = len(result) + 8
         result.extend(struct.pack('<I', file_size))
         result.extend(b'\xff\xff\xff\xff')
 
