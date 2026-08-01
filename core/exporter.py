@@ -918,7 +918,7 @@ def export_wsd_multi(canvas_list: List[CanvasData],
             b = int(h[4:6], 16)
             override_bgr = (b, g, r)
 
-    # 导入多画布构建器（使用模板替换法，确保文件结构正确可打开）
+    # 导入多画布构建器（纯二进制构建，无需外部模板文件）
     from multi_canvas_builder import MultiCanvasWSDBuilder
 
     builder = MultiCanvasWSDBuilder()
@@ -983,7 +983,7 @@ def export_wsd_multi(canvas_list: List[CanvasData],
 
         canvas_records.append(records)
 
-    # 构建 WSD 文件（使用模板替换法，确保画布尺寸统一）
+    # 构建 WSD 文件（纯二进制构建，确保画布尺寸统一）
     wsd_data = builder.build(canvas_records, canvas_width, canvas_height)
 
     # 确保输出目录存在
