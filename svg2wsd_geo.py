@@ -7067,6 +7067,9 @@ def fit_geometric_shapes_from_paths(subpaths, colors=None, epsilon_ratio=0.02):
         color_bgr = None
         if colors and i < len(colors):
             hex_color = colors[i]
+            # _parse_svg_file 返回 (hex_string, gradient_id) 元组，取第一个元素
+            if isinstance(hex_color, (tuple, list)):
+                hex_color = hex_color[0] if hex_color else None
             if hex_color and hex_color.startswith('#'):
                 try:
                     color_bgr = hex_to_bgr(hex_color)

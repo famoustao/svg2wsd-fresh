@@ -139,12 +139,67 @@ def import_image(filepath: str) -> CanvasData:
 # SVG格式导入
 # ============================================================
 
+def _hex_to_bgr(color):
+    """将颜色（hex字符串/BGR元组/颜色名称）转换为BGR元组"""
+    if color is None:
+        return None
+    if isinstance(color, (tuple, list)):
+        # _parse_svg_file 返回 (hex_string, gradient_id) 元组
+        if len(color) > 0 and isinstance(color[0], str):
+            return _hex_to_bgr(color[0])
+        return tuple(int(c) for c in color[:3])
+    if isinstance(color, str):
+        s = color.strip().lower()
+        if s.startswith('#'):
+            h = s.lstrip('#')
+            if len(h) == 6:
+                r = int(h[0:2], 16)
+                g = int(h[2:4], 16)
+                b = int(h[4:6], 16)
+                return (b, g, r)
+            elif len(h) == 3:
+                r = int(h[0] * 2, 16)
+                g = int(h[1] * 2, 16)
+                b = int(h[2] * 2, 16)
+                return (b, g, r)
+        if s.startswith('rgb(') and s.endswith(')'):
+            try:
+                parts = s[4:-1].split(',')
+                if len(parts) == 3:
+                    vals = []
+                    for p in parts:
+                        p = p.strip()
+                        if p.endswith('%'):
+                            vals.append(round(float(p[:-1]) * 255 / 100))
+                        else:
+                            vals.append(int(float(p)))
+                    r = max(0, min(255, vals[0]))
+                    g = max(0, min(255, vals[1]))
+                    b = max(0, min(255, vals[2]))
+                    return (b, g, r)
+            except (ValueError, IndexError):
+                pass
+        _named_colors = {
+            'black': (0, 0, 0), 'white': (255, 255, 255),
+            'red': (0, 0, 255), 'green': (0, 128, 0),
+            'blue': (255, 0, 0), 'yellow': (0, 255, 255),
+            'cyan': (255, 255, 0), 'magenta': (255, 0, 255),
+            'gray': (128, 128, 128), 'grey': (128, 128, 128),
+            'orange': (0, 165, 255), 'purple': (128, 0, 128),
+            'pink': (203, 192, 255), 'brown': (42, 42, 165),
+            'transparent': None, 'none': None,
+        }
+        if s in _named_colors:
+            return _named_colors[s]
+    return (0, 0, 0)
+
+
 def import_svg(filepath: str) -> CanvasData:
     """
     导入SVG文件
 
-    解析SVG中的路径元素，转换为Shape列表。
-    调用项目中现有的SVG解析逻辑。
+    使用 svg2wsd_core._parse_svg_file 解析SVG中的路径元素，
+    正确处理transform、颜色、描边等属性，转换为Shape列表。
 
     参数:
         filepath: SVG文件路径
@@ -152,65 +207,80 @@ def import_svg(filepath: str) -> CanvasData:
     返回:
         CanvasData 对象
     """
+    import sys as _sys
+    _project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    if _project_root not in _sys.path:
+        _sys.path.insert(0, _project_root)
+
     try:
-        # 尝试调用项目中现有的SVG解析模块
-        import sys
-        sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        from svg2wsd_core import _parse_svg_file
 
-        # 使用现有的 svg2wsd_core 模块中的SVG解析功能
-        from svg2wsd_core import SvgParser
+        result = _parse_svg_file(filepath)
+        subpaths = result[0]
+        colors = result[1]
+        bbox = result[2]
+        is_stroke_list = result[3] if len(result) > 3 else []
+        stroke_widths = result[4] if len(result) > 4 else []
+        path_group_ids = result[5] if len(result) > 5 else []
 
-        parser = SvgParser()
-        shapes_data = parser.parse_file(filepath)
+        shapes = []
+        all_points = []
 
-        # 将解析结果转换为统一的CanvasData格式
-        shapes = _convert_svg_shapes(shapes_data)
-        annotations = _extract_svg_text(shapes_data)
+        for i, path_points in enumerate(subpaths):
+            fill_color = None
+            line_color = (0, 0, 0)
+            line_width = 1.0
+
+            is_stroke = is_stroke_list and i < len(is_stroke_list) and is_stroke_list[i]
+
+            if is_stroke:
+                # 描边路径：颜色作为线条颜色
+                if colors and i < len(colors):
+                    line_color = _hex_to_bgr(colors[i])
+            else:
+                # 填充路径：颜色作为填充色
+                if colors and i < len(colors):
+                    fill_color = _hex_to_bgr(colors[i])
+
+            # 描边宽度：仅描边路径使用 stroke-width；填充路径线宽设 0
+            if is_stroke and stroke_widths and i < len(stroke_widths) and stroke_widths[i]:
+                line_width = float(stroke_widths[i])
+            elif not is_stroke:
+                line_width = 0.0
+
+            gid = 0
+            if path_group_ids and i < len(path_group_ids):
+                gid = path_group_ids[i]
+
+            shape = Shape(
+                type=ShapeType.BEZIER,
+                points=list(path_points),
+                line_color=line_color,
+                fill_color=fill_color,
+                line_width=line_width,
+                extra={'path_group_id': gid},
+            )
+            shapes.append(shape)
+            all_points.extend(path_points)
 
         # 计算边界框
-        from .data_model import shapes_bbox
-        bbox = shapes_bbox(shapes) if shapes else (0.0, 0.0, 0.0, 0.0)
+        if all_points:
+            xs = [p[0] for p in all_points]
+            ys = [p[1] for p in all_points]
+            bbox = (min(xs), min(ys), max(xs), max(ys))
 
         return CanvasData(
             shapes=shapes,
-            annotations=annotations,
+            annotations=[],
             bbox=bbox,
             source_file=filepath
         )
 
-    except ImportError:
-        # 如果现有模块不可用，使用基础SVG解析
+    except Exception:
+        # 最后的兜底：使用基础SVG解析
+        import traceback as _tb
+        _tb.print_exc()
         return _import_svg_basic(filepath)
-
-
-def _convert_svg_shapes(svg_data) -> list:
-    """
-    将SVG解析结果转换为Shape列表（适配层）
-
-    参数:
-        svg_data: SVG解析器返回的原始数据
-
-    返回:
-        Shape对象列表
-    """
-    shapes = []
-    # 此处为适配层，根据实际svg2wsd_core返回格式进行转换
-    # 暂返回空列表，待与现有模块对接后完善
-    return shapes
-
-
-def _extract_svg_text(svg_data) -> list:
-    """
-    从SVG数据中提取文字标注
-
-    参数:
-        svg_data: SVG解析器返回的原始数据
-
-    返回:
-        TextAnnotation对象列表
-    """
-    annotations = []
-    return annotations
 
 
 def _import_svg_basic(filepath: str) -> CanvasData:

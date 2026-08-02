@@ -433,6 +433,9 @@ class ComicMode:
             if color is None:
                 return None
             if isinstance(color, (tuple, list)):
+                # _parse_svg_file 返回 (hex_string, gradient_id) 元组
+                if len(color) > 0 and isinstance(color[0], str):
+                    return _to_bgr(color[0])
                 return tuple(int(c) for c in color[:3])
             if isinstance(color, str):
                 s = color.strip().lower()

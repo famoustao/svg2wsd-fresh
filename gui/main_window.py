@@ -1806,6 +1806,9 @@ class MainWindow:
                     if color is None:
                         return None
                     if isinstance(color, (tuple, list)):
+                        # _parse_svg_file 返回 (hex_string, gradient_id) 元组
+                        if len(color) > 0 and isinstance(color[0], str):
+                            return _to_bgr(color[0])
                         return tuple(int(c) for c in color[:3])
                     if isinstance(color, str) and color.startswith('#'):
                         h = color.lstrip('#')
@@ -1831,8 +1834,19 @@ class MainWindow:
                         # 填充路径：使用颜色作为填充颜色
                         if colors and i < len(colors):
                             fill_color = _to_bgr(colors[i])
-                    if stroke_widths and i < len(stroke_widths) and stroke_widths[i]:
+                    # 描边宽度：仅描边路径使用 SVG 中的 stroke-width；
+                    # 填充路径 stroke:none，线宽设为 0（不绘制轮廓），
+                    # 否则 SVG 原始坐标系下的大 stroke-width 会让预览被轮廓填满
+                    if stroke_path and stroke_widths and i < len(stroke_widths) and stroke_widths[i]:
                         line_width = float(stroke_widths[i])
+                        # SVG 原始坐标系下 stroke-width 可能很大（如1026），
+                        # 预览时按 bbox 等比缩放到显示坐标，限制最大显示线宽
+                        bw = bbox[2] - bbox[0] if bbox and len(bbox) == 4 else 500
+                        max_lw = max(2.0, bw * 0.02)
+                        if line_width > max_lw:
+                            line_width = max_lw
+                    elif not stroke_path:
+                        line_width = 0.0
                     # 获取路径组ID（用于复合路径/孔洞）
                     gid = 0
                     if path_group_ids and i < len(path_group_ids):

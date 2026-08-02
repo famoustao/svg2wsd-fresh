@@ -320,6 +320,9 @@ def _normalize_color(color):
     """将任意颜色格式（十六进制或颜色名称）归一化为标准 #rrggbb 格式"""
     if not color:
         return '#000000'
+    # _parse_svg_file 返回 (hex_string, gradient_id) 元组，取第一个元素
+    if isinstance(color, (tuple, list)):
+        return _normalize_color(color[0]) if color else '#000000'
     color = color.strip()
     if color.startswith('#'):
         # 已经是十六进制

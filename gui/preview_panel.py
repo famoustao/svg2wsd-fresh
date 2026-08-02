@@ -681,7 +681,11 @@ class WsdPreviewCanvas(ZoomableCanvas):
         shape_type = shape.type
         line_color = _bgr_to_hex(shape.line_color)
         fill_color = _bgr_to_hex(shape.fill_color) if shape.fill_color else ''
-        line_width = max(1.0, self._to_canvas_size(shape.line_width))
+        # line_width=0 表示无描边（纯填充），不再用 max(1.0,...) 强制最小线宽
+        if shape.line_width <= 0:
+            line_width = 0.0
+        else:
+            line_width = max(1.0, self._to_canvas_size(shape.line_width))
 
         if shape_type == ShapeType.LINE:
             self._draw_line_shape(shape, line_color, line_width)
@@ -877,7 +881,7 @@ class WsdPreviewCanvas(ZoomableCanvas):
         if is_closed and fill:
             self.canvas.create_polygon(
                 *coords,
-                outline=color,
+                outline=color if width > 0 else '',
                 fill=_bgr_to_hex(fill) if fill else '',
                 width=width,
                 smooth=False,
@@ -907,7 +911,10 @@ class WsdPreviewCanvas(ZoomableCanvas):
 
         color = _bgr_to_hex(outer.line_color)
         fill = _bgr_to_hex(outer.fill_color) if outer.fill_color else None
-        width = max(1.0, self._to_canvas_size(outer.line_width))
+        if outer.line_width <= 0:
+            width = 0.0
+        else:
+            width = max(1.0, self._to_canvas_size(outer.line_width))
 
         # 采样外框为多边形
         outer_poly = self._bezier_to_polygon(outer.points)
@@ -923,7 +930,7 @@ class WsdPreviewCanvas(ZoomableCanvas):
             # 绘制外框填充
             self.canvas.create_polygon(
                 *outer_coords,
-                outline=color,
+                outline=color if width > 0 else '',
                 fill=fill,
                 width=width,
                 joinstyle='round',
