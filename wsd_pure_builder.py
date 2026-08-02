@@ -2392,76 +2392,71 @@ _LAST_PAGE_ENTRY_CORE = bytes.fromhex(
 # 从WSTUDIO原生多画布WSD文件提取的中间页条目和最后页条目
 # 2画布和3画布模板中的这两个部分完全一致，只需一份
 
-# mid_entry: 中间页条目 (78字节 = mid_core 51字节 + rec_count 4字节 + canvas_tail 23字节)
-_MULTI_MID_ENTRY_B64 = (
-    "MgAQ9QAAAAAAAgABAAAACABAAAIAAAAgIP//EAABAAAAAAAAAAAAAAAAAAAQAAAAAAAAAAAAAAAA"
-    "AAAAAAAAwNoAAMDaAAAAAAAAAAEA"
+# 块头部模板 (14字节, 从真实WSTUDIO文件提取)
+# 结构: 6字节零 + [0x10](block_type) + 3字节零 + [rec_count(uint16)] + 2字节零
+# rec_count在offset 10, 构建时设为画布1的记录数
+_MULTI_BH_B64 = "AAAAEAAAAAAAAAYAAAA="
+
+# mid_entry header: 中间页条目头部 (59字节, 从真实WSTUDIO多画布文件提取)
+# 结构: [00 00 01 00](4) + [32 00 10 f5](4) + mid_core(43) + pad(4) + rec_count(4)
+# bytes 13-14: 页码(从2开始), 构建时按页码修改
+# bytes 55-58: 记录数, 构建时按实际记录数修改
+_MULTI_MID_HEADER_B64 = (
+    "AAABADIAEPUAAAAAAAIAAQAAAAgAQAAAAAAAICD//xAAAQAAAAAA"
+    "AAAAAAAAAAAAEAAAAAAAAAYAAAA="
 )
 
-# last_entry: 最后页条目 (97字节)
+# last_entry: 最后页条目 (97字节, 从真实WSTUDIO文件提取, 所有文件中完全一致)
+# 结构: [00 00 01 00](4) + [32 00 10 f5](4) + last_core(89)
 _MULTI_LAST_ENTRY_B64 = (
-    "MgAQ9QAAAAAA//8BAAAAAAAAAQABAAAAuAsAAAAAAAAAkAEAAJABAAAA+gAAAAAAABQAJAAJAAAA"
-    "NAiaCzIAMgCWAJYAyADIACcAAAAyADIA//7/BLcAIwBuALcAAAAAAA=="
+    "AAABADIAEPUAAAAAAP//AQAAAAAAAAEAAQAAALgLAAAAAAAAAJABAACQAQAAAPoAAA"
+    "AAAAAUACQACQAAADQImgsyADIAlgCWAMgAyAAnAAAAMgAyAP/+/wS3ACMAbgC3AA=="
 )
-
-# canvas1 tail: 第一画布的块尾部 (23字节)
-# 与单画布 block_tail 的前23字节结构一致，仅画布尺寸不同
-# 结构: [8字节填充][4字节宽度][4字节高度][7字节固定尾部]
-_MULTI_CANVAS1_TAIL_TAIL = b'\x00\x00\x00\x00\x00\x01\x00'  # 尾部7字节
-
 
 def _load_multi_canvas_template(page_count):
     """
     获取多画布WSD构建所需的模板数据（纯内置，无需外部文件）
 
-    使用base64编码的内置数据 + 单画布skeleton的文件头/块头部，
-    完全不依赖外部模板文件，确保打包后能正常工作。
+    基于真实WSTUDIO多画布文件逆向分析, 使用base64编码的内置数据。
+
+    多画布WSD文件结构:
+      [FH(59984, 含canvas1_meta 50字节, page_count@0xEA2C)]
+      [BH(14, rec_count@offset10)]
+      [画布1记录][canvas_tail(19)]
+      [mid_entry_header(59, page_num@13, rec_count@55)][画布2记录][canvas_tail(19)]
+      ...
+      [last_entry(97)][4零][file_size(4)][FFFF(4)]
 
     参数:
-        page_count: 画布数量
+        page_count: 页数
 
     返回:
-        (file_header_bytes, block_header_bytes, mid_entry_template, last_entry_template)
-        - file_header_bytes: 文件头 (含pre_block_tail, 59984字节)
-        - block_header_bytes: 块头部 (14字节, record_count=0)
-        - mid_entry_template: 中间页条目模板 (78字节)
-        - last_entry_template: 最后页条目模板 (97字节)
+        (file_header_bytes, bh_template, mid_header_template, last_entry_template)
     """
     import base64 as _b64
 
-    # 文件头和块头部：复用单画布skeleton数据（完全一致，仅页数不同）
-    # skeleton文件头在 0xEA2C 处为1（单画布），多画布构建时会修改为page_count
-    file_header, block_header, _ = _get_skeleton()
-
-    # 中间页条目和最后页条目：从内置base64解码
-    mid_entry_template = _b64.b64decode(_MULTI_MID_ENTRY_B64)
+    file_header, _, _ = _get_skeleton()
+    bh_template = _b64.b64decode(_MULTI_BH_B64)
+    mid_header_template = _b64.b64decode(_MULTI_MID_HEADER_B64)
     last_entry_template = _b64.b64decode(_MULTI_LAST_ENTRY_B64)
 
-    return bytes(file_header), bytes(block_header), mid_entry_template, last_entry_template
+    return bytes(file_header), bh_template, mid_header_template, last_entry_template
 
 
 class MultiCanvasWSDBuilder:
     """
-    多画布 WSD 构建器 (模板替换法)
+    多画布 WSD 构建器 (纯二进制构建)
 
-    使用WSTUDIO原生多画布WSD文件作为模板, 只替换记录数据,
-    保持所有结构字节与原生文件完全一致。
+    基于真实WSTUDIO多画布文件逆向分析, 使用内置base64编码的模板数据。
 
-    文件结构 (记录交错插入页面条目之间):
-        1. 文件头 (59984字节, 含 pre_block_tail 和页数)
-        2. 块头部 (14字节, record_count=0, 多画布模式标志)
-        3. Canvas 1 记录 (WSTUDIO扫描直到遇到canvas tail)
-        4. Canvas 1 tail (23字节, 含画布尺寸)
-        5. Canvas 2..N 页面条目:
-           - mid_core (51字节, 含画布索引)
-           - rec_count (4字节, 此画布记录数)
-           - 此画布的记录
-           - canvas tail (23字节, 含画布尺寸)
-        6. 最后页条目 (97字节, 直接使用模板)
-        7. 文件大小 (4字节) + FFFF (4字节)
-
-    关键: 块头部record_count必须为0, WSTUDIO据此识别多画布模式,
-    通过扫描记录直到canvas tail(非记录标记)来确定各画布记录范围。
+    文件结构:
+        1. FH (59984字节, 含canvas1 metadata 50字节, page_count@0xEA2C)
+        2. BH (14字节, rec_count@offset10 = 画布1记录数)
+        3. 画布1记录 + canvas_tail (19字节, 画布尺寸@offset8,12)
+        4. 画布2..N: mid_entry_header(59字节) + 记录 + canvas_tail(19字节)
+           mid_entry_header: page_num@offset13, rec_count@offset55
+        5. last_entry (97字节, 固定)
+        6. 4零字节 + file_size(4) + FFFF(4)
     """
 
     def __init__(self, skeleton_path=None):
@@ -2527,22 +2522,13 @@ class MultiCanvasWSDBuilder:
         """
         构建完整的多画布 WSD 文件
 
-        多画布WSD文件结构（记录放在页面条目之后）:
-          [文件头][块头部(rec_count=0)]
-          [canvas1记录][canvas1_tail(23字节)]
-          [mid_entry(78字节,完整不变)][canvas2记录]
-          [mid_entry(78字节,完整不变)][canvas3记录]
+        基于真实WSTUDIO多画布文件逆向分析的结构:
+          [FH(59984, page_count@0xEA2C)]
+          [BH(14, rec_count@offset10)]
+          [画布1记录][canvas_tail(19)]
+          [mid_entry_header(59, page_num@13, rec_count@55)][画布2记录][canvas_tail(19)]
           ...
-          [last_entry(97字节)][file_size(4)][FFFF(4)]
-
-        WSTUDIO扫描逻辑:
-          - canvas1: 从块头部后扫描记录, 直到遇到canvas1_tail(非记录数据)
-          - canvas2: 从mid_entry(78字节)之后扫描记录, 直到遇到下一个
-            page entry标记(320010f5, 即last_entry的开头)
-          - 每个mid_entry是固定78字节的页面条目, 不可拆分
-
-        Returns:
-            bytes: 完整的 WSD 文件数据
+          [last_entry(97)][4零][file_size(4)][FFFF(4)]
         """
         if not self._canvases:
             builder = PureWSDBuilder()
@@ -2563,57 +2549,55 @@ class MultiCanvasWSDBuilder:
         # 多画布构建
         page_count = len(self._canvases)
 
-        # 加载内置模板数据（base64编码，无需外部文件）
-        fh_bytes, bh_bytes, mid_entry_tmpl, last_entry_tmpl = _load_multi_canvas_template(page_count)
+        # 加载内置模板数据
+        fh_bytes, bh_tmpl, mid_header_tmpl, last_entry_tmpl = _load_multi_canvas_template(page_count)
 
         result = bytearray()
 
-        # 1. 文件头 (修改页数)
+        # 1. FH (59984字节)
         fh = bytearray(fh_bytes)
-        fh[0xEA2C] = page_count
+        fh[0xEA2C] = page_count  # page_count
         result.extend(fh)
 
-        # 2. 块头部 (14字节, record_count=0)
-        # 多画布模式下record_count=0, WSTUDIO通过扫描记录标记确定记录范围
-        bh = bytearray(bh_bytes)
-        struct.pack_into('<H', bh, 0x0a, 0)
+        # 2. BH (14字节, rec_count = 画布1记录数)
+        bh = bytearray(bh_tmpl)
+        struct.pack_into('<H', bh, 10, len(self._canvases[0]['records']))
         result.extend(bh)
 
-        # 3. Canvas 1 记录
-        for rec_type, rec_data in self._canvases[0]['records']:
-            result.extend(rec_data)
-
-        # 4. Canvas 1 tail (23字节)
+        # 3. 画布1记录 + canvas_tail(19)
         canvas1 = self._canvases[0]
-        c1_tail = bytearray(23)
-        struct.pack_into('<I', c1_tail, 8, canvas1['canvas_w'])
-        struct.pack_into('<I', c1_tail, 12, canvas1['canvas_h'])
-        c1_tail[16:23] = b'\x00\x00\x00\x00\x00\x01\x00'
-        result.extend(c1_tail)
+        for rec_type, rec_data in canvas1['records']:
+            result.extend(rec_data)
+        ct = bytearray(19)
+        struct.pack_into('<I', ct, 8, canvas1['canvas_w'])
+        struct.pack_into('<I', ct, 12, canvas1['canvas_h'])
+        result.extend(ct)
 
-        # 5. Canvas 2..N: 完整mid_entry(78字节) + 记录
-        # mid_entry保持完整78字节不变（与原生模板一致）
-        # 记录放在mid_entry之后，WSTUDIO从mid_entry后扫描直到下一个320010f5标记
+        # 4. 画布2..N: mid_entry_header(59) + 记录 + canvas_tail(19)
         for i in range(1, page_count):
             canvas = self._canvases[i]
 
-            # 完整mid_entry (78字节, 从内置模板复制)
-            mid_entry = bytearray(mid_entry_tmpl)
-            # 修改canvas_tail中的画布尺寸
-            # canvas_tail在mid_entry中的偏移: 55 (mid_core 51 + rec_count 4)
-            # canvas_tail内部偏移8: 宽度, 偏移12: 高度
-            struct.pack_into('<I', mid_entry, 55 + 8, canvas['canvas_w'])
-            struct.pack_into('<I', mid_entry, 55 + 12, canvas['canvas_h'])
-            result.extend(mid_entry)
+            # mid_entry_header (59字节, 从模板复制)
+            mid_hdr = bytearray(mid_header_tmpl)
+            struct.pack_into('<H', mid_hdr, 13, i + 1)  # page_num (从2开始)
+            struct.pack_into('<I', mid_hdr, 55, len(canvas['records']))  # rec_count
+            result.extend(mid_hdr)
 
-            # 此画布的记录（放在mid_entry之后）
+            # 此画布的记录
             for rec_type, rec_data in canvas['records']:
                 result.extend(rec_data)
 
-        # 6. Last entry (97字节, 直接使用模板)
+            # canvas_tail (19字节)
+            ct = bytearray(19)
+            struct.pack_into('<I', ct, 8, canvas['canvas_w'])
+            struct.pack_into('<I', ct, 12, canvas['canvas_h'])
+            result.extend(ct)
+
+        # 5. last_entry (97字节, 固定)
         result.extend(last_entry_tmpl)
 
-        # 7. 文件大小 + FFFF
+        # 6. 4零字节 + file_size + FFFF (共12字节)
+        result.extend(b'\x00\x00\x00\x00')
         file_size = len(result) + 8
         result.extend(struct.pack('<I', file_size))
         result.extend(b'\xff\xff\xff\xff')
