@@ -1164,7 +1164,10 @@ def _get_skeleton():
     return file_header, block_header, block_tail
 
 # 画布尺寸在 block_tail 中的偏移
-_CANVAS_SIZE_OFFSET = 8
+# block_tail+0x08: 宽度 (i32), block_tail+0x0C: 高度 (i32)
+# 经与原生文件对比验证：此位置存储的是画布尺寸而非固定标记
+# （模板默认值 53842×26921 WSD，即约 134.6mm × 67.3mm）
+_CANVAS_SIZE_OFFSET = 0x08
 
 
 
@@ -1847,10 +1850,16 @@ def build_text_record(text, x, y, mode=TEXT_NORMAL,
     if end_m_off < 0:
         end_m_off = text_start + 4  # 容错
 
-    # 替换文字内容（在0x26到01ff之间）
+    # 检查文字区是否有足够空间，不够则扩展记录
     max_len = end_m_off - text_start
     if len(text_bytes) > max_len:
-        text_bytes = text_bytes[:max_len]
+        # 需要扩展: 在 end_m_off 处插入额外字节，保持 01ff 标记和后续内容
+        extra_needed = len(text_bytes) - max_len
+        # 在 end_m_off 位置插入 extra_needed 个 0x00 字节
+        rec = rec[:end_m_off] + bytearray(extra_needed) + rec[end_m_off:]
+        # 更新 end_m_off（已偏移）
+        end_m_off += extra_needed
+        max_len = end_m_off - text_start
 
     # 填充文字
     rec[text_start:text_start + len(text_bytes)] = text_bytes
@@ -1876,6 +1885,10 @@ def build_text_record(text, x, y, mode=TEXT_NORMAL,
     rec[0x1c] = (rec[0x1c] & 0xe0) | (assoc_type & 0x0f)
 
     # 关联子类型 (+0x1d)
+    # 格式: 高4位=方向(DIR_*), 低4位固定为0x4
+    # 安全检查: 如果低4位不是0x4，自动格式化
+    if (assoc_b1d & 0x0F) != 0x04:
+        assoc_b1d = ((assoc_b1d & 0x0F) << 4) | 0x04
     rec[0x1d] = assoc_b1d & 0xff
 
     # 关联参数 (+0x1e, +0x22)
@@ -2021,6 +2034,48 @@ def calc_vertex_label_position(vertex_x, vertex_y, angle_deg):
     return region, f1, f2
 
 
+# ========== 记录数据消毒 ==========
+
+# 记录标记字节序列（小端字节序）
+_FALSE_PATH_MARKER = b'\x0f\x33'   # 0x330f 路径记录标记
+_FALSE_TEXT_MARKER = b'\x09\x31'   # 0x3109 文字记录标记
+
+
+def _sanitize_record_data(data):
+    """
+    扫描记录数据中的假记录标记并修复
+
+    WSD格式使用扫描标记(0x330f/0x3109)来定位记录边界。
+    如果记录内部的坐标数据恰好包含这些字节序列，
+    WSD软件会误认为发现了新记录，导致文件无法打开。
+
+    本函数扫描记录数据（跳过前2字节的真实标记），
+    发现假标记时将第一个字节递增1（改变坐标值最多1个WSD单位=0.0025mm，不可感知）。
+
+    Args:
+        data: 记录的二进制数据 (bytes)
+
+    Returns:
+        bytes: 消毒后的记录数据
+    """
+    if len(data) <= 2:
+        return data
+
+    result = bytearray(data)
+    # 从第3字节开始扫描（跳过前2字节的真实标记）
+    i = 2
+    while i < len(result) - 1:
+        pair = bytes(result[i:i+2])
+        if pair == _FALSE_PATH_MARKER or pair == _FALSE_TEXT_MARKER:
+            # 将第一个字节递增1，破坏假标记
+            # 0x0f -> 0x10 或 0x09 -> 0x0a，都不会形成新的假标记
+            result[i] = (result[i] + 1) & 0xFF
+            # 不递增i，重新检查此位置（新字节可能与下一字节形成新标记）
+        else:
+            i += 1
+    return bytes(result)
+
+
 # ========== 主构建器类 ==========
 
 class PureWSDBuilder:
@@ -2100,16 +2155,18 @@ class PureWSDBuilder:
         self.set_canvas_size(width_mm * MM_TO_WSD, height_mm * MM_TO_WSD)
 
     def add_path(self, path_record):
-        """添加一条路径记录"""
-        self.records.append(('path', path_record))
+        """添加一条路径记录（自动消毒假标记）"""
+        sanitized = _sanitize_record_data(path_record)
+        self.records.append(('path', sanitized))
 
     def add_circle(self, circle_record):
         """添加一条圆形记录（原生圆，非贝塞尔近似）"""
-        self.records.append(('path', circle_record))
+        self.add_path(circle_record)
 
     def add_text(self, text_record):
-        """添加一条文字记录"""
-        self.records.append(('text', text_record))
+        """添加一条文字记录（自动消毒假标记）"""
+        sanitized = _sanitize_record_data(text_record)
+        self.records.append(('text', sanitized))
 
     def build(self):
         """
@@ -2123,7 +2180,8 @@ class PureWSDBuilder:
         # 1. 文件头
         result.extend(self.file_header)
 
-        # 2. 数据块头部（从模板复制，修改记录数）
+        # 2. 数据块头部（从模板复制，设置record_count为实际记录数）
+        # 原生WSTUDIO文件中record_count=实际记录数（如原生单画布文件record_count=6）
         block_header = bytearray(self.block_header)
         struct.pack_into('<H', block_header, 0x0a, len(self.records))
         result.extend(block_header)
@@ -2407,15 +2465,21 @@ class MultiCanvasWSDBuilder:
     使用WSTUDIO原生多画布WSD文件作为模板, 只替换记录数据,
     保持所有结构字节与原生文件完全一致。
 
-    文件结构:
+    文件结构 (记录交错插入页面条目之间):
         1. 文件头 (59984字节, 含 pre_block_tail 和页数)
-        2. 块头部 (14字节, record_count=0, 与原生一致)
-        3. 记录区 (所有画布的记录连续存放, 无画布间分隔符)
-        4. 记录区终止符 (23字节, 含最后画布尺寸)
-        5. 块尾部:
-           - N-1个中间页条目 (每个78字节, offset 63/67存画布尺寸)
-           - 1个最后页条目 (97字节, 直接使用模板不修改)
-        6. 文件大小 (4字节) + FFFF (4字节)
+        2. 块头部 (14字节, record_count=0, 多画布模式标志)
+        3. Canvas 1 记录 (WSTUDIO扫描直到遇到canvas tail)
+        4. Canvas 1 tail (23字节, 含画布尺寸)
+        5. Canvas 2..N 页面条目:
+           - mid_core (51字节, 含画布索引)
+           - rec_count (4字节, 此画布记录数)
+           - 此画布的记录
+           - canvas tail (23字节, 含画布尺寸)
+        6. 最后页条目 (97字节, 直接使用模板)
+        7. 文件大小 (4字节) + FFFF (4字节)
+
+    关键: 块头部record_count必须为0, WSTUDIO据此识别多画布模式,
+    通过扫描记录直到canvas tail(非记录标记)来确定各画布记录范围。
     """
 
     def __init__(self, skeleton_path=None):
@@ -2456,30 +2520,38 @@ class MultiCanvasWSDBuilder:
         return len(self._canvases) - 1
 
     def add_path(self, path_record, canvas_idx=None):
-        """添加一条路径记录到指定画布（默认最后一个画布）"""
+        """添加一条路径记录到指定画布（自动消毒假标记）"""
         if canvas_idx is None:
             canvas_idx = len(self._canvases) - 1
         if canvas_idx < 0 or canvas_idx >= len(self._canvases):
             raise IndexError(f"画布索引 {canvas_idx} 超出范围")
-        self._canvases[canvas_idx]['records'].append(('path', path_record))
+        sanitized = _sanitize_record_data(path_record)
+        self._canvases[canvas_idx]['records'].append(('path', sanitized))
 
     def add_circle(self, circle_record, canvas_idx=None):
         """添加一条圆形记录到指定画布"""
         self.add_path(circle_record, canvas_idx)
 
     def add_text(self, text_record, canvas_idx=None):
-        """添加一条文字记录到指定画布"""
+        """添加一条文字记录到指定画布（自动消毒假标记）"""
         if canvas_idx is None:
             canvas_idx = len(self._canvases) - 1
         if canvas_idx < 0 or canvas_idx >= len(self._canvases):
             raise IndexError(f"画布索引 {canvas_idx} 超出范围")
-        self._canvases[canvas_idx]['records'].append(('text', text_record))
+        sanitized = _sanitize_record_data(text_record)
+        self._canvases[canvas_idx]['records'].append(('text', sanitized))
 
     def build(self):
         """
         构建完整的多画布 WSD 文件
 
-        使用WSTUDIO原生模板文件, 只替换记录数据, 保持结构字节完全一致。
+        多画布WSD文件结构（记录交错插入页面条目之间）:
+          [文件头][块头部(rec_count=canvas1记录数)]
+          [canvas1记录][canvas1_tail(23字节)]
+          [mid_core(51)][rec_count(4)][canvas2记录][canvas2_tail(23)]
+          [mid_core(51)][rec_count(4)][canvas3记录][canvas3_tail(23)]
+          ...
+          [last_entry(97)][file_size(4)][FFFF(4)]
 
         Returns:
             bytes: 完整的 WSD 文件数据
@@ -2500,49 +2572,76 @@ class MultiCanvasWSDBuilder:
                     builder.add_text(rec_data)
             return builder.build()
 
-        # 多画布构建: 使用原生模板替换法
+        # 多画布构建: 记录交错插入页面条目之间
         page_count = len(self._canvases)
 
         # 加载原生模板
         fh_bytes, bh_bytes, mid_entry_tmpl, last_entry_tmpl = _load_multi_canvas_template(page_count)
 
+        # 从mid entry模板中提取各部分:
+        # mid_entry = mid_core(51) + rec_count(4) + canvas_tail(23) = 78字节
+        mid_core_tmpl = mid_entry_tmpl[:51]
+        canvas_tail_template = mid_entry_tmpl[55:]  # 跳过rec_count(4字节)
+
         result = bytearray()
 
-        # 1. 文件头 (修改页数)
+        # 1. 文件头 (修改页数和画布数)
         fh = bytearray(fh_bytes)
-        pre_bt_pattern = bytes.fromhex('0000800301000000010001000000')
-        pre_bt_pos = fh.find(pre_bt_pattern)
-        if pre_bt_pos >= 0:
-            struct.pack_into('<I', fh, pre_bt_pos + 14, page_count)
+        fh[0xEA2C] = page_count
+        # 注意: 不修改pre_block_tail中的其他字段, 原生模板已有正确值
         result.extend(fh)
 
-        # 2. 块头部 (14字节, record_count=0, 直接使用模板不修改)
-        result.extend(bh_bytes)
+        # 2. 块头部 (14字节, record_count=0, 与原生多画布模板一致)
+        # 关键: 多画布模式下record_count必须为0, WSTUDIO通过扫描记录直到
+        # 遇到canvas tail(非记录标记)来确定每个画布的记录范围
+        bh = bytearray(bh_bytes)
+        struct.pack_into('<H', bh, 0x0a, 0)
+        result.extend(bh)
 
-        # 3. 记录区 (所有画布的记录连续存放)
-        for canvas in self._canvases:
+        # 3. Canvas 1 记录
+        for rec_type, rec_data in self._canvases[0]['records']:
+            result.extend(rec_data)
+
+        # 4. Canvas 1 tail (23字节, 使用canvas1的尺寸)
+        canvas1 = self._canvases[0]
+        c1_tail = bytearray(23)
+        struct.pack_into('<I', c1_tail, 8, canvas1['canvas_w'])
+        struct.pack_into('<I', c1_tail, 12, canvas1['canvas_h'])
+        c1_tail[16:23] = b'\x00\x00\x00\x00\x00\x01\x00'
+        result.extend(c1_tail)
+
+        # 5. Canvas 2..N: mid_core + rec_count + 记录 + canvas_tail
+        for i in range(1, page_count):
+            canvas = self._canvases[i]
+
+            # mid_core (51字节, index固定为2, 与原生WSTUDIO格式一致)
+            # 关键: 原生模板中所有mid_core的index字段均为2(经2/3画布模板验证),
+            # 这是"中间页类型标识"而非画布序号
+            mid_core = bytearray(mid_core_tmpl)
+            struct.pack_into('<H', mid_core, 9, 2)   # 固定值2 @offset 9
+            struct.pack_into('<H', mid_core, 19, 2)  # 固定值2 @offset 19
+            result.extend(mid_core)
+
+            # rec_count (4字节, 必须设为0, 与原生WSTUDIO多画布模板一致)
+            # 关键: WSTUDIO在多画布模式下不使用rec_count来读取记录,
+            # 而是通过扫描记录标记直到遇到canvas tail来确定记录范围。
+            # 原生模板中所有mid entry的rec_count均为0, 非零值会导致文件无法打开。
+            result.extend(struct.pack('<I', 0))
+
+            # 此画布的记录
             for rec_type, rec_data in canvas['records']:
                 result.extend(rec_data)
 
-        # 4. 记录区终止符 (23字节, 使用最后画布尺寸)
-        last_canvas = self._canvases[-1]
-        terminator = struct.pack('<8xII5x', last_canvas['canvas_w'], last_canvas['canvas_h'])
-        terminator += b'\x01\x00'
-        result.extend(terminator)
+            # canvas tail (23字节, 使用此画布的尺寸)
+            c_tail = bytearray(canvas_tail_template)
+            struct.pack_into('<I', c_tail, 8, canvas['canvas_w'])
+            struct.pack_into('<I', c_tail, 12, canvas['canvas_h'])
+            result.extend(c_tail)
 
-        # 5. 块尾部: N-1个mid entry + 1个last entry
-        # mid entry: 修改offset 63(画布宽) 和 67(画布高)
-        for i in range(page_count - 1):
-            entry = bytearray(mid_entry_tmpl)
-            canvas = self._canvases[i]
-            struct.pack_into('<I', entry, 63, canvas['canvas_w'])
-            struct.pack_into('<I', entry, 67, canvas['canvas_h'])
-            result.extend(entry)
-
-        # last entry: 直接使用模板, 不修改任何字段
+        # 6. Last entry (97字节, 直接使用模板)
         result.extend(last_entry_tmpl)
 
-        # 6. 文件大小 + FFFF
+        # 7. 文件大小 + FFFF
         file_size = len(result) + 8
         result.extend(struct.pack('<I', file_size))
         result.extend(b'\xff\xff\xff\xff')

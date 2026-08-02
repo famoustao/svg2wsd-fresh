@@ -829,7 +829,13 @@ def export_wsd_single(canvas_data: CanvasData,
     w_wsd, h_wsd = _get_canvas_size_wsd(canvas_size_mm)
     builder.set_canvas_size(int(w_wsd), int(h_wsd))
 
-    # 构建路径记录（坐标变换后）
+    # 构建路径记录和文字记录（坐标变换后）
+    # 将文字记录与最近的路径记录关联，按 path→text*→path→text* 顺序输出
+    import math as _math
+
+    path_recs = []   # [(record_bytes, cx, cy)]
+    text_recs = []   # [(record_bytes, ax, ay)]
+
     for shape in canvas_data.shapes:
         # 坐标变换
         transformed = _transform_shape(shape, scale, offset_x, offset_y)
@@ -845,19 +851,50 @@ def export_wsd_single(canvas_data: CanvasData,
             circle_color_bgra = _bgr_to_bgra_bytes(transformed.line_color, alpha=line_alpha)
             rec = build_circle_record(cx, cy, radius, linewidth=linewidth,
                                       line_color_bgra=circle_color_bgra)
-            builder.add_circle(rec)
+            path_recs.append((rec, float(cx), float(cy)))
         else:
             rec = _shape_to_path_record(transformed, linewidth=linewidth, line_alpha=line_alpha)
             if rec is not None:
-                builder.add_path(rec)
+                if transformed.points:
+                    pcx = sum(p[0] for p in transformed.points) / len(transformed.points)
+                    pcy = sum(p[1] for p in transformed.points) / len(transformed.points)
+                else:
+                    pcx, pcy = 0.0, 0.0
+                path_recs.append((rec, pcx, pcy))
 
-    # 构建文字记录（坐标变换后）
     for annotation in canvas_data.annotations:
         # 坐标变换
         transformed = _transform_annotation(annotation, scale, offset_x, offset_y)
         rec = _annotation_to_text_record(transformed)
         if rec is not None:
-            builder.add_text(rec)
+            text_recs.append((rec, transformed.x, transformed.y))
+
+    # 将每个文字记录分配到最近的路径记录
+    text_groups = {}  # path_index -> [text_indices]
+    assigned = set()
+    for ti, (_, tx, ty) in enumerate(text_recs):
+        if not path_recs:
+            break
+        min_dist = float('inf')
+        nearest_pi = 0
+        for pi, (_, pcx, pcy) in enumerate(path_recs):
+            dist = _math.sqrt((tx - pcx) ** 2 + (ty - pcy) ** 2)
+            if dist < min_dist:
+                min_dist = dist
+                nearest_pi = pi
+        text_groups.setdefault(nearest_pi, []).append(ti)
+        assigned.add(ti)
+
+    # 按 path→text*→path→text* 顺序添加记录
+    for pi, (prec, _, _) in enumerate(path_recs):
+        builder.add_path(prec)
+        for ti in text_groups.get(pi, []):
+            builder.add_text(text_recs[ti][0])
+
+    # 添加未分配的文字记录（无路径时）
+    for ti, (trec, _, _) in enumerate(text_recs):
+        if ti not in assigned:
+            builder.add_text(trec)
 
     # 构建 WSD 文件
     wsd_data = builder.build()
@@ -918,15 +955,17 @@ def export_wsd_multi(canvas_list: List[CanvasData],
             b = int(h[4:6], 16)
             override_bgr = (b, g, r)
 
-    # 导入多画布构建器（纯二进制构建，无需外部模板文件）
-    from multi_canvas_builder import MultiCanvasWSDBuilder
+    # 导入多画布构建器（使用wsd_pure_builder中的正确构建器）
+    from wsd_pure_builder import MultiCanvasWSDBuilder as WSBMultiBuilder
 
-    builder = MultiCanvasWSDBuilder()
+    builder = WSBMultiBuilder()
 
     # 计算画布尺寸（WSD单位）
     w_wsd, h_wsd = _get_canvas_size_wsd(canvas_size_mm)
     canvas_width = int(w_wsd)
     canvas_height = int(h_wsd)
+
+    builder.set_default_canvas_size(canvas_width, canvas_height)
 
     # 为每个画布构建记录列表
     canvas_records = []
@@ -954,9 +993,12 @@ def export_wsd_multi(canvas_list: List[CanvasData],
         else:
             scale, offset_x, offset_y = _fit_canvas_to_wsd(canvas_data, canvas_size_mm)
 
-        records = []
+        # 构建路径记录和文字记录（交错排列：path→text*→path→text*）
+        import math as _math
 
-        # 构建路径记录
+        path_recs = []   # [(record_bytes, cx, cy)]
+        text_recs = []   # [(record_bytes, ax, ay)]
+
         for shape in canvas_data.shapes:
             transformed = _transform_shape(shape, scale, offset_x, offset_y)
             if override_bgr is not None:
@@ -968,23 +1010,68 @@ def export_wsd_multi(canvas_list: List[CanvasData],
                 circle_color_bgra = _bgr_to_bgra_bytes(transformed.line_color, alpha=line_alpha)
                 rec = build_circle_record(cx, cy, radius, linewidth=linewidth,
                                           line_color_bgra=circle_color_bgra)
-                records.append(rec)
+                path_recs.append((rec, float(cx), float(cy)))
             else:
                 rec = _shape_to_path_record(transformed, linewidth=linewidth, line_alpha=line_alpha)
                 if rec is not None:
-                    records.append(rec)
+                    if transformed.points:
+                        pcx = sum(p[0] for p in transformed.points) / len(transformed.points)
+                        pcy = sum(p[1] for p in transformed.points) / len(transformed.points)
+                    else:
+                        pcx, pcy = 0.0, 0.0
+                    path_recs.append((rec, pcx, pcy))
 
-        # 构建文字记录
         for annotation in canvas_data.annotations:
             transformed = _transform_annotation(annotation, scale, offset_x, offset_y)
             rec = _annotation_to_text_record(transformed)
             if rec is not None:
-                records.append(rec)
+                text_recs.append((rec, transformed.x, transformed.y))
+
+        # 将每个文字记录分配到最近的路径记录
+        text_groups = {}
+        assigned = set()
+        for ti, (_, tx, ty) in enumerate(text_recs):
+            if not path_recs:
+                break
+            min_dist = float('inf')
+            nearest_pi = 0
+            for pi, (_, pcx, pcy) in enumerate(path_recs):
+                dist = _math.sqrt((tx - pcx) ** 2 + (ty - pcy) ** 2)
+                if dist < min_dist:
+                    min_dist = dist
+                    nearest_pi = pi
+            text_groups.setdefault(nearest_pi, []).append(ti)
+            assigned.add(ti)
+
+        # 按 path→text*→path→text* 顺序构建记录列表
+        records = []
+        for pi, (prec, _, _) in enumerate(path_recs):
+            records.append(prec)
+            for ti in text_groups.get(pi, []):
+                records.append(text_recs[ti][0])
+        for ti, (trec, _, _) in enumerate(text_recs):
+            if ti not in assigned:
+                records.append(trec)
 
         canvas_records.append(records)
 
-    # 构建 WSD 文件（纯二进制构建，确保画布尺寸统一）
-    wsd_data = builder.build(canvas_records, canvas_width, canvas_height)
+    # 使用正确的MultiCanvasWSDBuilder构建WSD文件
+    for records in canvas_records:
+        canvas_idx = builder.add_canvas()
+        for rec in records:
+            # 根据记录tag判断类型
+            if len(rec) >= 2:
+                tag = rec[0] | (rec[1] << 8)
+                if tag == 0x330f:
+                    builder.add_path(rec, canvas_idx)
+                elif tag == 0x3109:
+                    builder.add_text(rec, canvas_idx)
+                else:
+                    builder.add_path(rec, canvas_idx)
+            else:
+                builder.add_path(rec, canvas_idx)
+
+    wsd_data = builder.build()
 
     # 确保输出目录存在
     out_dir = os.path.dirname(output_path)
@@ -1250,18 +1337,708 @@ def export_svg(canvas_data: CanvasData, output_path: str,
 
 def export_latex(canvas_data: CanvasData, output_path: str) -> None:
     """
-    导出为 LaTeX/TikZ 格式（预留接口）
+    导出为 LaTeX/TikZ 格式
+
+    将 CanvasData 中的形状和标注转换为 TikZ 代码，包装为完整 LaTeX 文档。
 
     参数:
         canvas_data: CanvasData 画布数据
         output_path: 输出 LaTeX 文件路径
-
-    TODO:
-        - 实现 Shape 到 TikZ 命令的转换
-        - 实现文字标注到 TikZ node 的转换
-        - 支持坐标系映射
     """
-    raise NotImplementedError("LaTeX 导出功能尚未实现")
+    _ensure_wsb_loaded()
+
+    from tikz_utils import shapes_to_tikz, wrap_tikz_in_tex
+
+    # 将 Shape 列表转换为 TikZ 代码
+    tikz_lines = shapes_to_tikz(canvas_data.shapes)
+
+    # 添加标注为 TikZ node
+    for ann in canvas_data.annotations:
+        # WSD Y 向下，TikZ Y 向上，翻转 Y
+        y_tikz = -ann.y
+        anchor = 'above'
+        if ann.assoc_type in (0, 1, 2):  # 上方区域
+            anchor = 'below'
+        elif ann.assoc_type in (3, 4, 5):  # 中间区域
+            anchor = 'left'
+        elif ann.assoc_type in (6, 7, 8):  # 下方区域
+            anchor = 'above'
+
+        text = ann.text
+        if ann.superscript:
+            text = f'{text}$^{{{ann.text}}}$'
+        elif ann.subscript:
+            text = f'{text}$_{{{ann.text}}}$'
+
+        tikz_lines.append(
+            f'  \\node[{anchor}] at ({ann.x:.4f}, {y_tikz:.4f}) '
+            f'{{${text}$}};'
+        )
+
+    tikz_code = '\\begin{tikzpicture}\n' + '\n'.join(tikz_lines) + '\n\\end{tikzpicture}'
+    latex_doc = wrap_tikz_in_tex(tikz_code)
+
+    with open(output_path, 'w', encoding='utf-8') as f:
+        f.write(latex_doc)
+
+
+# ============================================================
+# LaTeX/TikZ → WSD 便捷转换接口
+# ============================================================
+
+def _split_shapes_by_connectivity(shapes, annotations, tolerance=0.15):
+    """
+    根据空间连通性将形状分组为独立图形
+
+    两个形状"连通"的条件：
+    - 共享端点（距离 < tolerance）
+    - 圆心在另一个形状的线上
+
+    标注分配给距离最近的形状组。
+
+    参数:
+        shapes: Shape列表
+        annotations: TextAnnotation列表
+        tolerance: 连通判定阈值（cm单位）
+
+    返回:
+        List[Tuple[shapes, annotations]]: 每组独立图形的形状和标注
+    """
+    import math
+
+    if not shapes:
+        return [([], annotations)]
+
+    n = len(shapes)
+
+    # 提取每个形状的关键点集
+    def get_key_points(shape):
+        pts = []
+        if shape.type == ShapeType.CIRCLE:
+            cx, cy = shape.points[0]
+            r = shape.extra.get('radius', 0)
+            pts.append((cx, cy))
+            pts.append((cx + r, cy))
+            pts.append((cx - r, cy))
+            pts.append((cx, cy + r))
+            pts.append((cx, cy - r))
+        else:
+            pts.extend(shape.points)
+        return pts
+
+    shape_points = [get_key_points(s) for s in shapes]
+
+    # Union-Find
+    parent = list(range(n))
+
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def union(x, y):
+        px, py = find(x), find(y)
+        if px != py:
+            parent[px] = py
+
+    # 检查两组点是否有近距离点对
+    def points_close(pts1, pts2, tol):
+        for p1 in pts1:
+            for p2 in pts2:
+                if abs(p1[0] - p2[0]) < tol and abs(p1[1] - p2[1]) < tol:
+                    return True
+        return False
+
+    # 构建连通关系
+    for i in range(n):
+        for j in range(i + 1, n):
+            if points_close(shape_points[i], shape_points[j], tolerance):
+                union(i, j)
+
+    # 收集连通分量
+    groups = {}
+    for i in range(n):
+        root = find(i)
+        if root not in groups:
+            groups[root] = []
+        groups[root].append(i)
+
+    # 为每组分配标注
+    result = []
+    for group_indices in groups.values():
+        group_shapes = [shapes[i] for i in group_indices]
+
+        # 计算这组形状的bbox
+        gx_min, gy_min = float('inf'), float('inf')
+        gx_max, gy_max = float('-inf'), float('-inf')
+        for s in group_shapes:
+            pts = get_key_points(s)
+            for px, py in pts:
+                gx_min = min(gx_min, px)
+                gy_min = min(gy_min, py)
+                gx_max = max(gx_max, px)
+                gy_max = max(gy_max, py)
+
+        # 分配标注：在组的bbox内或距离最近的
+        group_annotations = []
+        remaining_annotations = []
+
+        for ann in annotations:
+            # 检查标注是否在这组形状的bbox附近
+            if gx_min - tolerance <= ann.x <= gx_max + tolerance and \
+               gy_min - tolerance <= ann.y <= gy_max + tolerance:
+                group_annotations.append(ann)
+            else:
+                remaining_annotations.append(ann)
+
+        annotations = remaining_annotations
+        result.append((group_shapes, group_annotations))
+
+    # 未分配的标注加入最后一组
+    if result and annotations:
+        last_shapes, last_anns = result[-1]
+        last_anns.extend(annotations)
+        result[-1] = (last_shapes, last_anns)
+
+    return result
+
+
+def latex_code_to_wsd(latex_code: str,
+                      output_path: str,
+                      canvas_size_mm: Optional[Tuple[float, float]] = None,
+                      linewidth: int = 80,
+                      multi_canvas: bool = True,
+                      split_disconnected: bool = True,
+                      font_style: str = 'italic') -> int:
+    """
+    将 LaTeX/TikZ 代码直接转换为 WSD 文件
+
+    自动检测 tikzpicture 环境数量：
+    - 单个环境 → 检测独立图形，智能分配到不同画布
+    - 多个环境 → 每个环境对应一个画布
+
+    参数:
+        latex_code: LaTeX/TikZ 代码字符串（可以是完整文档或纯 tikzpicture 代码）
+        output_path: 输出 WSD 文件路径
+        canvas_size_mm: 画布尺寸 (宽mm, 高mm)，None=默认正方形(140x140)
+        linewidth: 线宽（WSD单位），默认 80
+        multi_canvas: 多个图形时是否生成多画布，False则全部合并为单画布
+        split_disconnected: 是否在单个tikzpicture内自动分离不连通的图形到不同画布
+        font_style: 字体样式 ('italic' 或 'upright')
+
+    返回:
+        int: 生成的画布数量
+    """
+    from tikz_utils import extract_tikz_from_tex, parse_tikz_code, \
+        extract_tikz_nodes, extract_coordinate_labels, extract_named_coordinates
+    from core.vertex_labeler import compute_smart_label_offset
+
+    if canvas_size_mm is None:
+        canvas_size_mm = (DEFAULT_CANVAS_WIDTH_MM, DEFAULT_CANVAS_HEIGHT_MM)
+
+    # 提取 tikzpicture 环境
+    tikz_blocks = extract_tikz_from_tex(latex_code)
+
+    # 如果没有 tikzpicture 环境，尝试当作纯 TikZ 代码解析
+    if not tikz_blocks:
+        tikz_blocks = [latex_code]
+
+    canvas_list = []
+
+    for tikz_code in tikz_blocks:
+        shapes = []
+        annotations = []
+        all_x = []
+        all_y = []
+
+        # 解析路径
+        tikz_paths = parse_tikz_code(tikz_code)
+        block_shapes = _convert_tikz_shapes_inline(tikz_paths)
+        shapes.extend(block_shapes)
+
+        # 提取节点标注
+        tikz_nodes = extract_tikz_nodes(tikz_code)
+        block_annotations = _convert_tikz_annotations_inline(tikz_nodes)
+        annotations.extend(block_annotations)
+
+        # 提取内联节点标注（draw命令中的 node[...]{...}）
+        inline_annotations = _convert_inline_nodes_inline(tikz_paths)
+        annotations.extend(inline_annotations)
+
+        # 提取 \coordinate[label=...] 标注
+        coord_labels = extract_coordinate_labels(tikz_code)
+        if coord_labels:
+            named_coords = extract_named_coordinates(tikz_code)
+
+            # TikZ锚点 → WSD 9宫格区域映射
+            _TIKZ_ANCHOR_MAP = {
+                'above':         (1, 0x94, 0.5, 1.0),           # DIR_TOP<<4|4
+                'below':         (7, 0xD4, 0.5, 1.0),           # DIR_BOTTOM<<4|4
+                'left':          (3, 0x64, 1.0, 0.4),           # DIR_LEFT<<4|4
+                'right':         (5, 0x74, 1.0, 0.4),           # DIR_RIGHT<<4|4
+                'above left':    (0, 0xA4, 1.0, 1.0),           # DIR_TOP_LEFT<<4|4
+                'above right':   (2, 0xB4, 1.0, 1.0),           # DIR_TOP_RIGHT<<4|4
+                'below left':    (6, 0xE4, 1.0, 1.0),           # DIR_BOTTOM_LEFT<<4|4
+                'below right':   (8, 0xF4, 1.0, 1.0),           # DIR_BOTTOM_RIGHT<<4|4
+            }
+
+            for coord_name, label_info in coord_labels.items():
+                if coord_name in named_coords:
+                    cx, cy = named_coords[coord_name]
+                    label_text, direction = label_info
+
+                    if direction and direction in _TIKZ_ANCHOR_MAP:
+                        assoc_type, assoc_dir, f1, f2 = _TIKZ_ANCHOR_MAP[direction]
+                    else:
+                        assoc_type, assoc_dir, f1, f2 = 4, 0x54, 0.5, 0.06
+
+                    annotations.append(TextAnnotation(
+                        text=label_text,
+                        x=cx, y=cy,
+                        font_size=14.0,
+                        bold=True,
+                        associated=True,
+                        assoc_type=assoc_type,
+                        assoc_f1=f1,
+                        assoc_f2=f2,
+                        assoc_dir=assoc_dir,
+                    ))
+                    all_x.append(cx)
+                    all_y.append(cy)
+
+        # TikZ Y向上 → WSD Y向下，翻转Y轴
+        for s in shapes:
+            s.points = [(x, -y) for (x, y) in s.points]
+        for a in annotations:
+            a.y = -a.y
+
+        # 计算 bbox
+        for s in shapes:
+            if s.type == ShapeType.CIRCLE:
+                cx, cy = s.points[0]
+                r = s.extra.get('radius', 0)
+                all_x.extend([cx - r, cx + r])
+                all_y.extend([cy - r, cy + r])
+            else:
+                for p in s.points:
+                    all_x.append(p[0])
+                    all_y.append(p[1])
+
+        for a in annotations:
+            all_x.append(a.x)
+            all_y.append(a.y)
+
+        if all_x and all_y:
+            bbox = (min(all_x), min(all_y), max(all_x), max(all_y))
+        else:
+            bbox = (0.0, 0.0, 0.0, 0.0)
+
+        # 注意: 不在此处调用compute_smart_label_offset,
+        # 因为TikZ锚点方向(above/below等)已通过assoc参数表达。
+        # 后续export_wsd_single/multi中的apply_smart_offset会自动处理
+        # 无明确方向的标注(通过is_default_offset检查)
+
+        # 智能分离不连通的图形到不同画布
+        if split_disconnected and len(shapes) > 1:
+            shape_groups = _split_shapes_by_connectivity(shapes, annotations)
+        else:
+            shape_groups = [(shapes, annotations)]
+
+        for group_shapes, group_annotations in shape_groups:
+            if not group_shapes:
+                continue
+
+            # 计算每组的bbox
+            gx, gy = [], []
+            for s in group_shapes:
+                if s.type == ShapeType.CIRCLE:
+                    cx, cy = s.points[0]
+                    r = s.extra.get('radius', 0)
+                    gx.extend([cx - r, cx + r])
+                    gy.extend([cy - r, cy + r])
+                else:
+                    for p in s.points:
+                        gx.append(p[0])
+                        gy.append(p[1])
+
+            for a in group_annotations:
+                gx.append(a.x)
+                gy.append(a.y)
+
+            group_bbox = (min(gx), min(gy), max(gx), max(gy)) if gx else (0, 0, 0, 0)
+
+            canvas = CanvasData(
+                shapes=group_shapes,
+                annotations=group_annotations,
+                bbox=group_bbox,
+            )
+            canvas_list.append(canvas)
+
+    if not canvas_list:
+        raise ValueError("未能从LaTeX代码中解析出任何图形")
+
+    # 合并模式：将所有图形放入一个画布
+    # 注意: split_disconnected=True时, 不合并已分离的图形,
+    # 即使multi_canvas=False也保持多画布输出
+    if not multi_canvas and not split_disconnected:
+        merged = CanvasData(
+            shapes=[],
+            annotations=[],
+            bbox=(0, 0, 0, 0),
+        )
+        for c in canvas_list:
+            merged.shapes.extend(c.shapes)
+            merged.annotations.extend(c.annotations)
+        canvas_list = [merged]
+
+    # 根据画布数量选择导出方式
+    if len(canvas_list) == 1:
+        export_wsd_single(
+            canvas_data=canvas_list[0],
+            output_path=output_path,
+            canvas_size_mm=canvas_size_mm,
+            linewidth=linewidth,
+            font_style=font_style,
+        )
+    else:
+        export_wsd_multi(
+            canvas_list=canvas_list,
+            output_path=output_path,
+            canvas_size_mm=canvas_size_mm,
+            linewidth=linewidth,
+            font_style=font_style,
+        )
+
+    return len(canvas_list)
+
+
+def latex_file_to_wsd(filepath: str,
+                      output_path: str,
+                      canvas_size_mm: Optional[Tuple[float, float]] = None,
+                      linewidth: int = 80,
+                      multi_canvas: bool = True,
+                      split_disconnected: bool = True,
+                      font_style: str = 'italic') -> int:
+    """
+    将 LaTeX/TikZ 文件转换为 WSD 文件
+
+    参数:
+        filepath: LaTeX 文件路径（.tex 或 .txt）
+        output_path: 输出 WSD 文件路径
+        canvas_size_mm: 画布尺寸 (宽mm, 高mm)
+        linewidth: 线宽（WSD单位）
+        multi_canvas: 多个图形时是否生成多画布
+        split_disconnected: 是否自动分离不连通的图形到不同画布
+        font_style: 字体样式
+
+    返回:
+        int: 生成的画布数量
+    """
+    with open(filepath, 'r', encoding='utf-8') as f:
+        latex_code = f.read()
+
+    return latex_code_to_wsd(
+        latex_code=latex_code,
+        output_path=output_path,
+        canvas_size_mm=canvas_size_mm,
+        linewidth=linewidth,
+        multi_canvas=multi_canvas,
+        split_disconnected=split_disconnected,
+        font_style=font_style,
+    )
+
+
+# ----- 内联转换辅助函数（避免循环导入 importer） -----
+
+def _convert_tikz_shapes_inline(tikz_paths) -> list:
+    """将TikZPath列表转换为Shape列表（内联版本）"""
+    import math
+
+    shapes = []
+
+    for tpath in tikz_paths:
+        stroke_r, stroke_g, stroke_b = tpath.draw_color
+        line_color_bgr = (int(stroke_b * 255), int(stroke_g * 255), int(stroke_r * 255))
+
+        if tpath.fill and tpath.fill_color != (1, 1, 1):
+            fill_r, fill_g, fill_b = tpath.fill_color
+            fill_color_bgr = (int(fill_b * 255), int(fill_g * 255), int(fill_r * 255))
+        else:
+            fill_color_bgr = None
+
+        line_width = tpath.line_width
+
+        for subpath in tpath.subpaths:
+            if not subpath:
+                continue
+
+            points = []
+            has_curve = False
+            has_close = False
+            curve_points = []
+            move_point = None
+
+            for op, data in subpath:
+                if op == 'move':
+                    move_point = data
+                    points.append(data)
+                elif op == 'line':
+                    points.append(data)
+                elif op == 'curve':
+                    has_curve = True
+                    curve_points.append(data)
+                elif op == 'close':
+                    has_close = True
+
+            if not points and not curve_points:
+                continue
+
+            # 圆形近似检测
+            is_circle_approx = False
+            circle_center = None
+            circle_radius = 0.0
+
+            if not has_curve and has_close and len(points) >= 24:
+                import math
+                n = len(points)
+                cand_points = points[1:] if n > 1 else points
+                nc = len(cand_points)
+
+                if nc >= 12:
+                    max_d2 = 0
+                    p1_best, p2_best = cand_points[0], cand_points[0]
+                    step = max(1, nc // 12)
+                    for i in range(0, nc, step):
+                        for j in range(i + step, nc, step):
+                            d2 = (cand_points[i][0] - cand_points[j][0])**2 + \
+                                 (cand_points[i][1] - cand_points[j][1])**2
+                            if d2 > max_d2:
+                                max_d2 = d2
+                                p1_best, p2_best = cand_points[i], cand_points[j]
+
+                    cx = (p1_best[0] + p2_best[0]) / 2
+                    cy = (p1_best[1] + p2_best[1]) / 2
+                    distances = [math.sqrt((p[0] - cx)**2 + (p[1] - cy)**2) for p in cand_points]
+                    distances.sort()
+                    avg_r = distances[len(distances) // 2]
+
+                    if avg_r > 0:
+                        max_dev = max(abs(d - avg_r) for d in distances)
+                        if max_dev / avg_r < 0.05:
+                            is_circle_approx = True
+                            if n > 1:
+                                d0 = math.sqrt((points[0][0] - cx)**2 + (points[0][1] - cy)**2)
+                                circle_center = points[0] if d0 < avg_r * 0.15 else (cx, cy)
+                            else:
+                                circle_center = (cx, cy)
+                            circle_radius = avg_r
+
+            if is_circle_approx:
+                shapes.append(Shape(
+                    type=ShapeType.CIRCLE,
+                    points=[circle_center],
+                    line_color=line_color_bgr,
+                    fill_color=fill_color_bgr,
+                    line_width=line_width,
+                    extra={'radius': circle_radius}
+                ))
+            elif has_curve:
+                bezier_pts = []
+                if move_point:
+                    bezier_pts.append(move_point)
+                for p in points[1:]:
+                    bezier_pts.append(p)
+                for cp in curve_points:
+                    bezier_pts.append((cp[0], cp[1]))
+                    bezier_pts.append((cp[2], cp[3]))
+                    bezier_pts.append((cp[4], cp[5]))
+                if len(bezier_pts) >= 2:
+                    shape_extra = {'closed': True} if has_close else {}
+                    shapes.append(Shape(
+                        type=ShapeType.BEZIER,
+                        points=bezier_pts,
+                        line_color=line_color_bgr,
+                        fill_color=fill_color_bgr if has_close else None,
+                        line_width=line_width,
+                        extra=shape_extra
+                    ))
+            elif has_close:
+                n = len(points)
+                if n == 3:
+                    shapes.append(Shape(type=ShapeType.TRIANGLE, points=points,
+                                        line_color=line_color_bgr, fill_color=fill_color_bgr,
+                                        line_width=line_width))
+                elif n == 4:
+                    shapes.append(Shape(type=ShapeType.RECTANGLE, points=points,
+                                        line_color=line_color_bgr, fill_color=fill_color_bgr,
+                                        line_width=line_width))
+                elif n > 4:
+                    shapes.append(Shape(type=ShapeType.POLYGON, points=points,
+                                        line_color=line_color_bgr, fill_color=fill_color_bgr,
+                                        line_width=line_width))
+                elif n == 2:
+                    shapes.append(Shape(type=ShapeType.LINE, points=points,
+                                        line_color=line_color_bgr, fill_color=fill_color_bgr,
+                                        line_width=line_width))
+            else:
+                n = len(points)
+                if n == 2:
+                    shapes.append(Shape(type=ShapeType.LINE, points=points,
+                                        line_color=line_color_bgr, fill_color=fill_color_bgr,
+                                        line_width=line_width))
+                elif n > 2:
+                    shapes.append(Shape(type=ShapeType.POLYLINE, points=points,
+                                        line_color=line_color_bgr, fill_color=fill_color_bgr,
+                                        line_width=line_width))
+
+    return shapes
+
+
+def _convert_tikz_annotations_inline(tikz_nodes) -> list:
+    """将TikZ节点列表转换为TextAnnotation列表（内联版本）
+
+    关键: 锚点坐标直接使用node.x/node.y（与端点重合），
+    TikZ的above/below/left/right通过WSD关联参数(assoc_type/assoc_dir/f1/f2)表达，
+    而非坐标位移。
+    """
+    # TikZ锚点 → WSD 9宫格区域映射
+    # 注意: Y轴翻转后，TikZ的"above"在WSD中仍是"上方"(REGION_TOP)
+    _TIKZ_ANCHOR_MAP = {
+        'above':         (1, 0x94, 0.5, 1.0),           # DIR_TOP<<4|4
+        'below':         (7, 0xD4, 0.5, 1.0),           # DIR_BOTTOM<<4|4
+        'left':          (3, 0x64, 1.0, 0.4),           # DIR_LEFT<<4|4
+        'right':         (5, 0x74, 1.0, 0.4),           # DIR_RIGHT<<4|4
+        'above left':    (0, 0xA4, 1.0, 1.0),           # DIR_TOP_LEFT<<4|4
+        'above right':   (2, 0xB4, 1.0, 1.0),           # DIR_TOP_RIGHT<<4|4
+        'below left':    (6, 0xE4, 1.0, 1.0),           # DIR_BOTTOM_LEFT<<4|4
+        'below right':   (8, 0xF4, 1.0, 1.0),           # DIR_BOTTOM_RIGHT<<4|4
+    }
+
+    annotations = []
+    for node in tikz_nodes:
+        opts = node.options if hasattr(node, 'options') else {}
+
+        # 查找TikZ锚点方向
+        tikz_anchor = None
+        for key in opts:
+            key_lower = key.lower()
+            if key_lower in _TIKZ_ANCHOR_MAP:
+                tikz_anchor = _TIKZ_ANCHOR_MAP[key_lower]
+                break
+
+        # 构建文字内容: 去掉下划线/脱字符, 用base+sub/sup拼接
+        # WSD下标/上标格式: 文字区存储 base+sub (或 base+sup), 不含下划线
+        has_sup = node.has_superscript if hasattr(node, 'has_superscript') else False
+        has_sub = node.has_subscript if hasattr(node, 'has_subscript') else False
+        base_text = node.base_text if hasattr(node, 'base_text') and node.base_text else node.text
+        sup_text = node.superscript if hasattr(node, 'superscript') else ''
+        sub_text = node.subscript if hasattr(node, 'subscript') else ''
+
+        if has_sub and has_sup:
+            text = base_text + sup_text + sub_text
+        elif has_sub:
+            text = base_text + sub_text
+        elif has_sup:
+            text = base_text + sup_text
+        else:
+            text = node.text
+
+        superscript = bool(sup_text) if has_sup else False
+        subscript = bool(sub_text) if has_sub else False
+
+        if tikz_anchor:
+            # 有明确TikZ锚点方向: 锚点=端点坐标, 方向通过assoc参数表达
+            assoc_type, assoc_dir, f1, f2 = tikz_anchor
+        else:
+            # 无明确方向: 使用默认中心值, 后续apply_smart_offset会智能计算
+            assoc_type, assoc_dir, f1, f2 = 4, 0x54, 0.5, 0.06081081
+
+        annotations.append(TextAnnotation(
+            text=text,
+            x=node.x,           # 锚点直接使用端点坐标, 不偏移
+            y=node.y,
+            font_size=14.0,
+            bold=True,
+            associated=True,
+            assoc_type=assoc_type,
+            assoc_f1=f1,
+            assoc_f2=f2,
+            assoc_dir=assoc_dir,
+            superscript=superscript,
+            subscript=subscript,
+        ))
+
+    return annotations
+
+
+def _convert_inline_nodes_inline(tikz_paths) -> list:
+    """将TikZPath中的内联节点转换为TextAnnotation列表
+
+    处理 \draw ... node[options]{content}; 中的内联节点
+    """
+    from tikz_utils import _parse_node_text
+
+    _TIKZ_ANCHOR_MAP = {
+        'above':         (1, 0x94, 0.5, 1.0),           # DIR_TOP<<4|4
+        'below':         (7, 0xD4, 0.5, 1.0),           # DIR_BOTTOM<<4|4
+        'left':          (3, 0x64, 1.0, 0.4),           # DIR_LEFT<<4|4
+        'right':         (5, 0x74, 1.0, 0.4),           # DIR_RIGHT<<4|4
+        'above left':    (0, 0xA4, 1.0, 1.0),           # DIR_TOP_LEFT<<4|4
+        'above right':   (2, 0xB4, 1.0, 1.0),           # DIR_TOP_RIGHT<<4|4
+        'below left':    (6, 0xE4, 1.0, 1.0),           # DIR_BOTTOM_LEFT<<4|4
+        'below right':   (8, 0xF4, 1.0, 1.0),           # DIR_BOTTOM_RIGHT<<4|4
+    }
+
+    annotations = []
+    for tpath in tikz_paths:
+        for x, y, raw_text, opts in tpath.inline_nodes:
+            # 清理 LaTeX 数学模式符号
+            text = raw_text.replace('$', '').strip()
+            text = text.replace('\\', '')
+
+            # 查找TikZ锚点方向
+            tikz_anchor = None
+            for key in opts:
+                key_lower = key.lower()
+                if key_lower in _TIKZ_ANCHOR_MAP:
+                    tikz_anchor = _TIKZ_ANCHOR_MAP[key_lower]
+                    break
+
+            # 解析上下标
+            base, sup, sub, has_sup, has_sub = _parse_node_text(text)
+
+            if tikz_anchor:
+                assoc_type, assoc_dir, f1, f2 = tikz_anchor
+            else:
+                assoc_type, assoc_dir, f1, f2 = 4, 0x54, 0.5, 0.06081081
+
+            # 构建文字内容: 去掉下划线/脱字符, 用base+sub/sup拼接
+            # WSD下标/上标格式: 文字区存储 base+sub (或 base+sup), 不含下划线
+            if has_sub and has_sup:
+                display_text = base + sup + sub
+            elif has_sub:
+                display_text = base + sub
+            elif has_sup:
+                display_text = base + sup
+            else:
+                display_text = base
+
+            annotations.append(TextAnnotation(
+                text=display_text,
+                x=x, y=y,
+                font_size=14.0,
+                bold=True,
+                associated=True,
+                assoc_type=assoc_type,
+                assoc_f1=f1,
+                assoc_f2=f2,
+                assoc_dir=assoc_dir,
+                superscript=sup if has_sup else False,
+                subscript=sub if has_sub else False,
+            ))
+
+    return annotations
 
 
 def export_ggb(canvas_data: CanvasData, output_path: str) -> None:

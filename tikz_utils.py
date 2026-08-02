@@ -115,19 +115,264 @@ def _rgb_to_hex(r, g, b):
 
 
 # ============================================================
+# 宏替换 ( \def )
+# ============================================================
+
+def _preprocess_macros(tikz_code):
+    """
+    提取 \\def 定义的宏并替换所有引用
+
+    支持: \\def\\r{1.2}, \\def\\h{1.6}, \\def\\ang{25} 等
+
+    返回: 替换宏后的代码（同时移除 \\def 定义行）
+    """
+    macros = {}
+
+    # 匹配 \def\name{value}
+    for m in re.finditer(r'\\def\\(\w+)\{([^}]*)\}', tikz_code):
+        name = m.group(1)
+        value = m.group(2)
+        macros[name] = value
+
+    if not macros:
+        return tikz_code
+
+    # 先移除 \def 定义行（在替换宏之前，避免 \def 行中的 \name 被替换导致无法匹配）
+    result = re.sub(r'\\def\\\w+\{[^}]*\}[^\n]*', '', tikz_code)
+
+    # 按名称长度降序替换，避免短名称部分匹配长名称
+    for name in sorted(macros.keys(), key=len, reverse=True):
+        value = macros[name]
+        # 替换 \name 后跟非字母字符或行尾
+        result = re.sub(r'\\' + re.escape(name) + r'(?![a-zA-Z])', value, result)
+
+    return result
+
+
+# ============================================================
+# 3D 坐标投影
+# ============================================================
+
+# TikZ 默认 3D 投影参数 (z 轴方向)
+# x=(1cm,0), y=(0,1cm), z=(-3.85mm, 3.85mm) ≈ (-0.385cm, 0.385cm)
+_TIKZ_3D_ZX = -0.385
+_TIKZ_3D_ZY = 0.385
+
+
+def _project_3d_to_2d(x, y, z):
+    """将3D坐标投影到2D屏幕坐标（TikZ默认投影）"""
+    sx = x + z * _TIKZ_3D_ZX
+    sy = y + z * _TIKZ_3D_ZY
+    return (sx, sy)
+
+
+# ============================================================
 # 坐标解析
 # ============================================================
+
+def _parse_calc_expr(expr):
+    """
+    解析TikZ calc库的表达式
+
+    支持:
+      (P1)!ratio!(P2)  - P1到P2的ratio比例处
+      (P1)!(P2)         - P1在P2方向的投影点（简化为P1）
+      (P1)+(offset)     - P1加上偏移量（支持2D/3D偏移）
+
+    P1/P2 可以是命名坐标、(x,y)格式坐标或极坐标(angle:radius)
+    offset 可以是 (dx,dy) 或 (dx,dy,dz)，3D偏移会投影到2D
+
+    参数:
+        expr: 不含外层$的表达式字符串
+
+    返回:
+        (x, y) 元组，失败返回None
+    """
+    # ---- 加法表达式: (P1)+(offset1)+(offset2)... ----
+    if '+' in expr and '!' not in expr:
+        add_parts = []
+        depth = 0
+        current = ''
+        for ch in expr:
+            if ch == '(':
+                depth += 1
+                current += ch
+            elif ch == ')':
+                depth -= 1
+                current += ch
+            elif ch == '+' and depth == 0:
+                add_parts.append(current.strip())
+                current = ''
+            else:
+                current += ch
+        if current.strip():
+            add_parts.append(current.strip())
+
+        if len(add_parts) >= 2:
+            # 第一个是基准点
+            base = _resolve_calc_point(add_parts[0])
+            if base is None:
+                return None
+
+            # 后续是偏移量
+            total_dx, total_dy = 0.0, 0.0
+            for part in add_parts[1:]:
+                offset = _resolve_calc_offset(part)
+                if offset is None:
+                    return None
+                total_dx += offset[0]
+                total_dy += offset[1]
+
+            return (base[0] + total_dx, base[1] + total_dy)
+
+    # ---- 插值表达式: (P1)!ratio!(P2) ----
+    # 按 ! 分割，注意不分割括号内的!
+    parts = []
+    depth = 0
+    current = ''
+    for ch in expr:
+        if ch == '(':
+            depth += 1
+            current += ch
+        elif ch == ')':
+            depth -= 1
+            current += ch
+        elif ch == '!' and depth == 0:
+            parts.append(current.strip())
+            current = ''
+        else:
+            current += ch
+    if current.strip():
+        parts.append(current.strip())
+
+    if len(parts) != 3:
+        return None
+
+    # 解析 P1
+    p1 = _resolve_calc_point(parts[0])
+    if p1 is None:
+        return None
+
+    # 解析 ratio
+    ratio_str = parts[1].strip()
+    try:
+        ratio = float(ratio_str)
+    except ValueError:
+        # 可能是表达式
+        ratio = _eval_tikz_expr(ratio_str)
+        if ratio is None:
+            return None
+
+    # 解析 P2
+    p2 = _resolve_calc_point(parts[2])
+    if p2 is None:
+        return None
+
+    # P = P1 + ratio * (P2 - P1)
+    x = p1[0] + ratio * (p2[0] - p1[0])
+    y = p1[1] + ratio * (p2[1] - p1[1])
+    return (x, y)
+
+
+def _resolve_calc_offset(s):
+    """
+    解析calc表达式中的偏移量
+
+    支持2D偏移 (dx,dy) 和3D偏移 (dx,dy,dz)
+    3D偏移会投影到2D
+
+    参数:
+        s: 偏移量字符串，如 "(1.8,0,0)" 或 "(0,1.2)"
+
+    返回:
+        (dx, dy) 元组，失败返回None
+    """
+    s = s.strip()
+
+    # 获取 tikz scale（偏移量也需要缩放）
+    tikz_scale = getattr(_parse_coord, '_tikz_scale', 1.0)
+
+    if s.startswith('(') and s.endswith(')'):
+        inner = s[1:-1].strip()
+        comps = inner.split(',')
+
+        if len(comps) == 3:
+            # 3D 偏移，投影到 2D
+            dx = _parse_length(comps[0].strip())
+            dy = _parse_length(comps[1].strip())
+            dz = _parse_length(comps[2].strip())
+            if dx is None or dy is None or dz is None:
+                return None
+            px, py = _project_3d_to_2d(dx, dy, dz)
+            # 应用 tikz scale
+            if tikz_scale != 1.0:
+                px *= tikz_scale
+                py *= tikz_scale
+            return (px, py)
+
+        elif len(comps) == 2:
+            # 2D 偏移
+            dx = _parse_length(comps[0].strip())
+            dy = _parse_length(comps[1].strip())
+            if dx is None or dy is None:
+                return None
+            # 应用 tikz scale
+            if tikz_scale != 1.0:
+                dx *= tikz_scale
+                dy *= tikz_scale
+            return (dx, dy)
+
+    # 可能是命名坐标（作为偏移量，取其坐标值）
+    result = _resolve_calc_point(s)
+    if result:
+        return result
+
+    return None
+
+
+def _resolve_calc_point(s):
+    """
+    解析calc表达式中的一个点，可以是命名坐标或(x,y)格式
+
+    参数:
+        s: 点的字符串表示，如 "A" 或 "(1.5, 2.3)"
+
+    返回:
+        (x, y) 元组，失败返回None
+    """
+    s = s.strip()
+
+    # (x, y) 格式
+    if s.startswith('(') and s.endswith(')'):
+        result = _parse_coord(s)
+        if result:
+            return (result[0], result[1])
+        return None
+
+    # 命名坐标
+    if re.match(r'^[a-zA-Z]\w*$', s):
+        if hasattr(_parse_coord, '_named_coords') and _parse_coord._named_coords:
+            pt = _parse_coord._named_coords.get(s)
+            if pt:
+                return (pt[0], pt[1])
+        return None
+
+    return None
+
 
 def _parse_coord(coord_str):
     """
     解析TikZ坐标字符串，返回 (x, y, coord_type)
     coord_type: 'absolute', 'relative', 'relative_plus'
-    
+
     支持格式：
     - (x,y) 绝对坐标
+    - (x,y,z) 3D坐标（投影到2D）
     - ++(x,y) 相对坐标（更新当前点）
     - +(x,y) 相对坐标（不更新当前点）
     - (x_cm, y_cm) 带单位
+    - (angle:radius) 极坐标
+    - $(calc_expr)$ calc库表达式
     """
     coord_str = coord_str.strip()
 
@@ -144,6 +389,16 @@ def _parse_coord(coord_str):
     if coord_str.startswith('(') and coord_str.endswith(')'):
         coord_str = coord_str[1:-1]
 
+    # 获取 tikz scale（提前获取，供极坐标等使用）
+    tikz_scale = getattr(_parse_coord, '_tikz_scale', 1.0)
+
+    # ---- TikZ calc 库语法: $(expr)$ ----
+    if coord_str.startswith('$') and coord_str.endswith('$'):
+        inner = coord_str[1:-1].strip()
+        result = _parse_calc_expr(inner)
+        if result is not None:
+            return (result[0], result[1], coord_type)
+
     # 极坐标: (angle:radius) 或 (angle_deg:radius)
     if ':' in coord_str and ',' not in coord_str:
         parts = coord_str.split(':')
@@ -151,11 +406,13 @@ def _parse_coord(coord_str):
             angle_str = parts[0].strip()
             radius_str = parts[1].strip()
 
-            # 解析角度（默认为度）
-            try:
-                angle_deg = float(angle_str)
-            except ValueError:
-                return None
+            # 解析角度（支持表达式如 360-25）
+            angle_deg = _eval_tikz_expr(angle_str)
+            if angle_deg is None:
+                try:
+                    angle_deg = float(angle_str)
+                except ValueError:
+                    return None
 
             # 解析半径
             radius = _parse_length(radius_str)
@@ -165,23 +422,39 @@ def _parse_coord(coord_str):
             angle_rad = math.radians(angle_deg)
             x = radius * math.cos(angle_rad)
             y = radius * math.sin(angle_rad)
+            # 应用 tikz scale
+            if tikz_scale != 1.0:
+                x *= tikz_scale
+                y *= tikz_scale
             return (x, y, coord_type)
 
     # ---- 命名坐标查找 ----
-    # 检查是否是命名坐标引用（如 "A", "B", "O" 等单个标识符）
     clean = coord_str.strip()
     if re.match(r'^[a-zA-Z]\w*$', clean):
-        # 纯标识符，可能是命名坐标
         if hasattr(_parse_coord, '_named_coords') and _parse_coord._named_coords:
             pt = _parse_coord._named_coords.get(clean)
             if pt:
                 return (pt[0], pt[1], coord_type)
 
-    # 获取 tikz scale（如果有）
-    tikz_scale = getattr(_parse_coord, '_tikz_scale', 1.0)
-
-    # 分割 x, y
+    # 分割坐标分量
     parts = coord_str.split(',')
+
+    # ---- 3D 坐标 (x, y, z) → 投影到 2D ----
+    if len(parts) == 3:
+        x = _parse_length(parts[0].strip())
+        y = _parse_length(parts[1].strip())
+        z = _parse_length(parts[2].strip())
+        if x is None or y is None or z is None:
+            return None
+        # 投影到 2D
+        px, py = _project_3d_to_2d(x, y, z)
+        # 应用 tikz scale
+        if tikz_scale != 1.0:
+            px *= tikz_scale
+            py *= tikz_scale
+        return (px, py, coord_type)
+
+    # ---- 2D 坐标 (x, y) ----
     if len(parts) != 2:
         return None
 
@@ -199,12 +472,79 @@ def _parse_coord(coord_str):
     return (x, y, coord_type)
 
 
+def _eval_tikz_expr(expr_str):
+    """
+    求值TikZ数学表达式，如 2*cos(120), 2*sin(60), sqrt(3), pi/2 等
+
+    支持的函数: cos, sin, tan, sqrt, abs, min, max, pow, exp, log
+    支持的常量: pi, e
+    角度单位: 度（与TikZ一致）
+
+    参数:
+        expr_str: 表达式字符串（不含外层花括号）
+
+    返回:
+        float: 求值结果，失败返回None
+    """
+    if not expr_str:
+        return None
+
+    expr = expr_str.strip()
+
+    # 将TikZ函数名替换为Python等价物
+    # cos/sin/tan在TikZ中使用度，需转换为弧度
+    import math as _m
+
+    # 安全的求值环境
+    safe_globals = {
+        '__builtins__': {},
+        'pi': _m.pi,
+        'e': _m.e,
+        'cos': lambda x: _m.cos(_m.radians(x)),
+        'sin': lambda x: _m.sin(_m.radians(x)),
+        'tan': lambda x: _m.tan(_m.radians(x)),
+        'acos': lambda x: _m.degrees(_m.acos(x)),
+        'asin': lambda x: _m.degrees(_m.asin(x)),
+        'atan': lambda x: _m.degrees(_m.atan(x)),
+        'sqrt': _m.sqrt,
+        'abs': abs,
+        'min': min,
+        'max': max,
+        'pow': pow,
+        'exp': _m.exp,
+        'log': _m.log,
+        'ln': _m.log,
+        'log10': _m.log10,
+        'floor': _m.floor,
+        'ceil': _m.ceil,
+        'round': round,
+    }
+
+    try:
+        return float(eval(expr, safe_globals, {}))
+    except Exception:
+        return None
+
+
 def _parse_length(len_str):
     """解析长度字符串，返回以cm为单位的数值"""
     if len_str is None:
         return None
 
     len_str = len_str.strip()
+
+    # TikZ表达式: {expr} 或直接含 cos/sin 等
+    if len_str.startswith('{') and len_str.endswith('}'):
+        inner = len_str[1:-1].strip()
+        result = _eval_tikz_expr(inner)
+        if result is not None:
+            return result
+
+    # 含数学函数的表达式（无花括号）
+    if any(fn in len_str for fn in ('cos', 'sin', 'tan', 'sqrt', 'pi')):
+        result = _eval_tikz_expr(len_str)
+        if result is not None:
+            return result
 
     # 纯数字（默认cm）
     try:
@@ -340,6 +680,7 @@ class TikZPath:
         self.fill_color = (1, 1, 1)  # 填充颜色 (r,g,b) 0-1
         self.line_width = 0.04   # 线宽 cm（默认0.4pt ≈ 0.014cm，这里用0.04cm约1px级别）
         self.options = {}        # 原始选项
+        self.inline_nodes = []   # 内联节点 [(x, y, text, options), ...]
 
 
 def _parse_path_body(body_str, options):
@@ -488,6 +829,10 @@ def _parse_path_body(body_str, options):
                     i += 1
                 r_str = remaining[rp_start+1:i]
                 r = _parse_length(r_str.strip())
+                # 应用 tikz scale 到半径
+                tikz_scale = getattr(_parse_coord, '_tikz_scale', 1.0)
+                if r is not None:
+                    r *= tikz_scale
                 if r is not None:
                     cx, cy = current_x, current_y
                     _add_circle_to_subpath(current_subpath, cx, cy, r)
@@ -509,6 +854,10 @@ def _parse_path_body(body_str, options):
                 opt_part = remaining[rb_start+1:i]
                 opts = _parse_options(opt_part)
                 r = _parse_length(opts.get('radius', '0'))
+                # 应用 tikz scale 到半径
+                tikz_scale = getattr(_parse_coord, '_tikz_scale', 1.0)
+                if r is not None:
+                    r *= tikz_scale
                 if r is not None and r > 0:
                     cx, cy = current_x, current_y
                     _add_circle_to_subpath(current_subpath, cx, cy, r)
@@ -519,7 +868,7 @@ def _parse_path_body(body_str, options):
         m = re.match(r'arc\s*(\[|\()', remaining)
         if m and not matched:
             if remaining[m.end()-1] == '(':
-                # arc (start:end:r) 旧格式
+                # arc (start:end:r) 或 arc (start:end:rx and ry) 旧格式
                 ap_start = m.end() - 1
                 depth = 0
                 i = ap_start
@@ -534,20 +883,59 @@ def _parse_path_body(body_str, options):
                 arc_str = remaining[ap_start+1:i]
                 parts = arc_str.split(':')
                 if len(parts) == 3:
-                    start_deg = float(parts[0])
-                    end_deg = float(parts[1])
-                    r = _parse_length(parts[2].strip())
-                    if r is not None:
-                        cx = current_x - r * math.cos(math.radians(start_deg))
-                        cy = current_y - r * math.sin(math.radians(start_deg))
-                        _add_arc_to_subpath(current_subpath, cx, cy, r, start_deg, end_deg)
-                        # 更新当前点到弧终点
-                        current_x = cx + r * math.cos(math.radians(end_deg))
-                        current_y = cy + r * math.sin(math.radians(end_deg))
-                        remaining = remaining[i+1:]
-                        matched = True
+                    # 解析起始/终止角度（支持表达式如 360-25）
+                    start_deg = _eval_tikz_expr(parts[0].strip())
+                    if start_deg is None:
+                        try:
+                            start_deg = float(parts[0].strip())
+                        except ValueError:
+                            start_deg = 0.0
+
+                    end_deg = _eval_tikz_expr(parts[1].strip())
+                    if end_deg is None:
+                        try:
+                            end_deg = float(parts[1].strip())
+                        except ValueError:
+                            end_deg = 0.0
+
+                    # 解析半径：支持 "r" 或 "rx and ry"（椭圆弧）
+                    radius_str = parts[2].strip()
+                    tikz_scale = getattr(_parse_coord, '_tikz_scale', 1.0)
+
+                    if ' and ' in radius_str:
+                        # 椭圆弧: rx and ry
+                        rx_str, ry_str = radius_str.split(' and ', 1)
+                        rx = _parse_length(rx_str.strip())
+                        ry = _parse_length(ry_str.strip())
+                        if rx is not None:
+                            rx *= tikz_scale
+                        if ry is not None:
+                            ry *= tikz_scale
+                        if rx is not None and ry is not None and rx > 0 and ry > 0:
+                            cx = current_x - rx * math.cos(math.radians(start_deg))
+                            cy = current_y - ry * math.sin(math.radians(start_deg))
+                            _add_elliptical_arc_to_subpath(
+                                current_subpath, cx, cy, rx, ry, start_deg, end_deg)
+                            current_x = cx + rx * math.cos(math.radians(end_deg))
+                            current_y = cy + ry * math.sin(math.radians(end_deg))
+                            remaining = remaining[i+1:]
+                            matched = True
+                    else:
+                        # 圆弧: r
+                        r = _parse_length(radius_str)
+                        if r is not None:
+                            r *= tikz_scale
+                        if r is not None and r > 0:
+                            cx = current_x - r * math.cos(math.radians(start_deg))
+                            cy = current_y - r * math.sin(math.radians(start_deg))
+                            _add_arc_to_subpath(
+                                current_subpath, cx, cy, r, start_deg, end_deg)
+                            current_x = cx + r * math.cos(math.radians(end_deg))
+                            current_y = cy + r * math.sin(math.radians(end_deg))
+                            remaining = remaining[i+1:]
+                            matched = True
             else:
-                # arc[start angle=..., end angle=..., radius=...] 新格式
+                # arc[start angle=..., end angle=..., radius=..., x radius=..., y radius=...] 新格式
                 ab_start = m.end() - 1
                 depth = 0
                 i = ab_start
@@ -561,15 +949,35 @@ def _parse_path_body(body_str, options):
                     i += 1
                 opt_part = remaining[ab_start+1:i]
                 opts = _parse_options(opt_part)
-                start_deg = float(opts.get('start angle', 0))
-                end_deg = float(opts.get('end angle', 0))
-                r = _parse_length(opts.get('radius', '0'))
-                if r is not None and r > 0:
-                    cx = current_x - r * math.cos(math.radians(start_deg))
-                    cy = current_y - r * math.sin(math.radians(start_deg))
-                    _add_arc_to_subpath(current_subpath, cx, cy, r, start_deg, end_deg)
-                    current_x = cx + r * math.cos(math.radians(end_deg))
-                    current_y = cy + r * math.sin(math.radians(end_deg))
+                tikz_scale = getattr(_parse_coord, '_tikz_scale', 1.0)
+
+                start_deg = _eval_tikz_expr(opts.get('start angle', '0')) or 0.0
+                end_deg = _eval_tikz_expr(opts.get('end angle', '0')) or 0.0
+
+                # 支持 x radius / y radius 或 radius
+                rx = _parse_length(opts.get('x radius', opts.get('radius', '0')))
+                ry_str = opts.get('y radius', None)
+                if ry_str:
+                    ry = _parse_length(ry_str)
+                else:
+                    ry = rx  # 圆弧
+
+                if rx is not None:
+                    rx *= tikz_scale
+                if ry is not None:
+                    ry *= tikz_scale
+
+                if rx is not None and ry is not None and rx > 0 and ry > 0:
+                    cx = current_x - rx * math.cos(math.radians(start_deg))
+                    cy = current_y - ry * math.sin(math.radians(start_deg))
+                    if rx == ry:
+                        _add_arc_to_subpath(
+                            current_subpath, cx, cy, rx, start_deg, end_deg)
+                    else:
+                        _add_elliptical_arc_to_subpath(
+                            current_subpath, cx, cy, rx, ry, start_deg, end_deg)
+                    current_x = cx + rx * math.cos(math.radians(end_deg))
+                    current_y = cy + ry * math.sin(math.radians(end_deg))
                     remaining = remaining[i+1:]
                     matched = True
 
@@ -631,6 +1039,27 @@ def _parse_path_body(body_str, options):
                     remaining = remaining[i+1:]
                     matched = True
 
+        # node[options] {content} 内联节点
+        if not matched:
+            m = re.match(r'node\s*(?:\[([^\]]*)\])?\s*\{', remaining)
+            if m:
+                opt_str = m.group(1) or ''
+                # 提取花括号内容
+                brace_start = m.end()
+                depth = 1
+                ci = brace_start
+                while ci < len(remaining) and depth > 0:
+                    if remaining[ci] == '{':
+                        depth += 1
+                    elif remaining[ci] == '}':
+                        depth -= 1
+                    ci += 1
+                content = remaining[brace_start:ci - 1]
+                # 记录内联节点（位置=当前点）
+                path.inline_nodes.append((current_x, current_y, content, _parse_options(opt_str)))
+                remaining = remaining[ci:]
+                matched = True
+
         if not matched:
             # 无法解析的字符，跳过一个
             if remaining and remaining[0] == ';':
@@ -686,6 +1115,34 @@ def _add_arc_to_subpath(subpath, cx, cy, r, start_deg, end_deg, segments_per_rad
         subpath.append(('line', p))
 
 
+def _add_elliptical_arc_to_subpath(subpath, cx, cy, rx, ry, start_deg, end_deg, segments_per_rad=8):
+    """将椭圆弧分解为点列
+
+    参数:
+        cx, cy: 椭圆中心
+        rx, ry: x/y方向半径
+        start_deg, end_deg: 起止角度（度）
+    """
+    start_rad = math.radians(start_deg)
+    end_rad = math.radians(end_deg)
+
+    delta = end_rad - start_rad
+    n_steps = max(int(abs(delta) * segments_per_rad), 2)
+
+    points = []
+    for i in range(n_steps + 1):
+        t = i / n_steps
+        angle = start_rad + delta * t
+        x = cx + rx * math.cos(angle)
+        y = cy + ry * math.sin(angle)
+        points.append((x, y))
+
+    if not subpath:
+        subpath.append(('move', points[0]))
+    for p in points[1:]:
+        subpath.append(('line', p))
+
+
 # ============================================================
 # 主解析函数
 # ============================================================
@@ -697,6 +1154,9 @@ def parse_tikz_code(tikz_code):
     支持解析 \begin{tikzpicture} ... \end{tikzpicture} 环境
     以及单独的 \draw, \fill 等命令
     """
+    # 预处理：替换 \def 定义的宏
+    tikz_code = _preprocess_macros(tikz_code)
+
     paths = []
 
     # 提取 tikzpicture 环境内的内容
@@ -722,6 +1182,10 @@ def parse_tikz_code(tikz_code):
     body = re.sub(r'%.*', '', body)
 
     # 提取命名坐标 (\coordinate 命令)
+    # 关键: 提取前先重置 _tikz_scale 为 1.0, 避免上一次调用遗留的 scale
+    # 导致坐标被重复缩放（extract_named_coordinates 内部调用 _parse_coord
+    # 时会读取 _tikz_scale, 而此处的 scale 由 parse_tikz_code 统一应用）
+    _parse_coord._tikz_scale = 1.0
     named_coords = extract_named_coordinates(tikz_code)
 
     # 应用 scale 到命名坐标
@@ -733,7 +1197,7 @@ def parse_tikz_code(tikz_code):
 
     # 注入到 _parse_coord 的静态属性中供查找
     _parse_coord._named_coords = named_coords
-    # 保存 scale 供路径解析时使用
+    # 保存 scale 供路径解析时使用（数字坐标会自动应用此 scale）
     _parse_coord._tikz_scale = tikz_scale
 
     # 提取 \draw, \fill, \filldraw, \path 命令
@@ -901,10 +1365,13 @@ def extract_named_coordinates(tikz_code):
       \\coordinate (A) at (2,3);
       \\coordinate[label=above:$A$] (A) at (2,3);
       \\coordinate[label=left:{B}] (B) at (0,0);
+      \\coordinate (N) at ($(A)!0.42!(D)$);  (calc库语法)
 
     返回: dict, name -> (x, y) 坐标映射
     """
     coords = {}
+    # 预处理：替换 \def 定义的宏
+    tikz_code = _preprocess_macros(tikz_code)
     # 去掉注释
     body = re.sub(r'%.*', '', tikz_code)
 
@@ -916,33 +1383,60 @@ def extract_named_coordinates(tikz_code):
     if env_match:
         body = env_match.group(2)
 
+    # 保存原有的 _named_coords，提取期间用增量更新的副本
+    # 这样后续坐标可以引用前面已定义的坐标（如 N 引用 A 和 D）
+    orig_named = getattr(_parse_coord, '_named_coords', {})
+    # 以副本开始，包含之前已解析的坐标
+    working_coords = dict(orig_named)
+    _parse_coord._named_coords = working_coords
+
     # 匹配 \coordinate [options] (name) at (x,y);  或  \coordinate (name) at (x,y);
     # 可选的 [options] 部分用非贪婪匹配
+    # 注意: 坐标部分可能包含 {2*cos(120)} 等表达式，其中含有括号，
+    # 因此使用括号配对扫描而非 [^)]+ 来匹配坐标
     for m in re.finditer(
-        r'\\coordinate\s*(?:\[([^\]]*)\])?\s*\((\w+)\)\s*at\s*\(([^)]+)\)\s*;',
+        r'\\coordinate\s*(?:\[([^\]]*)\])?\s*\((\w+)\)\s*at\s*\(',
         body
     ):
         opt_str = m.group(1) or ''
         name = m.group(2)
-        coord_str = m.group(3).strip()
+        # 从匹配结束位置开始，用括号配对找到坐标的右括号
+        coord_start = m.end()
+        paren_depth = 1
+        ci = coord_start
+        while ci < len(body) and paren_depth > 0:
+            if body[ci] == '(':
+                paren_depth += 1
+            elif body[ci] == ')':
+                paren_depth -= 1
+            ci += 1
+        coord_str = body[coord_start:ci - 1].strip()
         coord = _parse_coord(coord_str)
         if coord:
             x, y, _ = coord
             coords[name] = (x, y)
+            # 增量更新，使后续坐标可引用此坐标
+            working_coords[name] = (x, y)
+
+    # 恢复原有的 _named_coords（parse_tikz_code 会设置最终值）
+    _parse_coord._named_coords = orig_named
 
     return coords
 
 
 def extract_coordinate_labels(tikz_code):
     """
-    从TikZ代码中提取 \\coordinate 命令的标签文字
+    从TikZ代码中提取 \\coordinate 命令的标签文字和方向
 
-    解析 \\coordinate[label=above:$A$] (A) at (2,3); 中的标签文字 A
-    以及 \\coordinate[label=left:{B}] (B) at (0,0); 中的标签文字 B
+    解析 \\coordinate[label=above:$A$] (A) at (2,3); 中的标签文字 A 和方向 above
+    以及 \\coordinate[label=left:{B}] (B) at (0,0); 中的标签文字 B 和方向 left
 
-    返回: dict, coord_name -> label_text
+    返回: dict, coord_name -> (label_text, direction)
+           direction 为 above/below/left/right/above left/... 或 None
     """
     labels = {}
+    # 预处理：替换 \def 定义的宏
+    tikz_code = _preprocess_macros(tikz_code)
     body = re.sub(r'%.*', '', tikz_code)
 
     env_match = re.search(
@@ -953,28 +1447,49 @@ def extract_coordinate_labels(tikz_code):
         body = env_match.group(2)
 
     for m in re.finditer(
-        r'\\coordinate\s*(?:\[([^\]]*)\])?\s*\((\w+)\)\s*at\s*\(([^)]+)\)\s*;',
+        r'\\coordinate\s*(?:\[([^\]]*)\])?\s*\((\w+)\)\s*at\s*\(',
         body
     ):
         opt_str = m.group(1) or ''
         name = m.group(2)
 
+        # 跳过坐标部分（用括号配对）
+        coord_start = m.end()
+        paren_depth = 1
+        ci = coord_start
+        while ci < len(body) and paren_depth > 0:
+            if body[ci] == '(':
+                paren_depth += 1
+            elif body[ci] == ')':
+                paren_depth -= 1
+            ci += 1
+
         # 从选项中提取 label=xxx
         label_match = re.search(r'label\s*=\s*(.+)', opt_str)
         if label_match:
             label_val = label_match.group(1).strip()
-            # 去掉方向前缀: above:, below:, left:, right:, above left:, 等
-            label_val = re.sub(
-                r'^(above|below|left|right|above\s+left|above\s+right|below\s+left|below\s+right)\s*:\s*',
-                '', label_val, flags=re.IGNORECASE
+
+            # 提取方向前缀
+            direction = None
+            dir_match = re.match(
+                r'^(above\s+left|above\s+right|below\s+left|below\s+right|above|below|left|right)\s*:\s*',
+                label_val, flags=re.IGNORECASE
             )
+            if dir_match:
+                direction = dir_match.group(1).lower()
+                label_val = label_val[dir_match.end():]
+            else:
+                # label=above:$A$ 格式中冒号后是文字
+                # 也处理没有冒号的: label={above $A$}
+                pass
+
             # 去掉 $ 符号（数学模式）
             label_val = label_val.replace('$', '').strip()
             # 去掉花括号
             if label_val.startswith('{') and label_val.endswith('}'):
                 label_val = label_val[1:-1].strip()
             if label_val:
-                labels[name] = label_val
+                labels[name] = (label_val, direction)
 
     return labels
 
@@ -1166,7 +1681,9 @@ def extract_tikz_nodes(tikz_code):
         nodes: TikZNode 列表
     """
     nodes = []
-    
+
+    # 预处理：替换 \def 定义的宏
+    tikz_code = _preprocess_macros(tikz_code)
     # 去掉注释
     body = re.sub(r'%.*', '', tikz_code)
     

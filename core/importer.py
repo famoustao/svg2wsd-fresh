@@ -508,6 +508,11 @@ def import_latex(filepath: str) -> CanvasData:
             block_annotations = _convert_tikz_annotations(tikz_nodes)
             annotations.extend(block_annotations)
 
+            # 提取内联节点标注（draw命令中的 node[...]{...}）
+            from core.exporter import _convert_inline_nodes_inline
+            inline_annotations = _convert_inline_nodes_inline(tikz_paths)
+            annotations.extend(inline_annotations)
+
             # 从 \coordinate[label=...] 提取标签标注
             coord_labels = extract_coordinate_labels(tikz_code)
             if coord_labels:
@@ -516,19 +521,39 @@ def import_latex(filepath: str) -> CanvasData:
                 # 所以返回的坐标已经包含了 scale，无需再次乘以 scale
                 named_coords = extract_named_coordinates(tikz_code)
 
-                for coord_name, label_text in coord_labels.items():
+                # TikZ锚点 → WSD 9宫格区域映射 (assoc_type, assoc_dir, f1, f2)
+                _TIKZ_ANCHOR_MAP = {
+                    'above':         (1, 0x94, 0.5, 1.0),           # DIR_TOP<<4|4
+                    'below':         (7, 0xD4, 0.5, 1.0),           # DIR_BOTTOM<<4|4
+                    'left':          (3, 0x64, 1.0, 0.4),           # DIR_LEFT<<4|4
+                    'right':         (5, 0x74, 1.0, 0.4),           # DIR_RIGHT<<4|4
+                    'above left':    (0, 0xA4, 1.0, 1.0),           # DIR_TOP_LEFT<<4|4
+                    'above right':   (2, 0xB4, 1.0, 1.0),           # DIR_TOP_RIGHT<<4|4
+                    'below left':    (6, 0xE4, 1.0, 1.0),           # DIR_BOTTOM_LEFT<<4|4
+                    'below right':   (8, 0xF4, 1.0, 1.0),           # DIR_BOTTOM_RIGHT<<4|4
+                }
+
+                for coord_name, label_info in coord_labels.items():
                     if coord_name in named_coords:
                         cx, cy = named_coords[coord_name]
+                        label_text, direction = label_info
+
+                        # 根据TikZ方向选择WSD标注参数
+                        if direction and direction in _TIKZ_ANCHOR_MAP:
+                            assoc_type, assoc_dir, f1, f2 = _TIKZ_ANCHOR_MAP[direction]
+                        else:
+                            assoc_type, assoc_dir, f1, f2 = 4, 0x54, 0.5, 0.06
+
                         annotations.append(TextAnnotation(
                             text=label_text,
                             x=cx, y=cy,
                             font_size=14.0,
                             bold=True,
                             associated=True,
-                            assoc_type=2,       # 临时值，后续智能计算
-                            assoc_f1=0.7,       # 比例值 0-1，后续智能计算
-                            assoc_f2=0.7,       # 比例值 0-1，后续智能计算
-                            assoc_dir=0xB4,     # 临时值，后续智能计算
+                            assoc_type=assoc_type,
+                            assoc_f1=f1,
+                            assoc_f2=f2,
+                            assoc_dir=assoc_dir,
                         ))
                         all_x.append(cx)
                         all_y.append(cy)
@@ -561,17 +586,9 @@ def import_latex(filepath: str) -> CanvasData:
         else:
             bbox = (0.0, 0.0, 0.0, 0.0)
 
-        # 对所有关联标注应用智能偏移方向（根据点在图中的位置）
-        from core.vertex_labeler import compute_smart_label_offset
-        for a in annotations:
-            if a.associated:
-                region, assoc_dir, f1, f2 = compute_smart_label_offset(
-                    a.x, a.y, bbox, shapes
-                )
-                a.assoc_type = region
-                a.assoc_dir = assoc_dir
-                a.assoc_f1 = f1
-                a.assoc_f2 = f2
+        # 注意: 不在此处调用compute_smart_label_offset,
+        # 因为TikZ锚点方向(above/below等)已通过assoc参数表达。
+        # 后续export中的apply_smart_offset会自动处理无明确方向的标注。
 
         return CanvasData(
             shapes=shapes,
@@ -805,60 +822,68 @@ def _convert_tikz_annotations(tikz_nodes) -> list:
     """
     将TikZ节点列表转换为TextAnnotation列表
 
+    关键: 锚点坐标直接使用node.x/node.y（与端点重合），
+    TikZ的above/below/left/right通过WSD关联参数表达，而非坐标位移。
+
     参数:
         tikz_nodes: [TikZNode, ...]，每个TikZNode有 text, x, y 等属性
 
     返回:
         TextAnnotation对象列表
     """
+    # TikZ锚点 → WSD 9宫格区域映射 (assoc_type, assoc_dir, f1, f2)
+    _TIKZ_ANCHOR_MAP = {
+        'above':         (1, 0x94, 0.5, 1.0),           # DIR_TOP<<4|4
+        'below':         (7, 0xD4, 0.5, 1.0),           # DIR_BOTTOM<<4|4
+        'left':          (3, 0x64, 1.0, 0.4),           # DIR_LEFT<<4|4
+        'right':         (5, 0x74, 1.0, 0.4),           # DIR_RIGHT<<4|4
+        'above left':    (0, 0xA4, 1.0, 1.0),           # DIR_TOP_LEFT<<4|4
+        'left above':    (0, 0xA4, 1.0, 1.0),
+        'above right':   (2, 0xB4, 1.0, 1.0),           # DIR_TOP_RIGHT<<4|4
+        'right above':   (2, 0xB4, 1.0, 1.0),
+        'below left':    (6, 0xE4, 1.0, 1.0),           # DIR_BOTTOM_LEFT<<4|4
+        'left below':    (6, 0xE4, 1.0, 1.0),
+        'below right':   (8, 0xF4, 1.0, 1.0),           # DIR_BOTTOM_RIGHT<<4|4
+        'right below':   (8, 0xF4, 1.0, 1.0),
+    }
+
     annotations = []
     for node in tikz_nodes:
-        # 解析 anchor 方向偏移
-        dx, dy = 0.0, 0.0
-        anchor_offset = 0.3  # 偏移距离（cm单位）
         opts = node.options if hasattr(node, 'options') else {}
+
+        # 查找TikZ锚点方向
+        tikz_anchor = None
         for key in opts:
             key_lower = key.lower()
-            if key_lower == 'above':
-                dy = -anchor_offset
-            elif key_lower == 'below':
-                dy = anchor_offset
-            elif key_lower == 'left':
-                dx = -anchor_offset
-            elif key_lower == 'right':
-                dx = anchor_offset
-            elif key_lower == 'above left' or key_lower == 'left above':
-                dx = -anchor_offset
-                dy = -anchor_offset
-            elif key_lower == 'above right' or key_lower == 'right above':
-                dx = anchor_offset
-                dy = -anchor_offset
-            elif key_lower == 'below left' or key_lower == 'left below':
-                dx = -anchor_offset
-                dy = anchor_offset
-            elif key_lower == 'below right' or key_lower == 'right below':
-                dx = anchor_offset
-                dy = anchor_offset
-        
-        # 如果没有指定锚点方向，默认右上方偏移
-        if dx == 0.0 and dy == 0.0:
-            dx = anchor_offset
-            dy = -anchor_offset
+            if key_lower in _TIKZ_ANCHOR_MAP:
+                tikz_anchor = _TIKZ_ANCHOR_MAP[key_lower]
+                break
+
+        if tikz_anchor:
+            assoc_type, assoc_dir, f1, f2 = tikz_anchor
+        else:
+            # 无明确方向: 使用默认值, 后续智能计算
+            assoc_type, assoc_dir, f1, f2 = 4, 0x54, 0.5, 0.06081081
 
         ann = TextAnnotation(
             text=node.text,
-            x=node.x + dx,
-            y=node.y + dy,
+            x=node.x,           # 锚点直接使用端点坐标, 不偏移
+            y=node.y,
             font_size=14.0,
             bold=True,
+            associated=True,
+            assoc_type=assoc_type,
+            assoc_f1=f1,
+            assoc_f2=f2,
+            assoc_dir=assoc_dir,
         )
-        # 处理上下标
+        # 处理上下标: WSD格式文字区存储 base+sub (或 base+sup), 不含下划线
         if node.has_superscript:
             ann.superscript = True
-            ann.text = node.base_text
+            ann.text = node.base_text + (node.superscript or '')
         if node.has_subscript:
             ann.subscript = True
-            ann.text = node.base_text
+            ann.text = node.base_text + (node.subscript or '')
         annotations.append(ann)
     return annotations
 
