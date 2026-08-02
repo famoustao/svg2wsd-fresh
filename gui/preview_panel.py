@@ -998,6 +998,27 @@ class WsdPreviewCanvas(ZoomableCanvas):
     # 文字标注绘制
     # --------------------------------------------------------
 
+    def _get_font_scale(self) -> float:
+        """
+        计算字体缩放因子，使字号在不同坐标系下保持合理比例
+
+        对于大坐标值（WSD单位，数千~数万），font_size=14 本身就是像素值，
+        直接乘以 zoom 即可。
+        对于小坐标值（TikZ/GGB单位，0~5），fit_to_view 会产生很大的 zoom，
+        导致 14*zoom 极大。此时需要将 font_size 缩放到内容坐标系。
+
+        策略: 以内容 bbox 最大维度为参考，当 < 500 时按比例缩小字号。
+        """
+        content_w, content_h = self._get_content_size()
+        max_dim = max(content_w, content_h, 1.0)
+        if max_dim > 500:
+            # 大坐标系（WSD），字号本身就是像素值，无需额外缩放
+            return 1.0
+        else:
+            # 小坐标系（TikZ/GGB），将字号缩放到内容坐标系
+            # 参考值 300: 内容约 300 像素时 font_size 不变
+            return max_dim / 300.0
+
     def _draw_annotation(self, ann: TextAnnotation):
         """
         绘制文字标注
@@ -1010,7 +1031,7 @@ class WsdPreviewCanvas(ZoomableCanvas):
         Args:
             ann: TextAnnotation 对象
         """
-        font_size = max(6, int(ann.font_size * self._zoom))
+        font_size = max(6, int(ann.font_size * self._get_font_scale() * self._zoom))
 
         # 基础坐标
         base_x = self._to_canvas_x(ann.x)

@@ -14,6 +14,7 @@
 import os
 import sys
 import json
+import time
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 from typing import List, Optional, Dict, Any, Tuple
@@ -2615,11 +2616,16 @@ class MainWindow:
             font_style_display = params.get('font_style', '斜体')
             font_style = 'upright' if '正' in font_style_display else 'italic'
 
+            # 合并输出文件名: 合并输出_YYYYMMDD_HHMMSS.wsd
+            timestamp = time.strftime('%Y%m%d_%H%M%S')
+            merge_ext = 'wsd' if export_format == 'wsd' else 'svg'
+            merge_name = f'合并输出_{timestamp}.{merge_ext}'
+
             export_result = batch_mgr.export_all(
                 output_dir=output_dir,
                 format=export_format,
                 merge_mode=export_mode,
-                merge_name='合并输出.wsd' if export_format == 'wsd' else '合并输出.svg',
+                merge_name=merge_name,
                 canvas_size_mm=canvas_size_mm,
                 line_color=line_color,
                 line_alpha=line_alpha,
