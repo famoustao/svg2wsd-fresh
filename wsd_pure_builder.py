@@ -2388,9 +2388,34 @@ _LAST_PAGE_ENTRY_CORE = bytes.fromhex(
 )
 
 
+# ========== 多画布模板内置数据（base64编码，无需外部模板文件） ==========
+# 从WSTUDIO原生多画布WSD文件提取的中间页条目和最后页条目
+# 2画布和3画布模板中的这两个部分完全一致，只需一份
+
+# mid_entry: 中间页条目 (78字节 = mid_core 51字节 + rec_count 4字节 + canvas_tail 23字节)
+_MULTI_MID_ENTRY_B64 = (
+    "MgAQ9QAAAAAAAgABAAAACABAAAIAAAAgIP//EAABAAAAAAAAAAAAAAAAAAAQAAAAAAAAAAAAAAAA"
+    "AAAAAAAAwNoAAMDaAAAAAAAAAAEA"
+)
+
+# last_entry: 最后页条目 (97字节)
+_MULTI_LAST_ENTRY_B64 = (
+    "MgAQ9QAAAAAA//8BAAAAAAAAAQABAAAAuAsAAAAAAAAAkAEAAJABAAAA+gAAAAAAABQAJAAJAAAA"
+    "NAiaCzIAMgCWAJYAyADIACcAAAAyADIA//7/BLcAIwBuALcAAAAAAA=="
+)
+
+# canvas1 tail: 第一画布的块尾部 (23字节)
+# 与单画布 block_tail 的前23字节结构一致，仅画布尺寸不同
+# 结构: [8字节填充][4字节宽度][4字节高度][7字节固定尾部]
+_MULTI_CANVAS1_TAIL_TAIL = b'\x00\x00\x00\x00\x00\x01\x00'  # 尾部7字节
+
+
 def _load_multi_canvas_template(page_count):
     """
-    加载WSTUDIO原生多画布WSD模板文件
+    获取多画布WSD构建所需的模板数据（纯内置，无需外部文件）
+
+    使用base64编码的内置数据 + 单画布skeleton的文件头/块头部，
+    完全不依赖外部模板文件，确保打包后能正常工作。
 
     参数:
         page_count: 画布数量
@@ -2402,60 +2427,17 @@ def _load_multi_canvas_template(page_count):
         - mid_entry_template: 中间页条目模板 (78字节)
         - last_entry_template: 最后页条目模板 (97字节)
     """
-    # 模板文件路径
-    template_dir = os.path.join(os.path.dirname(__file__), 'templates')
+    import base64 as _b64
 
-    # 选择最合适的模板 (优先选择画布数匹配的, 否则选最大的)
-    candidates = []
-    if page_count == 2:
-        candidates.append(os.path.join(template_dir, 'multi_2canvas.wsd'))
-    if page_count == 3:
-        candidates.append(os.path.join(template_dir, 'multi_3canvas.wsd'))
-    # 回退: 使用任意可用的模板
-    candidates.append(os.path.join(template_dir, 'multi_3canvas.wsd'))
-    candidates.append(os.path.join(template_dir, 'multi_2canvas.wsd'))
+    # 文件头和块头部：复用单画布skeleton数据（完全一致，仅页数不同）
+    # skeleton文件头在 0xEA2C 处为1（单画布），多画布构建时会修改为page_count
+    file_header, block_header, _ = _get_skeleton()
 
-    template_path = None
-    for c in candidates:
-        if os.path.exists(c):
-            template_path = c
-            break
+    # 中间页条目和最后页条目：从内置base64解码
+    mid_entry_template = _b64.b64decode(_MULTI_MID_ENTRY_B64)
+    last_entry_template = _b64.b64decode(_MULTI_LAST_ENTRY_B64)
 
-    if template_path is None:
-        raise FileNotFoundError(f"找不到多画布模板文件, 搜索路径: {template_dir}")
-
-    with open(template_path, 'rb') as f:
-        template = f.read()
-
-    # 文件头: 0 到 0xEA50 (59984字节)
-    file_header = template[:0xEA50]
-
-    # 块头部: 0xEA50 到 0xEA5E (14字节)
-    block_header = template[0xEA50:0xEA5E]
-
-    # 查找page entry标记, 提取mid和last entry模板
-    pe_marker = bytes.fromhex('320010f5')
-    pe_positions = []
-    pos = 0xEA5E
-    while True:
-        idx = template.find(pe_marker, pos)
-        if idx < 0:
-            break
-        pe_positions.append(idx)
-        pos = idx + 1
-
-    if len(pe_positions) < 2:
-        raise ValueError(f"模板文件 {template_path} 中page entry不足")
-
-    file_size_pos = len(template) - 8
-
-    # mid entry: 第一个page entry (78字节)
-    mid_entry_template = template[pe_positions[0]:pe_positions[1]]
-
-    # last entry: 最后一个page entry到file_size_pos
-    last_entry_template = template[pe_positions[-1]:file_size_pos]
-
-    return file_header, block_header, mid_entry_template, last_entry_template
+    return bytes(file_header), bytes(block_header), mid_entry_template, last_entry_template
 
 
 class MultiCanvasWSDBuilder:
