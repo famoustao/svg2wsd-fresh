@@ -540,6 +540,8 @@ class BatchManager:
         total = len(done_files)
         exported = 0
         failed = 0
+        output_file_path = None  # 合并模式下的输出文件完整路径
+        error_detail = None      # 导出失败的详细错误信息
 
         if total == 0:
             return {
@@ -547,6 +549,8 @@ class BatchManager:
                 "exported": 0,
                 "failed": 0,
                 "output_dir": output_dir,
+                "output_file": None,
+                "error": None,
             }
 
         # ---------- 合并模式 ----------
@@ -562,6 +566,7 @@ class BatchManager:
                                      scale_mode=scale_mode,
                                      scale_value=scale_value,
                                      font_style=font_style)
+                    output_file_path = output_path
                 elif format_lower == 'svg':
                     # SVG 合并: 将多个 CanvasData 合并为一个 SVG
                     import xml.etree.ElementTree as ET
@@ -603,13 +608,25 @@ class BatchManager:
                     tree = ET.ElementTree(svg_root)
                     ET.indent(tree, space='  ', level=0)
                     tree.write(output_path, encoding='utf-8', xml_declaration=True)
+                    output_file_path = output_path
 
                 exported = total
+
+                # 验证文件是否真正生成
+                if output_file_path and not os.path.exists(output_file_path):
+                    raise RuntimeError(
+                        f"导出完成但文件未生成: {output_file_path}"
+                    )
+
             except Exception as e:
                 failed = total
-                # 记录错误到第一个文件（可选）
+                exported = 0
+                error_detail = f"合并导出失败: {e}"
+                import traceback as _tb
+                error_detail += f"\n{ _tb.format_exc()}"
+                # 记录错误到第一个文件
                 if done_files:
-                    done_files[0].error = f"合并导出失败: {e}"
+                    done_files[0].error = error_detail
 
         # ---------- 分离模式 ----------
         else:  # separate
@@ -657,6 +674,8 @@ class BatchManager:
             "exported": exported,
             "failed": failed,
             "output_dir": output_dir,
+            "output_file": output_file_path,
+            "error": error_detail,
         }
 
     # ========================================================

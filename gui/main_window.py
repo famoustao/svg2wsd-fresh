@@ -2642,6 +2642,8 @@ class MainWindow:
                 'export': export_result,
                 'output_dir': output_dir,
                 'cached_count': cached_count,
+                'merge_mode': export_mode,
+                'merge_name': merge_name if export_mode == 'merge' else None,
             }
 
         self._task_worker = TaskWorker(conversion_task)
@@ -2723,6 +2725,8 @@ class MainWindow:
             proc = result['process']
             exp = result.get('export', {})
             output_dir = result.get('output_dir', '')
+            merge_mode = result.get('merge_mode', 'separate')
+            merge_name = result.get('merge_name')
             params = self._get_current_params()
 
             # 将导出处理结果回存到文件缓存（转过的文件也有缓存，下次直接用）
@@ -2737,23 +2741,57 @@ class MainWindow:
                         self._files[i]['preview_params'] = params.copy()
                         cached_back_count += 1
 
-            # 更新Treeview中的状态
+            # 更新Treeview中的状态（基于导出结果，而非处理结果）
+            export_exported = exp.get('exported', 0)
+            export_failed = exp.get('failed', 0)
+            proc_success = proc.get('success', 0)
+            proc_failed = proc.get('failed', 0)
+
             for i, item in enumerate(self.file_tree.get_children()):
-                if i < proc.get('success', 0):
-                    self.file_tree.set(item, 'status', '已导出')
-                elif i < proc.get('success', 0) + proc.get('failed', 0):
+                if i < proc_success:
+                    if export_exported > 0:
+                        self.file_tree.set(item, 'status', '已导出')
+                    else:
+                        # 处理成功但导出失败
+                        self.file_tree.set(item, 'status', '导出失败')
+                elif i < proc_success + proc_failed:
                     self.file_tree.set(item, 'status', '失败')
 
             # 显示结果对话框
-            exported = exp.get('exported', 0)
+            exported = export_exported
             total = exp.get('total', 0)
             cached = result.get('cached_count', 0)
-            msg = f"处理完成！\n\n成功: {proc.get('success', 0)} 个\n失败: {proc.get('failed', 0)} 个\n已导出: {exported}/{total} 个文件"
+            export_error = exp.get('error')
+
+            msg = f"处理完成！\n\n成功: {proc_success} 个\n失败: {proc_failed} 个\n已导出: {exported}/{total} 个文件"
             if cached > 0:
                 msg += f"\n使用缓存: {cached} 个"
             if cached_back_count > 0:
                 msg += f"\n新缓存: {cached_back_count} 个"
-            msg += f"\n\n输出目录: {output_dir}"
+
+            # 合并模式下显示输出文件完整路径
+            if merge_mode == 'merge' and merge_name:
+                output_file = exp.get('output_file')
+                if output_file:
+                    msg += f"\n\n合并输出文件:\n{output_file}"
+                    # 验证文件是否存在
+                    import os as _os
+                    if _os.path.exists(output_file):
+                        file_size = _os.path.getsize(output_file)
+                        msg += f"\n文件大小: {file_size} 字节"
+                    else:
+                        msg += "\n警告: 文件未找到!"
+                else:
+                    msg += f"\n\n合并输出文件名: {merge_name}"
+                    msg += f"\n输出目录: {output_dir}"
+
+                # 导出失败时显示错误详情
+                if export_error:
+                    msg += f"\n\n导出错误:\n{export_error}"
+            else:
+                msg += f"\n\n输出目录: {output_dir}"
+                if export_error:
+                    msg += f"\n\n导出错误:\n{export_error}"
 
             # 询问是否打开输出目录
             if messagebox.askyesno('转换完成', msg + '\n\n是否打开输出目录？'):
