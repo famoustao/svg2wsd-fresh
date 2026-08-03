@@ -980,6 +980,9 @@ def _parse_svg_file(svg_path):
             return (fill, None)
         if fill == 'none':
             return ('none', None)
+        # 继承父级颜色：parent_fill 可能已经是 (color, gradient_id) 元组
+        if isinstance(parent_fill, (tuple, list)):
+            return parent_fill
         return (parent_fill, None)
 
     def _get_stroke(elem, parent_stroke='none'):

@@ -194,6 +194,11 @@ def _bgr_to_bgra_bytes(bgr, alpha=255):
     # _parse_svg_file 返回 (hex_string, gradient_id) 元组，取首元素
     if isinstance(bgr, (tuple, list)) and len(bgr) > 0 and isinstance(bgr[0], str):
         bgr = _hexstr_to_bgr_tuple(bgr[0])
+    # 嵌套元组：((b,g,r), gradient_id) 等，递归取首元素
+    elif isinstance(bgr, (tuple, list)) and len(bgr) > 0 and isinstance(bgr[0], (tuple, list)):
+        bgr = bgr[0]
+    if not isinstance(bgr, (tuple, list)) or len(bgr) < 3:
+        return bytes([0x01, 0xff, 0x00, 0x00])
     b, g, r = bgr[0], bgr[1], bgr[2]
     # WSD原生黑色使用特殊编码 01ff0000
     if b == 0 and g == 0 and r == 0:
@@ -229,6 +234,11 @@ def _bgr_to_bgr_bytes(bgr):
     # _parse_svg_file 返回 (hex_string, gradient_id) 元组，取首元素
     if isinstance(bgr, (tuple, list)) and len(bgr) > 0 and isinstance(bgr[0], str):
         bgr = _hexstr_to_bgr_tuple(bgr[0])
+    # 嵌套元组：((b,g,r), gradient_id) 等，递归取首元素
+    elif isinstance(bgr, (tuple, list)) and len(bgr) > 0 and isinstance(bgr[0], (tuple, list)):
+        bgr = bgr[0]
+    if not isinstance(bgr, (tuple, list)) or len(bgr) < 3:
+        return bytes([0, 0, 0])
     return bytes([int(bgr[0]) & 0xff, int(bgr[1]) & 0xff, int(bgr[2]) & 0xff])
 
 
@@ -1129,6 +1139,11 @@ def _bgr_to_hex(bgr) -> str:
     # _parse_svg_file 返回 (hex_string, gradient_id) 元组，取首元素
     if isinstance(bgr, (tuple, list)) and len(bgr) > 0 and isinstance(bgr[0], str):
         return _bgr_to_hex(bgr[0])
+    # 嵌套元组：((b,g,r), gradient_id) 等，递归取首元素
+    if isinstance(bgr, (tuple, list)) and len(bgr) > 0 and isinstance(bgr[0], (tuple, list)):
+        return _bgr_to_hex(bgr[0])
+    if not isinstance(bgr, (tuple, list)) or len(bgr) < 3:
+        return '#000000'
     b, g, r = int(bgr[0]), int(bgr[1]), int(bgr[2])
     return f'#{r:02x}{g:02x}{b:02x}'
 
