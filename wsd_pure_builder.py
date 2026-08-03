@@ -2556,7 +2556,7 @@ class MultiCanvasWSDBuilder:
 
         # 1. FH (59984字节)
         fh = bytearray(fh_bytes)
-        fh[0xEA2C] = page_count  # page_count
+        struct.pack_into('<I', fh, 0xEA2C, page_count)  # page_count (4字节LE)
         result.extend(fh)
 
         # 2. BH (14字节, rec_count = 画布1记录数)
