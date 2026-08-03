@@ -2480,6 +2480,21 @@ class GeometryMode:
                     color_fill_colors.append((int(b*255), int(g*255), int(r*255)))
 
             all_points = []
+            # 统计复合路径组，标记孔洞子路径
+            group_counts = {}
+            if path_group_ids:
+                for gid in path_group_ids:
+                    group_counts[gid] = group_counts.get(gid, 0) + 1
+            group_first_idx = {}
+            hole_indices = set()
+            if path_group_ids:
+                for i, gid in enumerate(path_group_ids):
+                    if group_counts.get(gid, 0) > 1:
+                        if gid not in group_first_idx:
+                            group_first_idx[gid] = i
+                        else:
+                            hole_indices.add(i)
+
             for i, path_points in enumerate(subpaths):
                 fill_color = None
                 line_color = (0, 0, 0)
@@ -2520,6 +2535,10 @@ class GeometryMode:
                 # 描边宽度（SVG 中明确指定的优先）
                 if stroke_widths and i < len(stroke_widths) and stroke_widths[i]:
                     line_width = float(stroke_widths[i])
+
+                # 复合路径拆分：外框保留填充色，孔洞去除填充
+                if i in hole_indices:
+                    fill_color = None
 
                 shape = Shape(
                     type=ShapeType.BEZIER,

@@ -530,11 +530,18 @@ class ComicMode:
             _should_split = True
 
         # 标记哪些子路径属于复合路径组（同一组有多个子路径）
+        # 并记录每组中第一个子路径（外框）和后续子路径（孔洞）
         compound_subpaths = set()
+        group_first_idx = {}  # {group_id: first_subpath_index}
+        hole_indices = set()   # 孔洞子路径的索引集合
         if _should_split and path_group_ids:
             for i, gid in enumerate(path_group_ids):
                 if group_counts.get(gid, 0) > 1:
                     compound_subpaths.add(i)
+                    if gid not in group_first_idx:
+                        group_first_idx[gid] = i  # 第一个子路径是外框
+                    else:
+                        hole_indices.add(i)       # 后续子路径是孔洞
 
         for i, path_points in enumerate(geo_paths):
             # path_points 是 [(x,y), ...] 贝塞尔曲线点列表
@@ -584,8 +591,10 @@ class ComicMode:
             if stroke_widths and i < len(stroke_widths) and stroke_widths[i]:
                 line_width = float(stroke_widths[i])
 
-            # 复合路径拆分模式：保留填充色，每个子路径独立渲染
-            # 不再去除填充（之前去除填充导致彩色SVG丢失颜色）
+            # 复合路径拆分模式：外框保留填充色，孔洞去除填充
+            # WSD渲染器不支持奇偶填充，孔洞如果也填充会导致整个区域被填满
+            if i in hole_indices:
+                fill_color = None
 
             shape = Shape(
                 type=ShapeType.BEZIER,
