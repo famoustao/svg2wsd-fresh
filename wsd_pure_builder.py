@@ -1237,6 +1237,9 @@ POLYLINE_PROTO = bytes.fromhex(
 
 # 圆形原型：49字节
 # sub=0x42, 大类=0x10CF (闭合)
+# 2π in float32 LE: 0x40c90fdb → db 0f c9 40
+_TWO_PI_BYTES = bytes.fromhex('db0fc940')
+
 CIRCLE_PROTO = bytes.fromhex(
     '0f33cf100704ffff01ff000000000000'  # +0x00 ~ +0x0f
     '50000000000100010000008442000000'  # +0x10 ~ +0x1f
@@ -1401,17 +1404,19 @@ def build_polyline_record(points, closed=True, linewidth=None):
     return bytes(rec)
 
 
-def build_circle_record(cx, cy, radius, linewidth=None, line_color_bgra=None):
+def build_circle_record(cx, cy, radius, linewidth=None, line_color_bgra=None,
+                       fill_color_bgra=None):
     """
     构建圆形记录
 
-    基于圆原型复制，修改cx/cy/r参数，支持自定义线条颜色。
+    基于圆原型复制，修改cx/cy/r参数，支持自定义线条颜色和填充颜色。
 
     Args:
         cx, cy: 圆心坐标（WSD单位）
         radius: 半径（WSD单位）
         linewidth: 线宽，None=使用原型值
         line_color_bgra: 线条颜色 (B, G, R, A) 4字节，None=使用原型默认色
+        fill_color_bgra: 填充颜色 (B, G, R, A) 4字节，None=无填充
 
     Returns:
         bytes: 完整的圆形记录
@@ -1430,11 +1435,20 @@ def build_circle_record(cx, cy, radius, linewidth=None, line_color_bgra=None):
             rec[0x08:0x0b] = bytes(line_color_bgra)
             rec[0x0b] = 0xff  # alpha
 
+    # 修改填充颜色（偏移0x0c，4字节BGRA）
+    if fill_color_bgra is not None:
+        if len(fill_color_bgra) == 4:
+            rec[0x0c:0x10] = bytes(fill_color_bgra)
+        elif len(fill_color_bgra) == 3:
+            rec[0x0c:0x0f] = bytes(fill_color_bgra)
+            rec[0x0f] = 0xff  # alpha
+
     # 修改圆参数（float32）
     struct.pack_into('<f', rec, 0x20, float(cx))      # cx
     struct.pack_into('<f', rec, 0x24, float(cy))      # cy
     struct.pack_into('<f', rec, 0x28, float(radius))  # r
-    # +0x2c 是 2π（整圆标志），保持不变
+    # +0x2c: 2π（整圆标志），确保使用正确的值
+    rec[0x2c:0x30] = _TWO_PI_BYTES
 
     return bytes(rec)
 

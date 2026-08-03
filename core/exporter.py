@@ -1071,8 +1071,10 @@ def export_wsd_single(canvas_data: CanvasData,
                 cx, cy = int(transformed.points[0][0]), int(transformed.points[0][1])
                 radius = int(transformed.extra.get('radius', 50))
                 circle_color_bgra = _bgr_to_bgra_bytes(transformed.line_color, alpha=line_alpha)
+                circle_fill_bgra = _bgr_to_bgra_bytes(transformed.fill_color, alpha=line_alpha) if transformed.fill_color else None
                 rec = build_circle_record(cx, cy, radius, linewidth=linewidth,
-                                          line_color_bgra=circle_color_bgra)
+                                          line_color_bgra=circle_color_bgra,
+                                          fill_color_bgra=circle_fill_bgra)
                 path_recs.append((rec, float(cx), float(cy)))
             else:
                 rec = _shape_to_path_record(transformed, linewidth=linewidth, line_alpha=line_alpha)

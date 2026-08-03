@@ -116,13 +116,13 @@ class ZoomableCanvas(ttk.Frame):
     - _get_content_size()：返回内容原始尺寸 (width, height)，用于自适应
     """
 
-    # 缩放范围
-    MIN_ZOOM = 0.1
-    MAX_ZOOM = 10.0
+    # 缩放范围（对数刻度，10^-5 ~ 10^5）
+    MIN_ZOOM = 0.00001
+    MAX_ZOOM = 100000.0
     # 滚轮缩放步长
-    ZOOM_STEP = 1.1
+    ZOOM_STEP = 1.2
     # 按钮缩放步长
-    BUTTON_ZOOM_STEP = 1.2
+    BUTTON_ZOOM_STEP = 1.5
 
     def __init__(self, master=None, **kwargs):
         """
@@ -1614,11 +1614,11 @@ class PreviewPanel(ttk.Frame):
         )
         self.zoom_out_btn.pack(side=tk.LEFT, padx=(8, 4), pady=6)
 
-        # 缩放滑块
-        self.zoom_var = tk.DoubleVar(value=100.0)
+        # 缩放滑块（对数刻度：-500 ~ 500 对应 10^-5 ~ 10^5）
+        self.zoom_var = tk.DoubleVar(value=0.0)
         self.zoom_scale = ttk.Scale(
             zoom_bar,
-            from_=10,
+            from_=-500,
             to=500,
             orient=tk.HORIZONTAL,
             variable=self.zoom_var,
@@ -1751,19 +1751,30 @@ class PreviewPanel(ttk.Frame):
             self._update_zoom_display(zoom)
 
     def _update_zoom_display(self, zoom: float):
-        """更新缩放比例显示和滑块位置"""
-        percent = int(round(zoom * 100))
-        self.zoom_label_var.set(f'{percent}%')
+        """更新缩放比例显示和滑块位置（对数刻度）"""
+        import math
+        if zoom <= 0:
+            return
+        exp = math.log10(zoom)
+        slider_val = int(round(exp * 100))
         # 避免触发 _on_scale_changed 造成循环
-        self.zoom_var.set(percent)
+        self.zoom_var.set(slider_val)
+        # 人类可读的缩放显示
+        if zoom >= 1:
+            self.zoom_label_var.set(f'{zoom:.0f}x')
+        elif zoom >= 0.01:
+            self.zoom_label_var.set(f'{zoom*100:.0f}%')
+        else:
+            inv = int(round(1.0 / zoom))
+            self.zoom_label_var.set(f'1/{inv}')
 
     def _on_scale_changed(self, value):
-        """滑块拖动时同步缩放画布"""
+        """滑块拖动时同步缩放画布（对数刻度）"""
         try:
-            percent = float(value)
+            exp = float(value) / 100.0
+            zoom = 10.0 ** exp
         except (ValueError, TypeError):
             return
-        zoom = percent / 100.0
         canvas = self.active_canvas
         if canvas is not None:
             # 直接设置缩放，不走 notify 路径避免循环
