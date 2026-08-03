@@ -2536,9 +2536,12 @@ class GeometryMode:
                 if stroke_widths and i < len(stroke_widths) and stroke_widths[i]:
                     line_width = float(stroke_widths[i])
 
-                # 复合路径拆分：外框保留填充色，孔洞去除填充
-                if i in hole_indices:
-                    fill_color = None
+                # 复合路径拆分：外框保留填充色，孔洞用白色填充"挖穿"
+                is_hole = i in hole_indices
+                if is_hole:
+                    fill_color = (255, 255, 255)  # 白色BGR
+                    line_color = None
+                    line_width = 0.0
 
                 shape = Shape(
                     type=ShapeType.BEZIER,
@@ -2549,6 +2552,7 @@ class GeometryMode:
                     extra={
                         'path_group_id': path_group_ids[i] if path_group_ids and i < len(path_group_ids) else i,
                         'subpath_index': i,
+                        'is_hole': is_hole,
                     }
                 )
                 canvas_data.shapes.append(shape)

@@ -591,10 +591,14 @@ class ComicMode:
             if stroke_widths and i < len(stroke_widths) and stroke_widths[i]:
                 line_width = float(stroke_widths[i])
 
-            # 复合路径拆分模式：外框保留填充色，孔洞去除填充
-            # WSD渲染器不支持奇偶填充，孔洞如果也填充会导致整个区域被填满
-            if i in hole_indices:
-                fill_color = None
+            # 复合路径拆分模式：外框保留填充色，孔洞用白色填充"挖穿"
+            # WSD渲染器不支持奇偶填充规则，需要用白色填充覆盖外框颜色来实现挖孔效果
+            # 这与预览面板的_draw_compound_path方法使用相同策略
+            is_hole = i in hole_indices
+            if is_hole:
+                fill_color = (255, 255, 255)  # 白色BGR，用于挖穿外框填充
+                line_color = None
+                line_width = 0.0
 
             shape = Shape(
                 type=ShapeType.BEZIER,
@@ -605,6 +609,7 @@ class ComicMode:
                 extra={
                     'path_group_id': path_group_ids[i] if path_group_ids and i < len(path_group_ids) else i,
                     'subpath_index': i,
+                    'is_hole': is_hole,
                 }
             )
             canvas_data.shapes.append(shape)

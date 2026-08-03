@@ -879,9 +879,14 @@ def export_wsd_single(canvas_data: CanvasData,
     for shape in canvas_data.shapes:
         # 坐标变换
         transformed = _transform_shape(shape, scale, offset_x, offset_y)
-        # 应用覆盖颜色
-        if override_bgr is not None:
+        # 判断是否为孔洞（复合路径中的挖孔子路径）
+        is_hole = transformed.extra.get('is_hole', False) if transformed.extra else False
+        # 应用覆盖颜色（孔洞不覆盖线条颜色，保持无描边）
+        if override_bgr is not None and not is_hole:
             transformed.line_color = override_bgr
+
+        # 孔洞使用 linewidth=0（无描边），其他形状使用指定线宽
+        shape_lw = 0 if is_hole else linewidth
 
         # 圆形走原生圆记录
         if transformed.type == ShapeType.CIRCLE and transformed.points:
@@ -889,11 +894,11 @@ def export_wsd_single(canvas_data: CanvasData,
             radius = int(transformed.extra.get('radius', 50))
             # 计算圆形的线条颜色（与_path_record一致）
             circle_color_bgra = _bgr_to_bgra_bytes(transformed.line_color, alpha=line_alpha)
-            rec = build_circle_record(cx, cy, radius, linewidth=linewidth,
+            rec = build_circle_record(cx, cy, radius, linewidth=shape_lw,
                                       line_color_bgra=circle_color_bgra)
             path_recs.append((rec, float(cx), float(cy)))
         else:
-            rec = _shape_to_path_record(transformed, linewidth=linewidth, line_alpha=line_alpha)
+            rec = _shape_to_path_record(transformed, linewidth=shape_lw, line_alpha=line_alpha)
             if rec is not None:
                 if transformed.points:
                     pcx = sum(p[0] for p in transformed.points) / len(transformed.points)
@@ -1041,18 +1046,21 @@ def export_wsd_multi(canvas_list: List[CanvasData],
 
         for shape in canvas_data.shapes:
             transformed = _transform_shape(shape, scale, offset_x, offset_y)
-            if override_bgr is not None:
+            is_hole = transformed.extra.get('is_hole', False) if transformed.extra else False
+            if override_bgr is not None and not is_hole:
                 transformed.line_color = override_bgr
+
+            shape_lw = 0 if is_hole else linewidth
 
             if transformed.type == ShapeType.CIRCLE and transformed.points:
                 cx, cy = int(transformed.points[0][0]), int(transformed.points[0][1])
                 radius = int(transformed.extra.get('radius', 50))
                 circle_color_bgra = _bgr_to_bgra_bytes(transformed.line_color, alpha=line_alpha)
-                rec = build_circle_record(cx, cy, radius, linewidth=linewidth,
+                rec = build_circle_record(cx, cy, radius, linewidth=shape_lw,
                                           line_color_bgra=circle_color_bgra)
                 path_recs.append((rec, float(cx), float(cy)))
             else:
-                rec = _shape_to_path_record(transformed, linewidth=linewidth, line_alpha=line_alpha)
+                rec = _shape_to_path_record(transformed, linewidth=shape_lw, line_alpha=line_alpha)
                 if rec is not None:
                     if transformed.points:
                         pcx = sum(p[0] for p in transformed.points) / len(transformed.points)
