@@ -188,6 +188,12 @@ def _bgr_to_bgra_bytes(bgr, alpha=255):
     """
     if bgr is None:
         return None
+    # 字符串 hex 格式：先转 BGR 元组
+    if isinstance(bgr, str):
+        bgr = _hexstr_to_bgr_tuple(bgr)
+    # _parse_svg_file 返回 (hex_string, gradient_id) 元组，取首元素
+    if isinstance(bgr, (tuple, list)) and len(bgr) > 0 and isinstance(bgr[0], str):
+        bgr = _hexstr_to_bgr_tuple(bgr[0])
     b, g, r = bgr[0], bgr[1], bgr[2]
     # WSD原生黑色使用特殊编码 01ff0000
     if b == 0 and g == 0 and r == 0:
@@ -195,10 +201,34 @@ def _bgr_to_bgra_bytes(bgr, alpha=255):
     return bytes([int(b) & 0xff, int(g) & 0xff, int(r) & 0xff, alpha & 0xff])
 
 
+def _hexstr_to_bgr_tuple(hex_str):
+    """hex 字符串 '#rrggbb' -> BGR 元组 (b, g, r)"""
+    if not hex_str or not isinstance(hex_str, str):
+        return (0, 0, 0)
+    h = hex_str.lstrip('#')
+    if len(h) == 6:
+        r = int(h[0:2], 16)
+        g = int(h[2:4], 16)
+        b = int(h[4:6], 16)
+        return (b, g, r)
+    elif len(h) == 3:
+        r = int(h[0]*2, 16)
+        g = int(h[1]*2, 16)
+        b = int(h[2]*2, 16)
+        return (b, g, r)
+    return (0, 0, 0)
+
+
 def _bgr_to_bgr_bytes(bgr):
     """BGR 元组 -> BGR 3字节"""
     if bgr is None:
         return None
+    # 字符串 hex 格式：先转 BGR 元组
+    if isinstance(bgr, str):
+        bgr = _hexstr_to_bgr_tuple(bgr)
+    # _parse_svg_file 返回 (hex_string, gradient_id) 元组，取首元素
+    if isinstance(bgr, (tuple, list)) and len(bgr) > 0 and isinstance(bgr[0], str):
+        bgr = _hexstr_to_bgr_tuple(bgr[0])
     return bytes([int(bgr[0]) & 0xff, int(bgr[1]) & 0xff, int(bgr[2]) & 0xff])
 
 
@@ -1087,9 +1117,18 @@ def export_wsd_multi(canvas_list: List[CanvasData],
 # ============================================================
 
 def _bgr_to_hex(bgr) -> str:
-    """BGR 元组 -> #rrggbb 十六进制字符串"""
+    """BGR 元组/hex字符串 -> #rrggbb 十六进制字符串"""
     if bgr is None:
         return 'none'
+    # 字符串格式：直接返回
+    if isinstance(bgr, str):
+        s = bgr.strip()
+        if s.startswith('#'):
+            return s
+        return f'#{s}'
+    # _parse_svg_file 返回 (hex_string, gradient_id) 元组，取首元素
+    if isinstance(bgr, (tuple, list)) and len(bgr) > 0 and isinstance(bgr[0], str):
+        return _bgr_to_hex(bgr[0])
     b, g, r = int(bgr[0]), int(bgr[1]), int(bgr[2])
     return f'#{r:02x}{g:02x}{b:02x}'
 

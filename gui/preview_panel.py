@@ -77,6 +77,9 @@ def _bgr_to_hex(bgr) -> str:
 
     # 元组/列表格式
     if isinstance(bgr, (tuple, list)):
+        # _parse_svg_file 返回 (hex_string, gradient_id) 元组，取首元素递归处理
+        if len(bgr) > 0 and isinstance(bgr[0], str):
+            return _bgr_to_hex(bgr[0])
         if len(bgr) >= 3:
             # 假设是 BGR 顺序（项目约定）
             b = max(0, min(255, int(bgr[0])))
