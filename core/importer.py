@@ -253,7 +253,7 @@ def import_svg(filepath: str) -> CanvasData:
             elif not is_stroke:
                 line_width = 0.0
 
-            gid = 0
+            gid = i  # 默认每条路径独立一组
             if path_group_ids and i < len(path_group_ids):
                 gid = path_group_ids[i]
 

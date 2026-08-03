@@ -2536,12 +2536,10 @@ class GeometryMode:
                 if stroke_widths and i < len(stroke_widths) and stroke_widths[i]:
                     line_width = float(stroke_widths[i])
 
-                # 复合路径拆分：外框保留填充色，孔洞用白色填充"挖穿"
+                # 复合路径：外框和孔洞都保留原始颜色
+                # 导出器会自动将同组路径合并为单个 WSD 记录（多 seglist），
+                # 利用 WSD 原生奇偶填充规则处理孔洞，无需白色覆盖
                 is_hole = i in hole_indices
-                if is_hole:
-                    fill_color = (255, 255, 255)  # 白色BGR
-                    line_color = None
-                    line_width = 0.0
 
                 shape = Shape(
                     type=ShapeType.BEZIER,

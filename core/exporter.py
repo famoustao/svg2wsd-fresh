@@ -275,6 +275,164 @@ def _bezier_to_polygon(bez_segs, samples_per_segment=8):
     return poly_pts
 
 
+def _extract_segments(shape: Shape) -> Optional[list]:
+    """
+    从 Shape 中提取段列表（seglists），不构建完整记录。
+
+    返回:
+        list: seglists 列表，每个元素是一组段 [('bezier', [p0,p1,p2,p3]), ...]
+              无法转换时返回 None
+    """
+    segments_list = []
+
+    if shape.type in (ShapeType.LINE, ShapeType.POLYLINE):
+        if len(shape.points) < 2:
+            return None
+        pts = [(int(p[0]), int(p[1])) for p in shape.points]
+        segments_list.append([('line', pts)])
+
+    elif shape.type in (ShapeType.POLYGON, ShapeType.TRIANGLE, ShapeType.RECTANGLE):
+        if len(shape.points) < 3:
+            return None
+        pts = [(int(p[0]), int(p[1])) for p in shape.points]
+        if pts[0] != pts[-1]:
+            pts = pts + [pts[0]]
+        segments_list.append([('gon', pts)])
+
+    elif shape.type == ShapeType.CIRCLE:
+        if not shape.points:
+            return None
+        cx, cy = shape.points[0]
+        r = shape.extra.get('radius', 50)
+        k = 0.5522847498
+        pts = [
+            (cx + r, cy), (cx + r, cy - r * k), (cx + r * k, cy - r), (cx, cy - r),
+            (cx - r * k, cy - r), (cx - r, cy - r * k), (cx - r, cy),
+            (cx - r, cy + r * k), (cx - r * k, cy + r), (cx, cy + r),
+            (cx + r * k, cy + r), (cx + r, cy + r * k), (cx + r, cy),
+        ]
+        bezier_segs = [
+            [pts[0], pts[1], pts[2], pts[3]],
+            [pts[3], pts[4], pts[5], pts[6]],
+            [pts[6], pts[7], pts[8], pts[9]],
+            [pts[9], pts[10], pts[11], pts[12]],
+        ]
+        segs = [('bezier', seg) for seg in bezier_segs]
+        segments_list.append(segs)
+
+    elif shape.type == ShapeType.ARC:
+        if not shape.points:
+            return None
+        cx, cy = shape.points[0]
+        r = shape.extra.get('radius', 50)
+        start_angle = shape.extra.get('start_angle', 0.0)
+        end_angle = shape.extra.get('end_angle', 3.14159)
+        import math
+        n_segs = max(8, int(abs(end_angle - start_angle) / 0.2))
+        pts = []
+        for i in range(n_segs + 1):
+            t = start_angle + (end_angle - start_angle) * i / n_segs
+            x = cx + r * math.cos(t)
+            y = cy + r * math.sin(t)
+            pts.append((int(x), int(y)))
+        segments_list.append([('line', pts)])
+
+    elif shape.type == ShapeType.BEZIER:
+        pts = shape.points
+        if len(pts) < 4:
+            return None
+        bez_segs = []
+        if len(pts) == 4:
+            bez_segs.append([
+                (pts[0][0], pts[0][1]), (pts[1][0], pts[1][1]),
+                (pts[2][0], pts[2][1]), (pts[3][0], pts[3][1]),
+            ])
+        else:
+            i = 0
+            while i + 3 < len(pts):
+                bez_segs.append([
+                    (pts[i][0], pts[i][1]), (pts[i+1][0], pts[i+1][1]),
+                    (pts[i+2][0], pts[i+2][1]), (pts[i+3][0], pts[i+3][1]),
+                ])
+                i += 3
+        if not bez_segs:
+            return None
+        segs = [('bezier', seg) for seg in bez_segs]
+        segments_list.append(segs)
+
+    elif shape.type == ShapeType.ELLIPSE:
+        if not shape.points:
+            return None
+        cx, cy = shape.points[0]
+        rx = shape.extra.get('rx', 50)
+        ry = shape.extra.get('ry', 30)
+        rotation = shape.extra.get('rotation', 0.0)
+        import math
+        k = 0.5522847498
+        cos_r = math.cos(rotation)
+        sin_r = math.sin(rotation)
+
+        def rotate(x, y):
+            return (cx + x * cos_r - y * sin_r, cy + x * sin_r + y * cos_r)
+
+        bez_segs_raw = [
+            [rotate(rx, 0), rotate(rx, ry * k), rotate(rx * k, ry), rotate(0, ry)],
+            [rotate(0, ry), rotate(-rx * k, ry), rotate(-rx, ry * k), rotate(-rx, 0)],
+            [rotate(-rx, 0), rotate(-rx, -ry * k), rotate(-rx * k, -ry), rotate(0, -ry)],
+            [rotate(0, -ry), rotate(rx * k, -ry), rotate(rx, -ry * k), rotate(rx, 0)],
+        ]
+        segs = [('bezier', seg) for seg in bez_segs_raw]
+        segments_list.append(segs)
+
+    else:
+        return None
+
+    if not segments_list:
+        return None
+    return segments_list
+
+
+def _shapes_to_compound_record(shapes: list, linewidth: int = 80,
+                               line_alpha: int = 255) -> Optional[bytes]:
+    """
+    将多个 Shape（外框+孔洞）合并为单个 WSD 路径记录（多 seglist）。
+
+    WSD 原生支持多 seglist 的奇偶填充规则，可自动处理孔洞，
+    无需用白色填充覆盖。
+
+    参数:
+        shapes: 同组的 Shape 列表，第一项为外框，其余为孔洞
+        linewidth: 线宽（WSD单位）
+        line_alpha: 线条透明度
+
+    返回:
+        bytes: 合并的路径记录，无法转换时返回 None
+    """
+    _ensure_wsb_loaded()
+
+    # 使用第一个形状（外框）的颜色
+    outer = shapes[0]
+    line_color_bgra = _bgr_to_bgra_bytes(outer.line_color, alpha=line_alpha)
+    fill_color_bgr = _bgr_to_bgr_bytes(outer.fill_color)
+
+    # 收集所有形状的段
+    all_seglists = []
+    for shape in shapes:
+        segs = _extract_segments(shape)
+        if segs:
+            all_seglists.extend(segs)
+
+    if not all_seglists:
+        return None
+
+    return build_combo_path(
+        all_seglists,
+        line_color_bgra=line_color_bgra,
+        linewidth=linewidth,
+        fill_color_bgra=fill_color_bgr,
+    )
+
+
 def _shape_to_path_record(shape: Shape, linewidth: int = 80, line_alpha: int = 255) -> Optional[bytes]:
     """
     将 Shape 对象转换为对应的 WSD 路径记录（esShapePath 格式，支持颜色）
@@ -876,36 +1034,55 @@ def export_wsd_single(canvas_data: CanvasData,
     path_recs = []   # [(record_bytes, cx, cy)]
     text_recs = []   # [(record_bytes, ax, ay)]
 
-    for shape in canvas_data.shapes:
-        # 坐标变换
-        transformed = _transform_shape(shape, scale, offset_x, offset_y)
-        # 判断是否为孔洞（复合路径中的挖孔子路径）
-        is_hole = transformed.extra.get('is_hole', False) if transformed.extra else False
-        # 应用覆盖颜色（孔洞不覆盖线条颜色，保持无描边）
-        if override_bgr is not None and not is_hole:
-            transformed.line_color = override_bgr
+    # 按 path_group_id 分组形状（复合路径：同组多个形状=外框+孔洞）
+    from collections import OrderedDict as _OD
+    shape_groups = _OD()  # {group_id: [shape_index, ...]}
+    for si, shape in enumerate(canvas_data.shapes):
+        gid = shape.extra.get('path_group_id', si) if shape.extra else si
+        shape_groups.setdefault(gid, []).append(si)
 
-        # 孔洞使用 linewidth=0（无描边），其他形状使用指定线宽
-        shape_lw = 0 if is_hole else linewidth
-
-        # 圆形走原生圆记录
-        if transformed.type == ShapeType.CIRCLE and transformed.points:
-            cx, cy = int(transformed.points[0][0]), int(transformed.points[0][1])
-            radius = int(transformed.extra.get('radius', 50))
-            # 计算圆形的线条颜色（与_path_record一致）
-            circle_color_bgra = _bgr_to_bgra_bytes(transformed.line_color, alpha=line_alpha)
-            rec = build_circle_record(cx, cy, radius, linewidth=shape_lw,
-                                      line_color_bgra=circle_color_bgra)
-            path_recs.append((rec, float(cx), float(cy)))
-        else:
-            rec = _shape_to_path_record(transformed, linewidth=shape_lw, line_alpha=line_alpha)
+    for gid, indices in shape_groups.items():
+        if len(indices) > 1:
+            # 复合路径组：合并为单个 WSD 记录（多 seglist，原生奇偶填充）
+            group_shapes = []
+            for si in indices:
+                transformed = _transform_shape(canvas_data.shapes[si], scale, offset_x, offset_y)
+                if override_bgr is not None:
+                    transformed.line_color = override_bgr
+                group_shapes.append(transformed)
+            rec = _shapes_to_compound_record(group_shapes, linewidth=linewidth, line_alpha=line_alpha)
             if rec is not None:
-                if transformed.points:
-                    pcx = sum(p[0] for p in transformed.points) / len(transformed.points)
-                    pcy = sum(p[1] for p in transformed.points) / len(transformed.points)
+                # 中心点取外框中心
+                outer = group_shapes[0]
+                if outer.points:
+                    pcx = sum(p[0] for p in outer.points) / len(outer.points)
+                    pcy = sum(p[1] for p in outer.points) / len(outer.points)
                 else:
                     pcx, pcy = 0.0, 0.0
                 path_recs.append((rec, pcx, pcy))
+        else:
+            # 单独形状：走原有逻辑
+            shape = canvas_data.shapes[indices[0]]
+            transformed = _transform_shape(shape, scale, offset_x, offset_y)
+            if override_bgr is not None:
+                transformed.line_color = override_bgr
+
+            if transformed.type == ShapeType.CIRCLE and transformed.points:
+                cx, cy = int(transformed.points[0][0]), int(transformed.points[0][1])
+                radius = int(transformed.extra.get('radius', 50))
+                circle_color_bgra = _bgr_to_bgra_bytes(transformed.line_color, alpha=line_alpha)
+                rec = build_circle_record(cx, cy, radius, linewidth=linewidth,
+                                          line_color_bgra=circle_color_bgra)
+                path_recs.append((rec, float(cx), float(cy)))
+            else:
+                rec = _shape_to_path_record(transformed, linewidth=linewidth, line_alpha=line_alpha)
+                if rec is not None:
+                    if transformed.points:
+                        pcx = sum(p[0] for p in transformed.points) / len(transformed.points)
+                        pcy = sum(p[1] for p in transformed.points) / len(transformed.points)
+                    else:
+                        pcx, pcy = 0.0, 0.0
+                    path_recs.append((rec, pcx, pcy))
 
     for annotation in canvas_data.annotations:
         # 坐标变换
@@ -1044,30 +1221,54 @@ def export_wsd_multi(canvas_list: List[CanvasData],
         path_recs = []   # [(record_bytes, cx, cy)]
         text_recs = []   # [(record_bytes, ax, ay)]
 
-        for shape in canvas_data.shapes:
-            transformed = _transform_shape(shape, scale, offset_x, offset_y)
-            is_hole = transformed.extra.get('is_hole', False) if transformed.extra else False
-            if override_bgr is not None and not is_hole:
-                transformed.line_color = override_bgr
+        # 按 path_group_id 分组形状（复合路径：同组多个形状=外框+孔洞）
+        from collections import OrderedDict as _OD
+        shape_groups = _OD()
+        for si, shape in enumerate(canvas_data.shapes):
+            gid = shape.extra.get('path_group_id', si) if shape.extra else si
+            shape_groups.setdefault(gid, []).append(si)
 
-            shape_lw = 0 if is_hole else linewidth
-
-            if transformed.type == ShapeType.CIRCLE and transformed.points:
-                cx, cy = int(transformed.points[0][0]), int(transformed.points[0][1])
-                radius = int(transformed.extra.get('radius', 50))
-                circle_color_bgra = _bgr_to_bgra_bytes(transformed.line_color, alpha=line_alpha)
-                rec = build_circle_record(cx, cy, radius, linewidth=shape_lw,
-                                          line_color_bgra=circle_color_bgra)
-                path_recs.append((rec, float(cx), float(cy)))
-            else:
-                rec = _shape_to_path_record(transformed, linewidth=shape_lw, line_alpha=line_alpha)
+        for gid, indices in shape_groups.items():
+            if len(indices) > 1:
+                # 复合路径组：合并为单个 WSD 记录（多 seglist，原生奇偶填充）
+                group_shapes = []
+                for si in indices:
+                    transformed = _transform_shape(canvas_data.shapes[si], scale, offset_x, offset_y)
+                    if override_bgr is not None:
+                        transformed.line_color = override_bgr
+                    group_shapes.append(transformed)
+                rec = _shapes_to_compound_record(group_shapes, linewidth=linewidth, line_alpha=line_alpha)
                 if rec is not None:
-                    if transformed.points:
-                        pcx = sum(p[0] for p in transformed.points) / len(transformed.points)
-                        pcy = sum(p[1] for p in transformed.points) / len(transformed.points)
+                    outer = group_shapes[0]
+                    if outer.points:
+                        pcx = sum(p[0] for p in outer.points) / len(outer.points)
+                        pcy = sum(p[1] for p in outer.points) / len(outer.points)
                     else:
                         pcx, pcy = 0.0, 0.0
                     path_recs.append((rec, pcx, pcy))
+            else:
+                # 单独形状：走原有逻辑
+                shape = canvas_data.shapes[indices[0]]
+                transformed = _transform_shape(shape, scale, offset_x, offset_y)
+                if override_bgr is not None:
+                    transformed.line_color = override_bgr
+
+                if transformed.type == ShapeType.CIRCLE and transformed.points:
+                    cx, cy = int(transformed.points[0][0]), int(transformed.points[0][1])
+                    radius = int(transformed.extra.get('radius', 50))
+                    circle_color_bgra = _bgr_to_bgra_bytes(transformed.line_color, alpha=line_alpha)
+                    rec = build_circle_record(cx, cy, radius, linewidth=linewidth,
+                                              line_color_bgra=circle_color_bgra)
+                    path_recs.append((rec, float(cx), float(cy)))
+                else:
+                    rec = _shape_to_path_record(transformed, linewidth=linewidth, line_alpha=line_alpha)
+                    if rec is not None:
+                        if transformed.points:
+                            pcx = sum(p[0] for p in transformed.points) / len(transformed.points)
+                            pcy = sum(p[1] for p in transformed.points) / len(transformed.points)
+                        else:
+                            pcx, pcy = 0.0, 0.0
+                        path_recs.append((rec, pcx, pcy))
 
         for annotation in canvas_data.annotations:
             transformed = _transform_annotation(annotation, scale, offset_x, offset_y)

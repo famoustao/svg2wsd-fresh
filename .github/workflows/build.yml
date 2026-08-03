@@ -110,6 +110,31 @@ jobs:
           retention-days: 1
           if-no-files-found: warn
 
+      - name: Clean old release assets
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          Write-Host "=== 清理 continuous release 中的旧 assets ==="
+          try {
+            $assets = gh api repos/${{ github.repository }}/releases/tags/continuous --jq '.assets[] | "\(.id)|\(.name)"' 2>$null
+            if (-not $assets) {
+              Write-Host "没有找到旧 assets（首次构建或 release 不存在）"
+            } else {
+              $assets | ForEach-Object {
+                $parts = $_ -split '\|'
+                $id = $parts[0]
+                $name = $parts[1]
+                Write-Host "删除旧 asset: $name (id=$id)"
+                try { gh api -X DELETE repos/${{ github.repository }}/releases/assets/$id 2>$null } catch {}
+              }
+            }
+          } catch {
+            Write-Host "获取 release 信息失败（可能首次构建）: $_"
+          }
+          Write-Host "=== 旧 assets 清理完成 ==="
+
       - name: Upload to Release
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         uses: softprops/action-gh-release@v2
@@ -123,6 +148,10 @@ jobs:
             **提交**: `${{ github.sha }}`
             **构建时间**: ${{ steps.version.outputs.BUILD_DATE }}
             **提交短哈希**: `${{ steps.version.outputs.COMMIT_SHORT }}`
+
+            ### 下载说明
+
+            请下载下方唯一的 `svg2wsd-windows-*.zip` 文件（每次构建会自动清理旧版本）。
 
             ### 启动失败排查
 
