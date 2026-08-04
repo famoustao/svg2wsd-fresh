@@ -466,6 +466,8 @@ def _shape_to_path_record(shape: Shape, linewidth: int = 80, line_alpha: int = 2
 
     elif shape.type == ShapeType.CIRCLE:
         # 圆形：使用原生椭圆段0x4285（外接矩形法，rx=ry=r即为正圆）
+        # 注意：0x4284原生圆段在WSD查看器中有位置渲染bug，改用0x4285椭圆段
+        # 当rx=ry时渲染为完美正圆，与原生圆视觉效果完全一致
         _ensure_wsb_loaded()
         if not shape.points:
             return None
@@ -919,7 +921,7 @@ def export_wsd_single(canvas_data: CanvasData,
 
     形状类型映射:
       - 折线/多边形/直线/三角形/矩形 → build_polyline_record
-      - 圆 → build_ellipse_path (0x4285原生椭圆段，rx=ry=r)
+      - 圆 → build_ellipse_path (0x4285椭圆段，rx=ry=r即为正圆，避免0x4284位置bug)
       - 圆弧 → build_arc_record
       - 贝塞尔曲线 → build_bezier_path / build_bezier_chain
       - 椭圆 → 多边形近似
