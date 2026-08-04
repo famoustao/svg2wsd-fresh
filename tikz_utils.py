@@ -1092,27 +1092,11 @@ def _add_circle_to_subpath(subpath, cx, cy, r, segments=72):
 
 
 def _add_arc_to_subpath(subpath, cx, cy, r, start_deg, end_deg, segments_per_rad=12):
-    """将圆弧分解为点列"""
-    start_rad = math.radians(start_deg)
-    end_rad = math.radians(end_deg)
-
-    # 计算角度差（处理圆弧方向）
-    delta = end_rad - start_rad
-    # TikZ 默认逆时针
-    n_steps = max(int(abs(delta) * segments_per_rad), 2)
-
-    points = []
-    for i in range(n_steps + 1):
-        t = i / n_steps
-        angle = start_rad + delta * t
-        x = cx + r * math.cos(angle)
-        y = cy + r * math.sin(angle)
-        points.append((x, y))
-
-    if not subpath:
-        subpath.append(('move', points[0]))
-    for p in points[1:]:
-        subpath.append(('line', p))
+    """将圆弧作为原生弧操作添加到子路径
+    
+    保留圆弧参数，后续转换为 ShapeType.ARC。
+    """
+    subpath.append(('arc', (cx, cy, r, start_deg, end_deg)))
 
 
 def _add_elliptical_arc_to_subpath(subpath, cx, cy, rx, ry, start_deg, end_deg, segments_per_rad=8):

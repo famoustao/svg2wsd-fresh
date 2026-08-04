@@ -23,6 +23,7 @@ PureWSDBuilder = None
 build_polyline_record = None
 build_circle_record = None
 build_arc_record = None
+build_ellipse_path = None
 build_bezier_path = None
 build_bezier_chain = None
 build_combo_path = None
@@ -38,7 +39,7 @@ DEFAULT_LINEWIDTH = 80
 def _ensure_wsb_loaded():
     """确保 wsd_pure_builder 模块已加载"""
     global _wsb_loaded, PureWSDBuilder, build_polyline_record
-    global build_circle_record, build_arc_record, build_bezier_path
+    global build_circle_record, build_circle_path, build_ellipse_path, build_arc_record, build_bezier_path
     global build_bezier_chain, build_combo_path, build_text_record
     global build_wsd_pure, TEXT_NORMAL, TEXT_SUBSCRIPT
     global TEXT_SUPERSCRIPT, MM_TO_WSD, DEFAULT_LINEWIDTH
@@ -51,6 +52,8 @@ def _ensure_wsb_loaded():
             PureWSDBuilder as _PureWSDBuilder,
             build_polyline_record as _build_polyline_record,
             build_circle_record as _build_circle_record,
+            build_circle_path as _build_circle_path,
+            build_ellipse_path as _build_ellipse_path,
             build_arc_record as _build_arc_record,
             build_bezier_path as _build_bezier_path,
             build_bezier_chain as _build_bezier_chain,
@@ -66,6 +69,8 @@ def _ensure_wsb_loaded():
         PureWSDBuilder = _PureWSDBuilder
         build_polyline_record = _build_polyline_record
         build_circle_record = _build_circle_record
+        build_circle_path = _build_circle_path
+        build_ellipse_path = _build_ellipse_path
         build_arc_record = _build_arc_record
         build_bezier_path = _build_bezier_path
         build_bezier_chain = _build_bezier_chain
@@ -304,21 +309,7 @@ def _extract_segments(shape: Shape) -> Optional[list]:
             return None
         cx, cy = shape.points[0]
         r = shape.extra.get('radius', 50)
-        k = 0.5522847498
-        pts = [
-            (cx + r, cy), (cx + r, cy - r * k), (cx + r * k, cy - r), (cx, cy - r),
-            (cx - r * k, cy - r), (cx - r, cy - r * k), (cx - r, cy),
-            (cx - r, cy + r * k), (cx - r * k, cy + r), (cx, cy + r),
-            (cx + r * k, cy + r), (cx + r, cy + r * k), (cx + r, cy),
-        ]
-        bezier_segs = [
-            [pts[0], pts[1], pts[2], pts[3]],
-            [pts[3], pts[4], pts[5], pts[6]],
-            [pts[6], pts[7], pts[8], pts[9]],
-            [pts[9], pts[10], pts[11], pts[12]],
-        ]
-        segs = [('bezier', seg) for seg in bezier_segs]
-        segments_list.append(segs)
+        segments_list.append([('ellipse', (cx, cy, r, r))])
 
     elif shape.type == ShapeType.ARC:
         if not shape.points:
@@ -474,62 +465,33 @@ def _shape_to_path_record(shape: Shape, linewidth: int = 80, line_alpha: int = 2
         segments_list.append([('gon', pts)])
 
     elif shape.type == ShapeType.CIRCLE:
-        # 圆形：用贝塞尔曲线近似圆
+        # 圆形：使用原生椭圆段0x4285（外接矩形法，rx=ry=r即为正圆）
+        _ensure_wsb_loaded()
         if not shape.points:
             return None
         cx, cy = shape.points[0]
         r = shape.extra.get('radius', 50)
-        # 用 4 段贝塞尔曲线近似圆（标准近似）
-        k = 0.5522847498
-        pts = [
-            # 上半部分（从右到左）
-            (cx + r, cy),
-            (cx + r, cy - r * k),
-            (cx + r * k, cy - r),
-            (cx, cy - r),
-            # 左上
-            (cx - r * k, cy - r),
-            (cx - r, cy - r * k),
-            (cx - r, cy),
-            # 下半部分（从左到右）
-            (cx - r, cy + r * k),
-            (cx - r * k, cy + r),
-            (cx, cy + r),
-            # 右下
-            (cx + r * k, cy + r),
-            (cx + r, cy + r * k),
-            (cx + r, cy),
-        ]
-        # 转换为 4 段贝塞尔曲线
-        bezier_segs = [
-            [pts[0], pts[1], pts[2], pts[3]],
-            [pts[3], pts[4], pts[5], pts[6]],
-            [pts[6], pts[7], pts[8], pts[9]],
-            [pts[9], pts[10], pts[11], pts[12]],
-        ]
-
-        # 圆形：用4段贝塞尔曲线近似，直接使用bezier段（支持填充）
-        segs = [('bezier', seg) for seg in bezier_segs]
-        segments_list.append(segs)
+        return build_ellipse_path(
+            cx, cy, r, r,
+            linewidth=linewidth,
+            line_color_bgra=line_color_bgra,
+            fill_color_bgr=fill_color_bgr,
+        )
 
     elif shape.type == ShapeType.ARC:
-        # 圆弧：用贝塞尔曲线近似
+        # 圆弧：使用原生圆弧格式（85字节）
+        _ensure_wsb_loaded()
         if not shape.points:
             return None
         cx, cy = shape.points[0]
         r = shape.extra.get('radius', 50)
         start_angle = shape.extra.get('start_angle', 0.0)
         end_angle = shape.extra.get('end_angle', 3.14159)
-        # 简化：用多段直线近似圆弧
-        import math
-        n_segs = max(8, int(abs(end_angle - start_angle) / 0.2))
-        pts = []
-        for i in range(n_segs + 1):
-            t = start_angle + (end_angle - start_angle) * i / n_segs
-            x = cx + r * math.cos(t)
-            y = cy + r * math.sin(t)
-            pts.append((int(x), int(y)))
-        segments_list.append([('line', pts)])
+        return build_arc_record(
+            cx, cy, r, start_angle, end_angle,
+            linewidth=linewidth,
+            line_color_bgra=line_color_bgra,
+        )
 
     elif shape.type == ShapeType.BEZIER:
         # 贝塞尔曲线
@@ -957,7 +919,7 @@ def export_wsd_single(canvas_data: CanvasData,
 
     形状类型映射:
       - 折线/多边形/直线/三角形/矩形 → build_polyline_record
-      - 圆 → build_circle_record
+      - 圆 → build_ellipse_path (0x4285原生椭圆段，rx=ry=r)
       - 圆弧 → build_arc_record
       - 贝塞尔曲线 → build_bezier_path / build_bezier_chain
       - 椭圆 → 多边形近似
@@ -1068,14 +1030,15 @@ def export_wsd_single(canvas_data: CanvasData,
                 transformed.line_color = override_bgr
 
             if transformed.type == ShapeType.CIRCLE and transformed.points:
-                cx, cy = int(transformed.points[0][0]), int(transformed.points[0][1])
-                radius = int(transformed.extra.get('radius', 50))
-                circle_color_bgra = _bgr_to_bgra_bytes(transformed.line_color, alpha=line_alpha)
-                circle_fill_bgra = _bgr_to_bgra_bytes(transformed.fill_color, alpha=line_alpha) if transformed.fill_color else None
-                rec = build_circle_record(cx, cy, radius, linewidth=linewidth,
-                                          line_color_bgra=circle_color_bgra,
-                                          fill_color_bgra=circle_fill_bgra)
-                path_recs.append((rec, float(cx), float(cy)))
+                # 圆形：使用原生椭圆段0x4285（外接矩形法）
+                rec = _shape_to_path_record(transformed, linewidth=linewidth, line_alpha=line_alpha)
+                if rec is not None:
+                    if transformed.points:
+                        pcx = sum(p[0] for p in transformed.points) / len(transformed.points)
+                        pcy = sum(p[1] for p in transformed.points) / len(transformed.points)
+                    else:
+                        pcx, pcy = 0.0, 0.0
+                    path_recs.append((rec, pcx, pcy))
             else:
                 rec = _shape_to_path_record(transformed, linewidth=linewidth, line_alpha=line_alpha)
                 if rec is not None:
@@ -1256,12 +1219,15 @@ def export_wsd_multi(canvas_list: List[CanvasData],
                     transformed.line_color = override_bgr
 
                 if transformed.type == ShapeType.CIRCLE and transformed.points:
-                    cx, cy = int(transformed.points[0][0]), int(transformed.points[0][1])
-                    radius = int(transformed.extra.get('radius', 50))
-                    circle_color_bgra = _bgr_to_bgra_bytes(transformed.line_color, alpha=line_alpha)
-                    rec = build_circle_record(cx, cy, radius, linewidth=linewidth,
-                                              line_color_bgra=circle_color_bgra)
-                    path_recs.append((rec, float(cx), float(cy)))
+                    # 圆形：使用LINE段多边形近似（64边形），与GON/LINE段坐标系统一致
+                    rec = _shape_to_path_record(transformed, linewidth=linewidth, line_alpha=line_alpha)
+                    if rec is not None:
+                        if transformed.points:
+                            pcx = sum(p[0] for p in transformed.points) / len(transformed.points)
+                            pcy = sum(p[1] for p in transformed.points) / len(transformed.points)
+                        else:
+                            pcx, pcy = 0.0, 0.0
+                        path_recs.append((rec, pcx, pcy))
                 else:
                     rec = _shape_to_path_record(transformed, linewidth=linewidth, line_alpha=line_alpha)
                     if rec is not None:

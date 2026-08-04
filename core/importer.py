@@ -730,6 +730,8 @@ def _convert_tikz_shapes(tikz_paths) -> list:
             points = []       # move/line的点
             has_curve = False  # 是否有贝塞尔曲线
             has_close = False  # 是否有闭合操作
+            has_arc = False    # 是否有圆弧
+            arc_data = None    # 圆弧参数: (cx, cy, r, start_deg, end_deg)
             curve_points = [] # 贝塞尔控制点序列: [(c1x,c1y,c2x,c2y,ex,ey), ...]
             move_point = None
 
@@ -743,6 +745,9 @@ def _convert_tikz_shapes(tikz_paths) -> list:
                     # data: (c1x, c1y, c2x, c2y, ex, ey)
                     has_curve = True
                     curve_points.append(data)
+                elif op == 'arc':
+                    has_arc = True
+                    arc_data = data  # (cx, cy, r, start_deg, end_deg)
                 elif op == 'close':
                     has_close = True
 
@@ -808,6 +813,21 @@ def _convert_tikz_shapes(tikz_paths) -> list:
                     fill_color=fill_color_bgr,
                     line_width=line_width,
                     extra={'radius': circle_radius}
+                ))
+            elif has_arc and arc_data:
+                # 原生圆弧：保留弧参数，后续导出为WSD原生圆弧
+                cx, cy, r, start_deg, end_deg = arc_data
+                shapes.append(Shape(
+                    type=ShapeType.ARC,
+                    points=[(cx, cy)],
+                    line_color=line_color_bgr,
+                    fill_color=fill_color_bgr,
+                    line_width=line_width,
+                    extra={
+                        'radius': r,
+                        'start_angle': math.radians(start_deg),
+                        'end_angle': math.radians(end_deg),
+                    }
                 ))
             elif has_curve:
                 # 有贝塞尔曲线

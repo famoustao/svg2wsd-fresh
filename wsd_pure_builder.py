@@ -1243,7 +1243,7 @@ _TWO_PI_BYTES = bytes.fromhex('db0fc940')
 CIRCLE_PROTO = bytes.fromhex(
     '0f33cf100704ffff01ff000000000000'  # +0x00 ~ +0x0f
     '50000000000100010000008442000000'  # +0x10 ~ +0x1f
-    '443f9c4538e5144609f2ec410000c944'  # +0x20 ~ +0x2f  (cx, cy, r, 2π)
+    '443f9c4538e5144609f2ec41f0181f40'  # +0x20 ~ +0x2f  (cx, cy, r, param4=2.485897)
     '64'                                 # 结束
 )
 # 验证: 32B头 + 4*4B float + 1B结束 = 32+16+1 = 49B ✓
@@ -1447,18 +1447,103 @@ def build_circle_record(cx, cy, radius, linewidth=None, line_color_bgra=None,
     struct.pack_into('<f', rec, 0x20, float(cx))      # cx
     struct.pack_into('<f', rec, 0x24, float(cy))      # cy
     struct.pack_into('<f', rec, 0x28, float(radius))  # r
-    # +0x2c: 2π（整圆标志），确保使用正确的值
-    rec[0x2c:0x30] = _TWO_PI_BYTES
+    # +0x2c: 完整圆标志（2.485897），与WSD查看器原生圆段一致，不要修改
+    # CIRCLE_PROTO 中已包含正确的值 2.485897
 
     return bytes(rec)
 
 
+def build_circle_path(cx, cy, radius, linewidth=None, line_color_bgra=None,
+                     fill_color_bgr=None):
+    """
+    构建圆形路径记录（标准esShapePath格式 + 原生圆段0x4284）
+
+    使用标准路径记录格式，内部包含一个原生圆段。
+    与WSD查看器兼容性最好的圆形格式。
+
+    Args:
+        cx, cy: 圆心坐标（WSD单位）
+        radius: 半径（WSD单位）
+        linewidth: 线宽，None=使用默认值80
+        line_color_bgra: 线条颜色 (B, G, R, A) 4字节，None=默认黑色
+        fill_color_bgr: 填充颜色 (B, G, R) 3字节，None=无填充
+
+    Returns:
+        bytes: 完整的路径记录
+    """
+    if line_color_bgra is None:
+        line_color_bgra = bytes([0x00, 0x00, 0x00, 0xff])  # 黑色
+    if linewidth is None:
+        linewidth = DEFAULT_LINEWIDTH
+
+    # 构建原生圆段 (0x4284)
+    seg = bytearray()
+    seg += struct.pack('<H', _SEG_CIRCLE_NATIVE)  # u16 tag = 0x4284
+    seg += bytes([0x00])                           # u8 mflag = 0x00 (完整圆)
+    seg += struct.pack('<H', 0)                    # u16 npts = 0
+    seg += struct.pack('<f', float(cx))            # f32 cx
+    seg += struct.pack('<f', float(cy))            # f32 cy
+    seg += struct.pack('<f', float(radius))        # f32 r
+    # param4 = 2.485897 表示完整圆（与WSD查看器原生圆段一致，0x401f18f0）
+    seg += struct.pack('<f', 2.485897)             # f32 param4 = 2.485897
+
+    # 构建路径记录
+    return _build_es_path(
+        [[bytes(seg)]],
+        line_color_bgra,
+        linewidth,
+        fill_color_bgr,
+    )
+
+
+def build_ellipse_path(cx, cy, rx, ry, linewidth=None, line_color_bgra=None,
+                       fill_color_bgr=None):
+    """
+    构建椭圆路径记录（0x4285原生椭圆段，外接矩形法）
+
+    使用外接矩形法：pt0=左上角, pt1=右下角。
+    当 rx=ry 时为正圆，渲染正确。
+
+    Args:
+        cx, cy: 椭圆中心坐标（WSD单位）
+        rx, ry: X轴半径和Y轴半径（WSD单位）
+        linewidth: 线宽，None=使用默认值80
+        line_color_bgra: 线条颜色 (B, G, R, A) 4字节，None=默认黑色
+        fill_color_bgr: 填充颜色 (B, G, R) 3字节，None=无填充
+
+    Returns:
+        bytes: 完整的路径记录
+    """
+    if line_color_bgra is None:
+        line_color_bgra = bytes([0x00, 0x00, 0x00, 0xff])
+    if linewidth is None:
+        linewidth = DEFAULT_LINEWIDTH
+
+    # 构建0x4285椭圆段
+    seg = bytearray()
+    seg += struct.pack('<H', _SEG_ELLIPSE)   # u16 tag = 0x4285
+    seg += bytes([0x00])                      # u8 mflag = 0x00
+    seg += struct.pack('<H', 2)              # u16 npts = 2
+    # 外接矩形对角点（左上，右下）
+    seg += struct.pack('<ii', int(round(cx - rx)), int(round(cy - ry)))  # pt0
+    seg += struct.pack('<ii', int(round(cx + rx)), int(round(cy + ry)))  # pt1
+
+    # 构建路径记录
+    return _build_es_path(
+        [[bytes(seg)]],
+        line_color_bgra,
+        linewidth,
+        fill_color_bgr,
+    )
+
+
 def build_arc_record(cx, cy, radius, start_angle, end_angle, linewidth=None,
-                     line_color_bgra=None):
+                     line_color_bgra=None, closed=False):
     """
     构建圆弧记录（原生圆弧格式，85字节）
 
-    开放路径类 0x00FF，子类型 0x07，圆弧子标记 'C'。
+    开放路径类 0x00FF（弧形），闭合路径类 0x10CF（封闭弧形）。
+    子类型 0x07，圆弧子标记 'C'。
     基于 wsd_gt_build.py 中验证过的格式。
 
     角度系统（数学坐标系）：
@@ -1471,6 +1556,7 @@ def build_arc_record(cx, cy, radius, start_angle, end_angle, linewidth=None,
         end_angle: 终止角度（弧度，数学坐标系）
         linewidth: 线宽，None=使用默认值
         line_color_bgra: 线条颜色 (B, G, R, A) 4字节，None=使用原型默认色
+        closed: True=闭合路径类(0x10CF)，False=开放路径类(0x00FF)
 
     Returns:
         bytes: 完整的圆弧记录
@@ -1507,29 +1593,39 @@ def build_arc_record(cx, cy, radius, start_angle, end_angle, linewidth=None,
         y = cy - radius * math.cos(a)
         pts.append((int(round(x)), int(round(y))))
 
-    # 构建85字节的圆弧路径
-    rec = bytearray(85)
-    p = 0
-
-    # 头部
-    struct.pack_into('<H', rec, p, 0x330f); p += 2       # 标记
-    rec[p:p+4] = bytes([0xff, 0x00, 0x07, 0x04]); p += 4  # 类型字 0x00FF + 0704
-    struct.pack_into('<H', rec, p, 0xffff); p += 2        # 保留
-    rec[p:p+4] = bytes([0x01, 0xff, 0x00, 0x00]) if line_color_bgra is None else bytes(line_color_bgra[:4]); p += 4  # 线条颜色
-    rec[p:p+4] = bytes(4); p += 4                           # 填充（无）
-    struct.pack_into('<i', rec, p, int(linewidth) if linewidth else 80); p += 4  # 线宽
-    rec[p] = 0x00; p += 1  # flag
-
-    # seglist_count = 4
-    struct.pack_into('<H', rec, p, 4); p += 2
-
-    # 固定数据 (+23到+35，13字节)
-    fixed_bytes = bytes([
-        0x04, 0x00, 0x01, 0x00,  # +23-26
-        0x01, 0x00, 0x00, 0x00,  # +27-30
-        0x07, 0x43, 0x00, 0x03, 0x00,  # +31-35
-    ])
-    rec[p:p+len(fixed_bytes)] = fixed_bytes; p += len(fixed_bytes)
+    if closed:
+        # 闭合路径：85字节，含 0x330f 标记，类型为 0x10CF
+        # 基于WSD查看器"连接"命令的格式验证
+        # 格式: 0x330f + cf 10 07 04 + 固定数据 + 3个点 + 零填充 + 半径+角度+圆心+尾部(5字节)
+        rec = bytearray(85)
+        p = 0
+        struct.pack_into('<H', rec, p, 0x330f); p += 2         # 标记
+        rec[p:p+4] = bytes([0xcf, 0x10, 0x07, 0x04]); p += 4  # 闭合路径类型
+        struct.pack_into('<H', rec, p, 0xffff); p += 2         # 保留
+        rec[p:p+4] = bytes([0x01, 0xff, 0x00, 0x00]) if line_color_bgra is None else bytes(line_color_bgra[:4]); p += 4  # 线条颜色
+        rec[p:p+4] = bytes(4); p += 4                            # 填充（无）
+        struct.pack_into('<i', rec, p, int(linewidth) if linewidth else 80); p += 4  # 线宽
+        rec[p] = 0x00; p += 1  # flag
+        struct.pack_into('<H', rec, p, 1); p += 2               # seglist_count = 1
+        # 固定数据 (9字节)
+        rec[p:p+4] = bytes([0x01, 0x00, 0x00, 0x00]); p += 4
+        rec[p:p+5] = bytes([0x07, 0x43, 0x00, 0x03, 0x00]); p += 5
+    else:
+        # 开放路径：85字节，以 0x330f 开头，类型为 0x00FF
+        rec = bytearray(85)
+        p = 0
+        struct.pack_into('<H', rec, p, 0x330f); p += 2         # 标记
+        rec[p:p+4] = bytes([0xff, 0x00, 0x07, 0x04]); p += 4  # 开放路径类型
+        struct.pack_into('<H', rec, p, 0xffff); p += 2         # 保留
+        rec[p:p+4] = bytes([0x01, 0xff, 0x00, 0x00]) if line_color_bgra is None else bytes(line_color_bgra[:4]); p += 4  # 线条颜色
+        rec[p:p+4] = bytes(4); p += 4                            # 填充（无）
+        struct.pack_into('<i', rec, p, int(linewidth) if linewidth else 80); p += 4  # 线宽
+        rec[p] = 0x00; p += 1  # flag
+        struct.pack_into('<H', rec, p, 4); p += 2               # seglist_count = 4
+        # 固定数据 (13字节)
+        rec[p:p+4] = bytes([0x04, 0x00, 0x01, 0x00]); p += 4
+        rec[p:p+4] = bytes([0x01, 0x00, 0x00, 0x00]); p += 4
+        rec[p:p+5] = bytes([0x07, 0x43, 0x00, 0x03, 0x00]); p += 5
 
     # 3个点 (24字节) + 4字节零 = 28字节
     for x, y in pts:
@@ -1546,8 +1642,10 @@ def build_arc_record(cx, cy, radius, start_angle, end_angle, linewidth=None,
     struct.pack_into('<i', rec, p, int(round(cx))); p += 4
     struct.pack_into('<i', rec, p, int(round(cy))); p += 4
 
-    # 尾部 0x64
+    # 尾部：开放路径1字节(0x64)，闭合路径5字节(0x64 + 4零)
     rec[p] = 0x64; p += 1
+    if closed:
+        rec[p:p+4] = bytes(4); p += 4
 
     return bytes(rec)
 
@@ -1558,6 +1656,8 @@ def build_arc_record(cx, cy, radius, start_angle, end_angle, linewidth=None,
 _SEG_LINE = 0x4701      # 直线/折线
 _SEG_GON = 0x4702       # 多边形/闭合折线
 _SEG_BEZIER = 0x4703    # 三次贝塞尔曲线
+_SEG_CIRCLE_NATIVE = 0x4284  # 原生圆/椭圆/弧 (float32参数，WSD查看器渲染有bug)
+_SEG_ELLIPSE = 0x4285       # 原生椭圆（外接矩形法，pt0=左上, pt1=右下，渲染正确）
 
 # esShapePath 路径头部标记
 _ES_PATH_TAG = 0x330f
@@ -1676,6 +1776,16 @@ def build_combo_path(segments_list,
                 seg_bytes_list.append(_make_es_seg(_SEG_GON, pts))
             elif seg_type == 'bezier':
                 seg_bytes_list.append(_make_es_seg(_SEG_BEZIER, seg_data))
+            elif seg_type == 'ellipse':
+                # 椭圆段：data = (cx, cy, rx, ry)
+                cx, cy, rx, ry = seg_data
+                e_seg = bytearray()
+                e_seg += struct.pack('<H', _SEG_ELLIPSE)
+                e_seg += bytes([0x00])
+                e_seg += struct.pack('<H', 2)
+                e_seg += struct.pack('<ii', int(round(cx - rx)), int(round(cy - ry)))
+                e_seg += struct.pack('<ii', int(round(cx + rx)), int(round(cy + ry)))
+                seg_bytes_list.append(bytes(e_seg))
             else:
                 raise ValueError(f"未知段类型: {seg_type}")
         seglists.append(seg_bytes_list)
