@@ -430,7 +430,8 @@ def _parse_coord(coord_str):
 
     # ---- 命名坐标查找 ----
     clean = coord_str.strip()
-    if re.match(r'^[a-zA-Z]\w*$', clean):
+    # 支持带 ' 的坐标名（如 B', C'）
+    if re.match(r"^[a-zA-Z_][a-zA-Z_0-9']*$", clean):
         if hasattr(_parse_coord, '_named_coords') and _parse_coord._named_coords:
             pt = _parse_coord._named_coords.get(clean)
             if pt:
@@ -1341,6 +1342,60 @@ def extract_tikz_from_tex(tex_content):
     return tikz_codes
 
 
+def _compute_intersection_coord(coord_str, named_coords):
+    """
+    计算 intersection of 语法的交点坐标
+
+    支持格式: intersection of X--Y and Z--W
+    其中 X, Y, Z, W 是已定义的命名坐标。
+
+    参数:
+        coord_str: 坐标字符串，如 "intersection of A--D and B--P"
+        named_coords: 已定义的命名坐标字典
+
+    返回:
+        (x, y) 交点坐标，或 None（无法计算）
+    """
+    m = re.match(
+        r'intersection\s+of\s+(\w+)\s*--\s*(\w+)\s+and\s+(\w+)\s*--\s*(\w+)',
+        coord_str, re.IGNORECASE
+    )
+    if not m:
+        return None
+
+    p1_name = m.group(1)
+    p2_name = m.group(2)
+    p3_name = m.group(3)
+    p4_name = m.group(4)
+
+    # 查找所有4个点的坐标
+    p1 = named_coords.get(p1_name)
+    p2 = named_coords.get(p2_name)
+    p3 = named_coords.get(p3_name)
+    p4 = named_coords.get(p4_name)
+
+    if not all([p1, p2, p3, p4]):
+        return None
+
+    x1, y1 = p1
+    x2, y2 = p2
+    x3, y3 = p3
+    x4, y4 = p4
+
+    # 解线性方程组求两线段交点
+    # 线段1: P1 + t*(P2-P1), 线段2: P3 + s*(P4-P3)
+    # 解: P1 + t*(P2-P1) = P3 + s*(P4-P3)
+    denom = (x1 - x2) * (y3 - y4) - (y1 - y2) * (x3 - x4)
+    if abs(denom) < 1e-12:
+        return None  # 平行或重合
+
+    t = ((x1 - x3) * (y3 - y4) - (y1 - y3) * (x3 - x4)) / denom
+    ix = x1 + t * (x2 - x1)
+    iy = y1 + t * (y2 - y1)
+
+    return (ix, iy)
+
+
 def extract_named_coordinates(tikz_code):
     """
     从TikZ代码中提取 \\coordinate 命令定义的命名坐标
@@ -1375,15 +1430,17 @@ def extract_named_coordinates(tikz_code):
     _parse_coord._named_coords = working_coords
 
     # 匹配 \coordinate [options] (name) at (x,y);  或  \coordinate (name) at (x,y);
+    # 也支持 \coordinate[name] at (x,y);  （name直接写在方括号内，无圆括号）
     # 可选的 [options] 部分用非贪婪匹配
     # 注意: 坐标部分可能包含 {2*cos(120)} 等表达式，其中含有括号，
     # 因此使用括号配对扫描而非 [^)]+ 来匹配坐标
+    # 先匹配标准格式: \coordinate [options] (name) at (
     for m in re.finditer(
-        r'\\coordinate\s*(?:\[([^\]]*)\])?\s*\((\w+)\)\s*at\s*\(',
+        r'\\coordinate\s*(?:\[([^\]]*)\])?\s*\(([^)]+)\)\s*at\s*\(',
         body
     ):
-        opt_str = m.group(1) or ''
-        name = m.group(2)
+        opt_str = (m.group(1) or '').strip()
+        name = m.group(2).strip()
         # 从匹配结束位置开始，用括号配对找到坐标的右括号
         coord_start = m.end()
         paren_depth = 1
@@ -1395,11 +1452,50 @@ def extract_named_coordinates(tikz_code):
                 paren_depth -= 1
             ci += 1
         coord_str = body[coord_start:ci - 1].strip()
+        # 处理 intersection of 语法
+        if 'intersection' in coord_str.lower():
+            pt = _compute_intersection_coord(coord_str, working_coords)
+            if pt:
+                coords[name] = pt
+                working_coords[name] = pt
+            continue
         coord = _parse_coord(coord_str)
         if coord:
             x, y, _ = coord
             coords[name] = (x, y)
-            # 增量更新，使后续坐标可引用此坐标
+            working_coords[name] = (x, y)
+
+    # 再匹配简写格式: \coordinate[name] at (x,y);  （name在括号内，无圆括号名）
+    for m in re.finditer(
+        r"\\coordinate\s*\[([a-zA-Z_][a-zA-Z_0-9']*)\]\s*at\s*\(",
+        body
+    ):
+        name = m.group(1).strip()
+        # 跳过已通过标准格式匹配的坐标
+        if name in coords:
+            continue
+        # 从匹配结束位置开始，用括号配对找到坐标的右括号
+        coord_start = m.end()
+        paren_depth = 1
+        ci = coord_start
+        while ci < len(body) and paren_depth > 0:
+            if body[ci] == '(':
+                paren_depth += 1
+            elif body[ci] == ')':
+                paren_depth -= 1
+            ci += 1
+        coord_str = body[coord_start:ci - 1].strip()
+        # 处理 intersection of 语法
+        if 'intersection' in coord_str.lower():
+            pt = _compute_intersection_coord(coord_str, working_coords)
+            if pt:
+                coords[name] = pt
+                working_coords[name] = pt
+            continue
+        coord = _parse_coord(coord_str)
+        if coord:
+            x, y, _ = coord
+            coords[name] = (x, y)
             working_coords[name] = (x, y)
 
     # 恢复原有的 _named_coords（parse_tikz_code 会设置最终值）
@@ -1671,17 +1767,34 @@ def extract_tikz_nodes(tikz_code):
     # 去掉注释
     body = re.sub(r'%.*', '', tikz_code)
     
-    # 提取命名坐标
-    named_coords = extract_named_coordinates(tikz_code)
-    _parse_coord._named_coords = named_coords
-    
-    # 提取 tikzpicture 环境内的内容
-    env_match = re.search(
+    # 提取 tikzpicture 环境选项中的 scale 参数
+    tikz_scale = 1.0
+    env_match_outer = re.search(
         r'\\begin\{tikzpicture\}(\[.*?\])?\s*(.*?)\\end\{tikzpicture\}',
         body, re.DOTALL
     )
-    if env_match:
-        body = env_match.group(2)
+    if env_match_outer and env_match_outer.group(1):
+        env_opts = env_match_outer.group(1).strip('[]')
+        scale_match = re.search(r'scale\s*=\s*([\d.]+)', env_opts)
+        if scale_match:
+            tikz_scale = float(scale_match.group(1))
+    
+    # 重置 _tikz_scale 为 1.0，再提取命名坐标（避免被之前 parse_tikz_code 设置的 scale 影响）
+    _parse_coord._tikz_scale = 1.0
+    named_coords = extract_named_coordinates(tikz_code)
+    # 应用 scale 到命名坐标
+    if tikz_scale != 1.0:
+        named_coords = {
+            name: (x * tikz_scale, y * tikz_scale)
+            for name, (x, y) in named_coords.items()
+        }
+    _parse_coord._named_coords = named_coords
+    # 设置 _tikz_scale 供后续 _parse_coord 解析节点坐标时使用
+    _parse_coord._tikz_scale = tikz_scale
+    
+    # 提取 tikzpicture 环境内的内容
+    if env_match_outer:
+        body = env_match_outer.group(2)
     
     # 匹配 \node[options] (name) at (x,y) {content};
     # 以及变体：\node at (x,y) {content}; \node[options] {content}; 等
@@ -1757,6 +1870,27 @@ def extract_tikz_nodes(tikz_code):
                 coord = _parse_coord(coord_str)
                 if coord:
                     x, y, _ = coord
+        
+        # 跳过空白
+        while pos < len(body) and body[pos] in ' \t\n\r':
+            pos += 1
+        
+        # 解析 [options] (可能在 at 之后、{content} 之前)
+        # 例如: \node at (A) [above] {$A$};
+        if pos < len(body) and body[pos] == '[':
+            depth = 1
+            opt_extra_start = pos
+            pos += 1
+            while pos < len(body) and depth > 0:
+                if body[pos] == '[':
+                    depth += 1
+                elif body[pos] == ']':
+                    depth -= 1
+                pos += 1
+            extra_opt_str = body[opt_extra_start + 1:pos - 1]
+            if opt_str:
+                opt_str += ','
+            opt_str += extra_opt_str
         
         # 跳过空白
         while pos < len(body) and body[pos] in ' \t\n\r':
