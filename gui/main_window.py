@@ -651,22 +651,19 @@ class MainWindow:
 
         content = self._comic_params_card.content
 
-        # 颜色模式单选（网格布局，2行2列，避免窄面板截断）
-        self.comic_color_mode = tk.StringVar(value='actual_color')
+        # 颜色模式单选（横向排列，3个模式一行）
+        self.comic_color_mode = tk.StringVar(value='vtracer')
 
         modes = [
-            ('实际颜色', 'actual_color'),
+            ('vtracer', 'vtracer'),
             ('黑白线稿', 'line_art'),
             ('彩色填充', 'color_fill'),
-            ('vtracer', 'vtracer'),
         ]
 
         color_mode_frame = tk.Frame(content, bg=get_color('card'))
         color_mode_frame.pack(fill='x', pady=(0, 4))
 
         for idx, (text, value) in enumerate(modes):
-            row = idx // 2
-            col = idx % 2
             rb = tk.Radiobutton(
                 color_mode_frame,
                 text=text,
@@ -680,7 +677,7 @@ class MainWindow:
                 activeforeground=get_color('accent'),
                 command=self._on_comic_mode_changed,
             )
-            rb.grid(row=row, column=col, sticky='w', padx=(0, 8), pady=1)
+            rb.pack(side='left', padx=(0, 12))
 
         # 阈值滑块
         self.threshold_scale = LabeledScale(
@@ -1388,11 +1385,8 @@ class MainWindow:
         """漫画子模式切换时调整显示的参数项"""
         mode = self.comic_color_mode.get()
 
-        # 显示/隐藏颜色数量
-        if mode == 'actual_color':
-            self.color_count_frame.pack(fill='x', pady=4)
-        else:
-            self.color_count_frame.pack_forget()
+        # 颜色数量已删除（实际颜色模式已移除），始终隐藏
+        self.color_count_frame.pack_forget()
 
         # 显示/隐藏配色方案
         if mode == 'color_fill':
@@ -1406,9 +1400,9 @@ class MainWindow:
         else:
             self.vtracer_frame.pack_forget()
 
-        # 实际颜色/vtracer模式：线条颜色默认为无色
+        # vtracer模式：线条颜色默认为无色
         # 其他模式：线条颜色默认为黑色
-        if mode in ('actual_color', 'vtracer'):
+        if mode == 'vtracer':
             if not self.line_color_none_var.get():
                 self.line_color_none_var.set(True)
                 self._line_color_btn.config(state='disabled')
@@ -1435,7 +1429,11 @@ class MainWindow:
         filepaths = filedialog.askopenfilenames(
             title='选择文件',
             filetypes=[
-                ('所有支持的文件', '*.tex *.txt *.ggb *.ggs *.wsd'),
+                ('所有支持的文件', '*.tex *.txt *.ggb *.ggs *.svg *.png *.jpg *.jpeg *.bmp *.webp *.tiff *.tif *.gif'),
+                ('图片格式', '*.png *.jpg *.jpeg *.bmp *.webp *.tiff *.tif *.gif'),
+                ('SVG矢量图', '*.svg'),
+                ('LaTeX/TikZ', '*.tex *.txt'),
+                ('GeoGebra', '*.ggb *.ggs'),
                 ('所有文件', '*.*'),
             ],
         )
