@@ -1243,8 +1243,9 @@ _TWO_PI_BYTES = bytes.fromhex('db0fc940')
 CIRCLE_PROTO = bytes.fromhex(
     '0f33cf100704ffff01ff000000000000'  # +0x00 ~ +0x0f
     '50000000000100010000008442000000'  # +0x10 ~ +0x1f
-    '443f9c4538e5144609f2ec41f0181f40'  # +0x20 ~ +0x2f  (cx, cy, r, param4=2.485897)
-    '64'                                 # 结束
+    '443f9c4538e5144609f2ec41' +          # +0x20 ~ +0x2b  (cx=半径, cy=圆心X, r=圆心Y)
+    '00000000'                             # +0x2c ~ +0x2f  (param4=0.0 完整圆)
+    '64'                                   # 结束
 )
 # 验证: 32B头 + 4*4B float + 1B结束 = 32+16+1 = 49B ✓
 
@@ -1444,11 +1445,11 @@ def build_circle_record(cx, cy, radius, linewidth=None, line_color_bgra=None,
             rec[0x0f] = 0xff  # alpha
 
     # 修改圆参数（float32）
-    struct.pack_into('<f', rec, 0x20, float(cx))      # cx
-    struct.pack_into('<f', rec, 0x24, float(cy))      # cy
-    struct.pack_into('<f', rec, 0x28, float(radius))  # r
-    # +0x2c: 完整圆标志（2.485897），与WSD查看器原生圆段一致，不要修改
-    # CIRCLE_PROTO 中已包含正确的值 2.485897
+    # 0x4284参数布局：cx=半径, cy=圆心X, r=圆心Y, param4=0.0
+    struct.pack_into('<f', rec, 0x20, float(radius))  # cx = 半径
+    struct.pack_into('<f', rec, 0x24, float(cx))      # cy = 圆心X
+    struct.pack_into('<f', rec, 0x28, float(cy))      # r = 圆心Y
+    # +0x2c: param4=0.0（完整圆标志），CIRCLE_PROTO中已包含正确值
 
     return bytes(rec)
 
@@ -1460,6 +1461,12 @@ def build_circle_path(cx, cy, radius, linewidth=None, line_color_bgra=None,
 
     使用标准路径记录格式，内部包含一个原生圆段。
     与WSD查看器兼容性最好的圆形格式。
+
+    WSD 0x4284原生圆段的参数布局（从WSD软件创建的文件分析得出）：
+        - cx = 半径（不是圆心X坐标！）
+        - cy = 圆心X坐标（不是圆心Y坐标！）
+        - r = 圆心Y坐标（不是半径！）
+        - param4 = 0.0 表示完整圆
 
     Args:
         cx, cy: 圆心坐标（WSD单位）
@@ -1477,15 +1484,15 @@ def build_circle_path(cx, cy, radius, linewidth=None, line_color_bgra=None,
         linewidth = DEFAULT_LINEWIDTH
 
     # 构建原生圆段 (0x4284)
+    # 参数布局：cx=半径, cy=圆心X, r=圆心Y, param4=0.0（完整圆）
     seg = bytearray()
     seg += struct.pack('<H', _SEG_CIRCLE_NATIVE)  # u16 tag = 0x4284
     seg += bytes([0x00])                           # u8 mflag = 0x00 (完整圆)
     seg += struct.pack('<H', 0)                    # u16 npts = 0
-    seg += struct.pack('<f', float(cx))            # f32 cx
-    seg += struct.pack('<f', float(cy))            # f32 cy
-    seg += struct.pack('<f', float(radius))        # f32 r
-    # param4 = 2.485897 表示完整圆（与WSD查看器原生圆段一致，0x401f18f0）
-    seg += struct.pack('<f', 2.485897)             # f32 param4 = 2.485897
+    seg += struct.pack('<f', float(radius))        # f32 cx = 半径（不是圆心X！）
+    seg += struct.pack('<f', float(cx))            # f32 cy = 圆心X（不是圆心Y！）
+    seg += struct.pack('<f', float(cy))            # f32 r = 圆心Y（不是半径！）
+    seg += struct.pack('<f', 0.0)                  # f32 param4 = 0.0（完整圆标志）
 
     # 构建路径记录
     return _build_es_path(
@@ -1535,6 +1542,62 @@ def build_ellipse_path(cx, cy, rx, ry, linewidth=None, line_color_bgra=None,
         linewidth,
         fill_color_bgr,
     )
+
+
+def ellipse_to_circle_inplace(record_bytes: bytes) -> bytes:
+    """
+    将路径记录中的椭圆段(0x4285)替换为原生圆段(0x4284)
+
+    从椭圆外接矩形(pt0, pt1)计算圆心和半径，生成相同位置和大小的原生圆。
+    0x4285和0x4284段都是21字节，可以原位替换。
+
+    WSD 0x4284原生圆段的参数布局（从WSD软件创建的文件分析得出）：
+        - cx = 半径
+        - cy = 圆心X坐标
+        - r = 圆心Y坐标
+        - param4 = 0.0 表示完整圆
+
+    Args:
+        record_bytes: 包含0x4285椭圆段的路径记录二进制数据
+
+    Returns:
+        bytes: 替换后的路径记录（0x4285被替换为0x4284）
+    """
+    rec = bytearray(record_bytes)
+
+    # 查找0x4285段
+    idx = rec.find(b'\x85\x42')
+    if idx < 0:
+        # 未找到椭圆段，原样返回
+        return record_bytes
+
+    # 解析椭圆段参数（int32坐标）
+    # 段结构: tag(2) + mflag(1) + npts(2) + pt0.x(4) + pt0.y(4) + pt1.x(4) + pt1.y(4) = 21
+    pt0_x = struct.unpack_from('<i', rec, idx + 5)[0]
+    pt0_y = struct.unpack_from('<i', rec, idx + 9)[0]
+    pt1_x = struct.unpack_from('<i', rec, idx + 13)[0]
+    pt1_y = struct.unpack_from('<i', rec, idx + 17)[0]
+
+    # 计算参数：半径 = 外接矩形宽度的一半，圆心X = 外接矩形中心X，圆心Y = 外接矩形中心Y
+    r_f32 = (pt1_x - pt0_x) / 2.0   # 半径（假设rx=ry，正圆）
+    cx_f32 = (pt0_x + pt1_x) / 2.0  # 圆心X坐标
+    cy_f32 = (pt0_y + pt1_y) / 2.0  # 圆心Y坐标
+
+    # 构建原生圆段（0x4284），21字节
+    # 参数布局：cx=半径, cy=圆心X, r=圆心Y, param4=0.0
+    new_seg = bytearray()
+    new_seg += struct.pack('<H', _SEG_CIRCLE_NATIVE)  # u16 tag = 0x4284
+    new_seg += bytes([0x00])                           # u8 mflag = 0x00（完整圆）
+    new_seg += struct.pack('<H', 0)                    # u16 npts = 0
+    new_seg += struct.pack('<f', r_f32)                # f32 cx = 半径
+    new_seg += struct.pack('<f', cx_f32)               # f32 cy = 圆心X
+    new_seg += struct.pack('<f', cy_f32)               # f32 r = 圆心Y
+    new_seg += struct.pack('<f', 0.0)                  # f32 param4 = 0.0（完整圆）
+
+    # 原位替换（21字节→21字节）
+    rec[idx:idx + 21] = new_seg
+
+    return bytes(rec)
 
 
 def build_arc_record(cx, cy, radius, start_angle, end_angle, linewidth=None,

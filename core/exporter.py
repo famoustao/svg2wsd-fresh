@@ -24,6 +24,7 @@ build_polyline_record = None
 build_circle_record = None
 build_arc_record = None
 build_ellipse_path = None
+build_circle_path = None
 build_bezier_path = None
 build_bezier_chain = None
 build_combo_path = None
@@ -465,16 +466,14 @@ def _shape_to_path_record(shape: Shape, linewidth: int = 80, line_alpha: int = 2
         segments_list.append([('gon', pts)])
 
     elif shape.type == ShapeType.CIRCLE:
-        # 圆形：使用原生椭圆段0x4285（外接矩形法，rx=ry=r即为正圆）
-        # 注意：0x4284原生圆段在WSD查看器中有位置渲染bug，改用0x4285椭圆段
-        # 当rx=ry时渲染为完美正圆，与原生圆视觉效果完全一致
+        # 圆形：使用原生圆段（0x4284），直接构建
         _ensure_wsb_loaded()
         if not shape.points:
             return None
         cx, cy = shape.points[0]
         r = shape.extra.get('radius', 50)
-        return build_ellipse_path(
-            cx, cy, r, r,
+        return build_circle_path(
+            cx, cy, r,
             linewidth=linewidth,
             line_color_bgra=line_color_bgra,
             fill_color_bgr=fill_color_bgr,
@@ -1032,7 +1031,7 @@ def export_wsd_single(canvas_data: CanvasData,
                 transformed.line_color = override_bgr
 
             if transformed.type == ShapeType.CIRCLE and transformed.points:
-                # 圆形：使用原生椭圆段0x4285（外接矩形法）
+                # 圆形：走_shape_to_path_record（用椭圆段生成位置，再替换为原生圆段）
                 rec = _shape_to_path_record(transformed, linewidth=linewidth, line_alpha=line_alpha)
                 if rec is not None:
                     if transformed.points:
