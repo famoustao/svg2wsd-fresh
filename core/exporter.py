@@ -28,6 +28,7 @@ build_circle_path = None
 build_bezier_path = None
 build_bezier_chain = None
 build_combo_path = None
+build_line_record = None
 build_text_record = None
 build_wsd_pure = None
 TEXT_NORMAL = None
@@ -41,7 +42,7 @@ def _ensure_wsb_loaded():
     """确保 wsd_pure_builder 模块已加载"""
     global _wsb_loaded, PureWSDBuilder, build_polyline_record
     global build_circle_record, build_circle_path, build_ellipse_path, build_arc_record, build_bezier_path
-    global build_bezier_chain, build_combo_path, build_text_record
+    global build_bezier_chain, build_combo_path, build_line_record, build_text_record
     global build_wsd_pure, TEXT_NORMAL, TEXT_SUBSCRIPT
     global TEXT_SUPERSCRIPT, MM_TO_WSD, DEFAULT_LINEWIDTH
 
@@ -80,6 +81,10 @@ def _ensure_wsb_loaded():
         build_wsd_pure = _build_wsd_pure
         TEXT_NORMAL = _TEXT_NORMAL
         TEXT_SUBSCRIPT = _TEXT_SUBSCRIPT
+
+        # 从 wsd_records 导入 build_line_record（0x00FF格式，支持裁剪）
+        from wsd_records import build_line_record as _build_line_record
+        build_line_record = _build_line_record
         TEXT_SUPERSCRIPT = _TEXT_SUPERSCRIPT
         MM_TO_WSD = _MM_TO_WSD
         DEFAULT_LINEWIDTH = _DEFAULT_LINEWIDTH
@@ -407,6 +412,9 @@ def _shapes_to_compound_record(shapes: list, linewidth: int = 80,
     line_color_bgra = _bgr_to_bgra_bytes(outer.line_color, alpha=line_alpha)
     fill_color_bgr = _bgr_to_bgr_bytes(outer.fill_color)
 
+    # 检查虚线样式（使用外框的虚线属性）
+    line_type = 1 if outer.extra and outer.extra.get('dashed') else 0
+
     # 收集所有形状的段
     all_seglists = []
     for shape in shapes:
@@ -422,6 +430,7 @@ def _shapes_to_compound_record(shapes: list, linewidth: int = 80,
         line_color_bgra=line_color_bgra,
         linewidth=linewidth,
         fill_color_bgra=fill_color_bgr,
+        line_type=line_type,
     )
 
 
@@ -449,11 +458,24 @@ def _shape_to_path_record(shape: Shape, linewidth: int = 80, line_alpha: int = 2
     segments_list = []
 
     if shape.type in (ShapeType.LINE, ShapeType.POLYLINE):
-        # 直线和折线：开放折线
         if len(shape.points) < 2:
             return None
-        pts = [(int(p[0]), int(p[1])) for p in shape.points]
-        segments_list.append([('line', pts)])
+        
+        if shape.type == ShapeType.LINE and len(shape.points) == 2:
+            # 直线（2点）：使用0x00FF开放路径格式，支持裁剪
+            x1, y1 = shape.points[0]
+            x2, y2 = shape.points[1]
+            line_type = 1 if shape.extra and shape.extra.get('dashed') else 0
+            return build_line_record(
+                x1, y1, x2, y2,
+                line_color=line_color_bgra,
+                linewidth=linewidth,
+                line_type=line_type,
+            )
+        else:
+            # 折线（多点）：使用esShapePath格式
+            pts = [(int(p[0]), int(p[1])) for p in shape.points]
+            segments_list.append([('line', pts)])
 
     elif shape.type in (ShapeType.POLYGON, ShapeType.TRIANGLE, ShapeType.RECTANGLE):
         # 多边形/三角形/矩形：闭合多边形
@@ -579,11 +601,15 @@ def _shape_to_path_record(shape: Shape, linewidth: int = 80, line_alpha: int = 2
     if not segments_list:
         return None
 
+    # 检查虚线样式
+    line_type = 1 if shape.extra and shape.extra.get('dashed') else 0
+
     return build_combo_path(
         segments_list,
         line_color_bgra=line_color_bgra,
         linewidth=linewidth,
         fill_color_bgra=fill_color_bgr,
+        line_type=line_type,
     )
 
 

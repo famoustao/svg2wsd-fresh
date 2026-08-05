@@ -1349,7 +1349,7 @@ def _find_last_record_end(data, block_start, ffff_pos):
 
 # ========== 路径记录构建 ==========
 
-def build_polyline_record(points, closed=True, linewidth=None):
+def build_polyline_record(points, closed=True, linewidth=None, line_type=0):
     """
     构建折线段/多边形记录
 
@@ -1361,6 +1361,7 @@ def build_polyline_record(points, closed=True, linewidth=None):
         points: list of (x, y) 顶点坐标（WSD单位）
         closed: True=闭合多边形（添加闭合点），False=开放折线（不添加闭合点）
         linewidth: 线宽（WSD单位），None=使用原型值(80)
+        line_type: 线型（0=实线，1-3=虚线样式）
 
     Returns:
         bytes: 完整的路径记录
@@ -1374,6 +1375,9 @@ def build_polyline_record(points, closed=True, linewidth=None):
 
     # 统一使用闭合形状类 0x10CF
     struct.pack_into('<H', rec, 0x02, 0x10CF)
+
+    # 设置线型（偏移 0x0c，4字节）
+    struct.pack_into('<I', rec, 0x0c, line_type)
 
     if closed:
         # 坐标属性
@@ -1807,7 +1811,8 @@ def build_bezier_chain(segments,
 def build_combo_path(segments_list,
                      line_color_bgra=None,
                      linewidth=None,
-                     fill_color_bgra=None):
+                     fill_color_bgra=None,
+                     line_type=0):
     """
     构建组合路径（直线段+贝塞尔段混合，esShapePath格式）
 
@@ -1817,6 +1822,7 @@ def build_combo_path(segments_list,
         line_color_bgra: 线条颜色
         linewidth: 线宽
         fill_color_bgra: 填充颜色 (B, G, R) 3字节，None=仅轮廓
+        line_type: 线型（0=实线，1-3=虚线样式）
 
     Returns:
         bytes: 完整的组合路径记录
@@ -1853,11 +1859,11 @@ def build_combo_path(segments_list,
                 raise ValueError(f"未知段类型: {seg_type}")
         seglists.append(seg_bytes_list)
 
-    return _build_es_path(seglists, line_color_bgra, linewidth, fill_color_bgra)
+    return _build_es_path(seglists, line_color_bgra, linewidth, fill_color_bgra, line_type=line_type)
 
 
 def _build_es_path(seglists, line_color_bgra, line_width_wsd,
-                   fill_color_bgra=None, fill_alpha=0xff):
+                   fill_color_bgra=None, fill_alpha=0xff, line_type=0):
     """
     构建一个 esShapePath 记录（底层函数）
 
@@ -1867,6 +1873,7 @@ def _build_es_path(seglists, line_color_bgra, line_width_wsd,
         line_width_wsd: 线宽（WSD单位）
         fill_color_bgra: 填充颜色 (BGR 3字节)，None=仅轮廓
         fill_alpha: 填充透明度 (0-255)
+        line_type: 线型（0=实线，1-3=虚线样式）
 
     Returns:
         bytes: 完整的路径记录
@@ -1880,7 +1887,7 @@ def _build_es_path(seglists, line_color_bgra, line_width_wsd,
 
     # 颜色和线宽
     p += line_color_bgra                    # fill (线条颜色, BGRA)
-    p += bytes(4)                           # stroke = 0
+    p += struct.pack('<I', line_type)       # line_type (0=实线, 1-3=虚线)
     p += struct.pack('<i', int(round(line_width_wsd)))  # i32 width
 
     # flag

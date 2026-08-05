@@ -719,6 +719,9 @@ def _convert_tikz_shapes(tikz_paths) -> list:
 
         line_width = tpath.line_width
 
+        # 检查虚线选项
+        is_dashed = tpath.options.get('dashed', False) is True
+
         # 遍历每个subpath
         for subpath in tpath.subpaths:
             # subpath: [(op, data), ...]
@@ -887,7 +890,8 @@ def _convert_tikz_shapes(tikz_paths) -> list:
                         points=points,
                         line_color=line_color_bgr,
                         fill_color=fill_color_bgr,
-                        line_width=line_width
+                        line_width=line_width,
+                        extra={'dashed': True} if is_dashed else {}
                     ))
             else:
                 # 无闭合
@@ -898,7 +902,8 @@ def _convert_tikz_shapes(tikz_paths) -> list:
                         points=points,
                         line_color=line_color_bgr,
                         fill_color=fill_color_bgr,
-                        line_width=line_width
+                        line_width=line_width,
+                        extra={'dashed': True} if is_dashed else {}
                     ))
                 elif n > 2:
                     shapes.append(Shape(
@@ -906,7 +911,8 @@ def _convert_tikz_shapes(tikz_paths) -> list:
                         points=points,
                         line_color=line_color_bgr,
                         fill_color=fill_color_bgr,
-                        line_width=line_width
+                        line_width=line_width,
+                        extra={'dashed': True} if is_dashed else {}
                     ))
                 # n==1 的单点忽略
 
