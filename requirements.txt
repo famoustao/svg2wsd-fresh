@@ -3,7 +3,7 @@
 pillow>=9.0.0
 potracer>=0.0.1
 numpy>=1.20.0
-opencv-python>=4.5.0
+
 cairosvg>=2.7.0
 
 # vtracer 图片转SVG引擎 (漫画模式vtracer子模式)

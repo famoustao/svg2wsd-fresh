@@ -424,9 +424,7 @@ class MainWindow:
         self.comic_tab = ttk.Frame(self.mode_notebook, style='TFrame')
         self.mode_notebook.add(self.comic_tab, text='🎨 漫画模式')
 
-        # 几何模式选项卡
-        self.geo_tab = ttk.Frame(self.mode_notebook, style='TFrame')
-        self.mode_notebook.add(self.geo_tab, text=' 几何模式 ')
+        # 几何模式已移除（不再支持图片导入）
 
         # 绑定选项卡切换事件
         self.mode_notebook.bind(
@@ -533,8 +531,8 @@ class MainWindow:
         # 2. 漫画模式参数区
         self._build_comic_params_card(inner)
 
-        # 3. 几何模式参数区
-        self._build_geo_params_card(inner)
+        # 3. 线型设置区
+        self._build_line_type_card(inner)
 
         # 4. 输出设置区
         self._build_output_settings_card(inner)
@@ -545,8 +543,8 @@ class MainWindow:
         # 强制更新滚动区域（确保滚动条在启动时就正确显示）
         self.root.after(100, _update_scroll_region)
 
-        # 初始显示漫画模式参数，隐藏几何模式参数
-        self._geo_params_card.pack_forget()
+        # 初始隐藏线型设置（仅漫画模式需要）
+        # self._line_type_card 的显示由模式切换控制
 
     def _build_file_list_card(self, parent):
         """构建文件列表卡片"""
@@ -932,189 +930,127 @@ class MainWindow:
         # 初始隐藏 vtracer 参数
         self.vtracer_frame.pack_forget()
 
-    def _build_geo_params_card(self, parent):
-        """构建几何模式参数卡片"""
-        self._geo_params_card = CardFrame(parent, title='📐 几何模式参数')
+    def _build_line_type_card(self, parent):
+        """构建线型设置卡片"""
+        self._line_type_card = CardFrame(parent, title='线型设置')
         # 初始不显示，根据模式切换
-        self._geo_params_card.pack(fill='x', pady=2)
+        self._line_type_card.pack(fill='x', pady=2)
 
-        content = self._geo_params_card.content
+        content = self._line_type_card.content
 
-        # 颜色模式（一行排列）
-        self.geo_color_mode = tk.StringVar(value='line_art')
-
-        geo_modes = [
-            ('实际颜色', 'actual_color'),
-            ('黑白线稿', 'line_art'),
-            ('彩色填充', 'color_fill'),
-        ]
-
-        color_mode_frame = tk.Frame(content, bg=get_color('card'))
-        color_mode_frame.pack(fill='x', pady=(0, 2))
-
-        for text, value in geo_modes:
-            rb = tk.Radiobutton(
-                color_mode_frame,
-                text=text,
-                variable=self.geo_color_mode,
-                value=value,
-                bg=get_color('card'),
-                fg=get_color('text'),
-                font=('Microsoft YaHei UI', 10),
-                selectcolor=get_color('card'),
-                activebackground=get_color('card'),
-                activeforeground=get_color('accent'),
-                command=self._on_param_changed,
-            )
-            rb.pack(side='left', padx=(0, 16))
-
-        # 最小面积
-        self.geo_min_area_scale = LabeledScale(
+        # 线型说明
+        tk.Label(
             content,
-            label='最小面积',
-            from_=10,
-            to=500,
-            value=100,
-            command=lambda v: self._on_param_changed(),
-        )
-        self.geo_min_area_scale.pack(fill='x', pady=2)
+            text='控制LaTeX虚线/点线转换的WSD线型',
+            bg=get_color('card'),
+            fg=get_color('text_secondary'),
+            font=('Microsoft YaHei UI', 9),
+            anchor='w',
+        ).pack(fill='x', pady=(0, 4))
 
-        # 近似精度
-        self.geo_approx_scale = LabeledScale(
-            content,
-            label='近似精度',
-            from_=1,
-            to=50,
-            value=20,
-            command=lambda v: self._on_param_changed(),
-        )
-        self.geo_approx_scale.pack(fill='x', pady=2)
+        # 线型滑块
+        self.line_type_var = tk.IntVar(value=0)
 
-        # 霍夫灵敏度
-        self.geo_hough_scale = LabeledScale(
-            content,
-            label='霍夫灵敏度',
-            from_=50,
-            to=200,
-            value=100,
-            command=lambda v: self._on_param_changed(),
-        )
-        self.geo_hough_scale.pack(fill='x', pady=2)
-
-        # 圆数量 + 字母识别 + 自动标注（一行排列）
-        row1_frame = tk.Frame(content, bg=get_color('card'))
-        row1_frame.pack(fill='x', pady=(4, 2))
+        slider_frame = tk.Frame(content, bg=get_color('card'))
+        slider_frame.pack(fill='x', pady=2)
 
         tk.Label(
-            row1_frame,
-            text='圆数量:',
+            slider_frame,
+            text='线型:',
             bg=get_color('card'),
             fg=get_color('text'),
             font=('Microsoft YaHei UI', 9),
         ).pack(side='left')
 
-        self.circle_count_var = tk.IntVar(value=1)
-        self.circle_count_spin = ttk.Spinbox(
-            row1_frame,
+        self.line_type_scale = ttk.Scale(
+            slider_frame,
             from_=0,
-            to=20,
-            textvariable=self.circle_count_var,
-            width=6,
-            command=self._on_param_changed,
+            to=14,
+            orient='horizontal',
+            variable=self.line_type_var,
+            command=lambda v: self._on_line_type_changed(),
         )
-        self.circle_count_spin.pack(side='left', padx=(4, 16))
+        self.line_type_scale.pack(side='left', fill='x', expand=True, padx=(8, 0))
 
-        self.letter_recog_var = tk.BooleanVar(value=True)
-        self.letter_recog_cb = tk.Checkbutton(
-            row1_frame,
-            text='字母识别',
-            variable=self.letter_recog_var,
+        # 线型值显示
+        self.line_type_label = tk.Label(
+            slider_frame,
+            text='0 (实线)',
             bg=get_color('card'),
             fg=get_color('text'),
-            font=('Microsoft YaHei UI', 9),
-            selectcolor=get_color('card'),
-            activebackground=get_color('card'),
-            command=self._on_param_changed,
+            font=('Microsoft YaHei UI', 9, 'bold'),
+            width=12,
+            anchor='w',
         )
-        self.letter_recog_cb.pack(side='left', padx=(0, 12))
+        self.line_type_label.pack(side='left', padx=(8, 0))
 
-        self.auto_label_var = tk.BooleanVar(value=True)
-        self.auto_label_cb = tk.Checkbutton(
-            row1_frame,
-            text='自动标注',
-            variable=self.auto_label_var,
-            bg=get_color('card'),
-            fg=get_color('text'),
-            font=('Microsoft YaHei UI', 9),
-            selectcolor=get_color('card'),
-            activebackground=get_color('card'),
-            command=self._on_param_changed,
-        )
-        self.auto_label_cb.pack(side='left')
+        # 线型名称映射
+        # 用户建议：虚线默认2.wsd的线型，点线默认3.wsd的线型
+        self._line_type_names = {
+            0: '0 (实线)',
+            1: '1',
+            2: '2 (虚线)',
+            3: '3 (点线)',
+            4: '4',
+            5: '5',
+            6: '6',
+            7: '7',
+            8: '8',
+            9: '9',
+            10: '10',
+            11: '11',
+            12: '12',
+            13: '13',
+            14: '14',
+        }
 
-        # 对称性检测（两行排列）
-        sym_frame = tk.Frame(content, bg=get_color('card'))
-        sym_frame.pack(fill='x', pady=(2, 0))
+        # 预设按钮行
+        preset_frame = tk.Frame(content, bg=get_color('card'))
+        preset_frame.pack(fill='x', pady=(4, 0))
 
         tk.Label(
-            sym_frame,
-            text='对称性:',
+            preset_frame,
+            text='预设:',
             bg=get_color('card'),
-            fg=get_color('text'),
+            fg=get_color('text_secondary'),
             font=('Microsoft YaHei UI', 9),
-        ).grid(row=0, column=0, sticky='w', padx=(0, 4), pady=1)
+        ).pack(side='left', padx=(0, 6))
 
-        self.sym_axis_var = tk.BooleanVar(value=True)
-        tk.Checkbutton(
-            sym_frame,
-            text='轴对称',
-            variable=self.sym_axis_var,
-            bg=get_color('card'),
-            fg=get_color('text'),
-            font=('Microsoft YaHei UI', 9),
-            selectcolor=get_color('card'),
-            activebackground=get_color('card'),
-            command=self._on_param_changed,
-        ).grid(row=0, column=1, sticky='w', padx=(0, 12), pady=1)
+        ttk.Button(
+            preset_frame,
+            text='实线',
+            command=lambda: self._set_line_type(0),
+            style='Small.TButton',
+            width=6,
+        ).pack(side='left', padx=1)
 
-        self.sym_rotate_var = tk.BooleanVar(value=False)
-        tk.Checkbutton(
-            sym_frame,
-            text='旋转对称',
-            variable=self.sym_rotate_var,
-            bg=get_color('card'),
-            fg=get_color('text'),
-            font=('Microsoft YaHei UI', 9),
-            selectcolor=get_color('card'),
-            activebackground=get_color('card'),
-            command=self._on_param_changed,
-        ).grid(row=0, column=2, sticky='w', padx=(0, 12), pady=1)
+        ttk.Button(
+            preset_frame,
+            text='虚线',
+            command=lambda: self._set_line_type(2),
+            style='Small.TButton',
+            width=6,
+        ).pack(side='left', padx=1)
 
-        self.sym_center_var = tk.BooleanVar(value=False)
-        tk.Checkbutton(
-            sym_frame,
-            text='中心对称',
-            variable=self.sym_center_var,
-            bg=get_color('card'),
-            fg=get_color('text'),
-            font=('Microsoft YaHei UI', 9),
-            selectcolor=get_color('card'),
-            activebackground=get_color('card'),
-            command=self._on_param_changed,
-        ).grid(row=1, column=1, sticky='w', padx=(0, 12), pady=1)
+        ttk.Button(
+            preset_frame,
+            text='点线',
+            command=lambda: self._set_line_type(3),
+            style='Small.TButton',
+            width=6,
+        ).pack(side='left', padx=1)
 
-        self.sym_rightangle_var = tk.BooleanVar(value=True)
-        tk.Checkbutton(
-            sym_frame,
-            text='直角检测',
-            variable=self.sym_rightangle_var,
-            bg=get_color('card'),
-            fg=get_color('text'),
-            font=('Microsoft YaHei UI', 9),
-            selectcolor=get_color('card'),
-            activebackground=get_color('card'),
-            command=self._on_param_changed,
-        ).grid(row=1, column=2, sticky='w', padx=(0, 12), pady=1)
+    def _on_line_type_changed(self):
+        """线型滑块变化时更新显示"""
+        val = self.line_type_var.get()
+        name = self._line_type_names.get(val, str(val))
+        self.line_type_label.config(text=name)
+        self._on_param_changed()
+
+    def _set_line_type(self, val):
+        """设置线型预设值"""
+        self.line_type_var.set(val)
+        self._on_line_type_changed()
 
     def _build_output_settings_card(self, parent):
         """构建输出设置卡片"""
@@ -1168,28 +1104,7 @@ class MainWindow:
             self._on_canvas_size_changed,
         )
 
-        # 字体样式（与线宽同行）
-        tk.Label(
-            row1_frame,
-            text='字体:',
-            bg=get_color('card'),
-            fg=get_color('text'),
-            font=('Microsoft YaHei UI', 9),
-        ).pack(side='left', padx=(12, 0))
-
-        self.font_style_var = tk.StringVar(value='斜体')
-        self.font_style_combo = ttk.Combobox(
-            row1_frame,
-            textvariable=self.font_style_var,
-            values=['斜体', '正体'],
-            state='readonly',
-            width=6,
-        )
-        self.font_style_combo.pack(side='left', padx=4)
-        self.font_style_combo.bind(
-            '<<ComboboxSelected>>',
-            lambda e: self._on_param_changed(),
-        )
+        
 
         # 线条颜色（第二行）
         line_color_frame = tk.Frame(content, bg=get_color('card'))
@@ -1289,7 +1204,7 @@ class MainWindow:
         export_format_combo = ttk.Combobox(
             export_format_frame,
             textvariable=self.export_format_var,
-            values=['WSD', 'SVG'],
+            values=['WSD', 'SVG', 'LaTeX', 'GGB'],
             state='readonly',
             width=12,
         )
@@ -1428,45 +1343,27 @@ class MainWindow:
 
     def _on_mode_changed(self, event):
         """模式选项卡切换时触发"""
-        current = self.mode_notebook.index(self.mode_notebook.select())
-        if current == 0:
-            self._current_mode = 'comic'
-            # 显示漫画参数，隐藏几何参数
-            self._comic_params_card.pack(fill='x', pady=4,
-                                         after=self._file_card)
-            self._geo_params_card.pack_forget()
-        else:
-            self._current_mode = 'geometry'
-            # 显示几何参数，隐藏漫画参数
-            self._geo_params_card.pack(fill='x', pady=4,
-                                       after=self._file_card)
-            self._comic_params_card.pack_forget()
-
-        # 更新选项卡图标（选中彩色，未选中灰色）
-        self._update_tab_icons()
+        # 仅保留漫画模式，几何模式已移除
+        self._current_mode = 'comic'
+        # 显示漫画参数
+        self._comic_params_card.pack(fill='x', pady=4,
+                                     after=self._file_card)
 
         # 更新滚动区域（模式切换后内容高度变化）
         self.root.after(50, self._update_left_scroll_region)
 
-        self._update_status(f'已切换到{"漫画模式" if current == 0 else "几何模式"}')
+        self._update_status('漫画模式')
         self._on_param_changed()
 
     def _update_tab_icons(self):
-        """更新模式选项卡图标：选中时彩色emoji，未选中时无图标"""
-        current = self.mode_notebook.index(self.mode_notebook.select())
-        # 漫画模式选项卡
-        if current == 0:
-            self.mode_notebook.tab(0, text='🎨 漫画模式')
-            self.mode_notebook.tab(1, text='  几何模式  ')
-        else:
-            self.mode_notebook.tab(0, text='  漫画模式  ')
-            self.mode_notebook.tab(1, text='📐 几何模式')
+        """更新模式选项卡图标（仅保留漫画模式）"""
+        self.mode_notebook.tab(0, text='🎨 漫画模式')
 
     def _on_export_format_changed(self):
         """导出格式切换时调整UI"""
         fmt = self.export_format_var.get()
-        if fmt == 'SVG':
-            # SVG 不支持合并模式，禁用合并选项
+        if fmt in ('SVG', 'LaTeX', 'GGB'):
+            # 这些格式不支持合并模式，强制分离输出
             self.export_mode_var.set('separate')
         self._on_param_changed()
 
@@ -1538,7 +1435,7 @@ class MainWindow:
         filepaths = filedialog.askopenfilenames(
             title='选择文件',
             filetypes=[
-                ('所有支持的文件', '*.png *.jpg *.jpeg *.bmp *.gif *.tiff *.svg *.tex *.ggb *.ggb script *.ggs *.txt *.wsd'),
+                ('所有支持的文件', '*.tex *.txt *.ggb *.ggs *.wsd'),
                 ('所有文件', '*.*'),
             ],
         )
@@ -1660,11 +1557,6 @@ class MainWindow:
                 if canvas_data is None:
                     status_var.set('导入失败: 无法解析')
                     return
-
-                # 自动标注端点（如果启用且导入结果有图形）
-                if self.auto_label_var.get() and canvas_data.shapes:
-                    from core.vertex_labeler import auto_label_vertices
-                    canvas_data = auto_label_vertices(canvas_data)
 
                 # 更新文件列表
                 # 确保文件名唯一：若已存在同名，追加序号
@@ -2116,8 +2008,8 @@ class MainWindow:
         file_info = self._files[self._current_file_index]
         filepath = file_info['path']
         params = self._get_current_params()
-        mode_type = 'comic' if self._current_mode == 'comic' else 'geo'
-        sub_mode = self.comic_color_mode.get() if self._current_mode == 'comic' else None
+        mode_type = 'comic'
+        sub_mode = self.comic_color_mode.get()
 
         if not filepath:
             self._update_status('无法更新预览: 文件路径为空')
@@ -2128,13 +2020,9 @@ class MainWindow:
         if ext == '.svg':
             self._update_status(f'正在生成预览: {file_info["name"]}...')
             try:
-                if mode_type == 'geo':
-                    from modes.geo_mode import GeometryMode
-                    canvas_data = GeometryMode().process(filepath, params)
-                else:
-                    from modes.comic_mode import process as comic_process
-                    compound_mode = params.get('compound_mode', 'auto')
-                    canvas_data = comic_process(filepath, sub_mode, params, compound_mode=compound_mode)
+                from modes.comic_mode import process as comic_process
+                compound_mode = params.get('compound_mode', 'auto')
+                canvas_data = comic_process(filepath, sub_mode, params, compound_mode=compound_mode)
                 self._handle_preview_result(canvas_data)
             except Exception as e:
                 import traceback
@@ -2155,18 +2043,12 @@ class MainWindow:
                 if cancel_check and cancel_check():
                     return None
 
-                if mode_type == 'geo':
-                    from modes.geo_mode import GeometryMode
-                    if progress_callback:
-                        progress_callback(30, '几何模式处理中...')
-                    mode = GeometryMode()
-                    canvas_data = mode.process(filepath, params)
-                else:  # comic
-                    from modes.comic_mode import process as comic_process
-                    if progress_callback:
-                        progress_callback(30, f'漫画模式({sub_mode})处理中...')
-                    compound_mode = params.get('compound_mode', 'auto')
-                    canvas_data = comic_process(filepath, sub_mode, params, compound_mode=compound_mode)
+                # 漫画模式
+                from modes.comic_mode import process as comic_process
+                if progress_callback:
+                    progress_callback(30, f'漫画模式({sub_mode})处理中...')
+                compound_mode = params.get('compound_mode', 'auto')
+                canvas_data = comic_process(filepath, sub_mode, params, compound_mode=compound_mode)
 
                 if progress_callback:
                     progress_callback(90, '生成预览...')
@@ -2526,7 +2408,7 @@ class MainWindow:
             return
 
         params = self._get_current_params()
-        mode_type = 'comic' if self._current_mode == 'comic' else 'geo'
+        mode_type = 'comic'
         # 将显示文本转换为 batch_manager 需要的模式值
         export_mode_display = self.export_mode_var.get()
         export_mode = 'merge' if '合并' in export_mode_display else 'separate'
@@ -2602,7 +2484,7 @@ class MainWindow:
                 return {'cancelled': True, 'output_dir': output_dir}
 
             # 处理完成，更新进度到80%
-            export_format = self.export_format_var.get().lower()  # 'wsd' 或 'svg'
+            export_format = self.export_format_var.get().lower()  # 'wsd', 'svg', 'latex', 'ggb'
             if progress_callback:
                 progress_callback(80.0, f'正在导出{export_format.upper()}文件...')
 
@@ -2626,14 +2508,13 @@ class MainWindow:
             except (ValueError, TypeError):
                 scale_value = 80.0
 
-            # 字体样式：中文显示值转换为英文代码
-            font_style_display = params.get('font_style', '斜体')
-            font_style = 'upright' if '正' in font_style_display else 'italic'
-
-            # 合并输出文件名: 合并输出_YYYYMMDD_HHMMSS.wsd
+            # 合并输出文件名: 合并输出_YYYYMMDD_HHMMSS.ext
             timestamp = time.strftime('%Y%m%d_%H%M%S')
-            merge_ext = 'wsd' if export_format == 'wsd' else 'svg'
+            merge_ext = {'wsd': 'wsd', 'svg': 'svg', 'latex': 'tex', 'ggb': 'ggb'}.get(export_format, 'wsd')
             merge_name = f'合并输出_{timestamp}.{merge_ext}'
+
+            # 线型设置
+            line_type = params.get('line_type', 0)
 
             export_result = batch_mgr.export_all(
                 output_dir=output_dir,
@@ -2645,8 +2526,24 @@ class MainWindow:
                 line_alpha=line_alpha,
                 scale_mode=scale_mode,
                 scale_value=scale_value,
-                font_style=font_style,
+                line_type=line_type,
             )
+
+            # 如果是粘贴的代码，同时导出原始源代码文件
+            source_exported = 0
+            for file_entry in self._files:
+                if file_entry.get('tmp_file') and file_entry.get('path'):
+                    src_path = file_entry['path']
+                    src_name = file_entry['name']
+                    dst_path = os.path.join(output_dir, src_name)
+                    if os.path.exists(src_path) and not os.path.exists(dst_path):
+                        import shutil
+                        shutil.copy2(src_path, dst_path)
+                        source_exported += 1
+
+            if source_exported > 0:
+                if progress_callback:
+                    progress_callback(100.0, f'转换完成，同时导出 {source_exported} 个源代码文件')
 
             if progress_callback:
                 progress_callback(100.0, '转换完成')
@@ -2658,6 +2555,7 @@ class MainWindow:
                 'cached_count': cached_count,
                 'merge_mode': export_mode,
                 'merge_name': merge_name if export_mode == 'merge' else None,
+                'source_exported': source_exported,
             }
 
         self._task_worker = TaskWorker(conversion_task)
@@ -2778,6 +2676,9 @@ class MainWindow:
             export_error = exp.get('error')
 
             msg = f"处理完成！\n\n成功: {proc_success} 个\n失败: {proc_failed} 个\n已导出: {exported}/{total} 个文件"
+            source_exported = result.get('source_exported', 0)
+            if source_exported > 0:
+                msg += f"\n源代码导出: {source_exported} 个"
             if cached > 0:
                 msg += f"\n使用缓存: {cached} 个"
             if cached_back_count > 0:
@@ -2878,10 +2779,10 @@ class MainWindow:
             'line_color_none': self.line_color_none_var.get(),
             'line_color_original': self.line_color_original_var.get(),
             'canvas_size': self.canvas_size_var.get(),
-            'font_style': self.font_style_var.get(),
             'export_mode': self.export_mode_var.get(),
             'scale_mode': self.scale_mode_var.get(),
             'scale_value': self.scale_value_var.get(),
+            'line_type': self.line_type_var.get(),
         }
 
         if self._current_mode == 'comic':
@@ -2919,22 +2820,8 @@ class MainWindow:
                     'vtracer_splice_threshold': int(self.vtracer_splice_scale.get()),
                 })
         else:
-            params.update({
-                'min_area': self.geo_min_area_scale.get(),
-                'approx_accuracy': self.geo_approx_scale.get() / 1000.0,
-                'hough_circle_sensitivity': self.geo_hough_scale.get(),
-                'circle_count': self.circle_count_var.get(),
-                'enable_ocr': self.letter_recog_var.get(),
-                'auto_label': self.auto_label_var.get(),
-                'detect_symmetry': True,
-                'symmetry_params': {
-                    'detect_axis': self.sym_axis_var.get(),
-                    'detect_rotation': self.sym_rotate_var.get(),
-                    'detect_center': self.sym_center_var.get(),
-                    'detect_right_angle': self.sym_rightangle_var.get(),
-                },
-                'color_mode': self.geo_color_mode.get(),
-            })
+            # 几何模式参数已移除
+            pass
 
         return params
 
@@ -2956,7 +2843,6 @@ class MainWindow:
             'line_color_none': self.line_color_none_var.get(),
             'line_color_original': self.line_color_original_var.get(),
             'canvas_size': self.canvas_size_var.get(),
-            'font_style': self.font_style_var.get(),
             'export_mode': self.export_mode_var.get(),
             'export_format': self.export_format_var.get(),
             'scale_mode': self.scale_mode_var.get(),
@@ -2978,18 +2864,8 @@ class MainWindow:
             'vtracer_layer_diff': self.vtracer_layer_diff_scale.get(),
             'vtracer_corner': self.vtracer_corner_scale.get(),
             'vtracer_splice': self.vtracer_splice_scale.get(),
-            # 几何模式参数
-            'geo_color_mode': self.geo_color_mode.get(),
-            'geo_min_area': self.geo_min_area_scale.get(),
-            'geo_approx': self.geo_approx_scale.get(),
-            'geo_hough': self.geo_hough_scale.get(),
-            'circle_count': self.circle_count_var.get(),
-            'enable_ocr': self.letter_recog_var.get(),
-            'auto_label': self.auto_label_var.get(),
-            'sym_axis': self.sym_axis_var.get(),
-            'sym_rotate': self.sym_rotate_var.get(),
-            'sym_center': self.sym_center_var.get(),
-            'sym_rightangle': self.sym_rightangle_var.get(),
+            # 线型参数
+            'line_type': self.line_type_var.get(),
         }
         return params
 
@@ -3044,7 +2920,6 @@ class MainWindow:
         _safe_set(self.line_color_none_var, 'line_color_none', 'bool')
         _safe_set(self.line_color_original_var, 'line_color_original', 'bool')
         _safe_set(self.canvas_size_var, 'canvas_size')
-        _safe_set(self.font_style_var, 'font_style')
         _safe_set(self.export_mode_var, 'export_mode')
         _safe_set(self.export_format_var, 'export_format')
         _safe_set(self.scale_mode_var, 'scale_mode')
@@ -3069,24 +2944,8 @@ class MainWindow:
         _safe_set(self.vtracer_corner_scale, 'vtracer_corner', 'float')
         _safe_set(self.vtracer_splice_scale, 'vtracer_splice', 'float')
 
-        # 几何模式参数
-        _safe_set(self.geo_color_mode, 'geo_color_mode')
-        _safe_set(self.geo_min_area_scale, 'geo_min_area', 'float')
-        _safe_set(self.geo_approx_scale, 'geo_approx', 'float')
-        _safe_set(self.geo_hough_scale, 'geo_hough', 'float')
-        _safe_set(self.circle_count_var, 'circle_count', 'int')
-        _safe_set(self.letter_recog_var, 'enable_ocr', 'bool')
-        _safe_set(self.auto_label_var, 'auto_label', 'bool')
-        _safe_set(self.sym_axis_var, 'sym_axis', 'bool')
-        _safe_set(self.sym_rotate_var, 'sym_rotate', 'bool')
-        _safe_set(self.sym_center_var, 'sym_center', 'bool')
-        _safe_set(self.sym_rightangle_var, 'sym_rightangle', 'bool')
-
-        # 恢复模式选择
-        saved_mode = saved.get('mode', 'comic')
-        if saved_mode == 'geometry':
-            self.mode_notebook.select(1)
-            self._on_mode_changed(None)
+        # 线型参数
+        _safe_set(self.line_type_var, 'line_type', 'int')
 
         # 触发界面联动更新
         self._on_comic_mode_changed()

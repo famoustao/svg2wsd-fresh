@@ -626,6 +626,26 @@ def _parse_options(opt_str):
             if opt in line_width_map:
                 options['line_width_cm'] = line_width_map[opt]
 
+            # 线型映射（默认值在导出时由滑块控制）
+            # 这里记录线型名称，导出时由滑块值决定具体WSD线型编号
+            tikz_line_type_map = {
+                'solid': 'solid',
+                'dotted': 'dotted',
+                'densely dotted': 'dotted',
+                'loosely dotted': 'dotted',
+                'dashed': 'dashed',
+                'densely dashed': 'dashed',
+                'loosely dashed': 'dashed',
+                'dash dot': 'dash_dot',
+                'densely dash dot': 'dash_dot',
+                'loosely dash dot': 'dash_dot',
+                'dash dot dot': 'dash_dot_dot',
+                'densely dash dot dot': 'dash_dot_dot',
+                'loosely dash dot dot': 'dash_dot_dot',
+            }
+            if opt in tikz_line_type_map:
+                options['tikz_line_type'] = tikz_line_type_map[opt]
+
     # 处理 line width
     if 'line width' in options:
         lw = _parse_length(options['line width'])

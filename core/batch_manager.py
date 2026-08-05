@@ -493,7 +493,7 @@ class BatchManager:
                    line_alpha: int = 255,
                    scale_mode: str = 'auto',
                    scale_value: float = 80.0,
-                   font_style: str = 'italic') -> Dict[str, int]:
+                   line_type: int = 0) -> Dict[str, int]:
         """
         批量导出所有已处理完成的文件
 
@@ -565,7 +565,7 @@ class BatchManager:
                                      line_alpha=line_alpha,
                                      scale_mode=scale_mode,
                                      scale_value=scale_value,
-                                     font_style=font_style)
+                                     line_type=line_type)
                     output_file_path = output_path
                 elif format_lower == 'svg':
                     # SVG 合并: 将多个 CanvasData 合并为一个 SVG
@@ -646,7 +646,7 @@ class BatchManager:
                             line_alpha=line_alpha,
                             scale_mode=scale_mode,
                             scale_value=scale_value,
-                            font_style=font_style,
+                            line_type=line_type,
                         )
                     elif format_lower == 'svg':
                         output_filename = base_name + '.svg'

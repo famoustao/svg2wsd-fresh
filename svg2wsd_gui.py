@@ -1878,42 +1878,6 @@ class Image2WSDApp:
                         right_angle_correction=self.geo_right_angle_correction.get(),
                     )
 
-                    # 自动文字标注识别（如果启用）
-                    text_annotations_preview = []
-                    if self.geo_auto_label.get():
-                        try:
-                            import cv2
-                            import numpy as np
-                            from PIL import Image
-                            from wsd_letter_recognizer import recognize_text_from_image
-
-                            img_color = cv2.imread(self.current_file)
-                            if img_color is None:
-                                img_pil = Image.open(self.current_file).convert('RGB')
-                                img_color = np.array(img_pil)
-                                img_color = cv2.cvtColor(img_color, cv2.COLOR_RGB2BGR)
-
-                            if img_color is not None:
-                                h_img, w_img = img_color.shape[:2]
-                                rec_result = recognize_text_from_image(
-                                    img_color, shapes,
-                                    img_size=(w_img, h_img),
-                                    min_confidence=self.geo_auto_label_min_confidence.get(),
-                                    direct_detect=True,
-                                    label_type=self._get_label_type_value(),
-                                )
-                                merged_anns = rec_result.get('merged_annotations', [])
-                                for ann in merged_anns:
-                                    bx, by, bw, bh = ann['bbox']
-                                    text_annotations_preview.append({
-                                        'text': ann.get('full_text', ann.get('text', '')),
-                                        'x': bx + bw / 2,  # 中心点x
-                                        'y': by + bh / 2,  # 中心点y
-                                        'confidence': ann.get('confidence', 0.0),
-                                    })
-                        except Exception:
-                            text_annotations_preview = []
-
                     subpaths = [shape_to_polyline_points(s) for s in shapes]
                     # 判断是否为filled模式（形状带有color字段）
                     is_filled = shapes and 'color' in shapes[0]

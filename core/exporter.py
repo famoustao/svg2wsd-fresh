@@ -183,8 +183,7 @@ def _annotation_to_dict(annotation: TextAnnotation) -> Optional[dict]:
         'assoc_f1': annotation.assoc_f1,
         'assoc_f2': annotation.assoc_f2,
         'assoc_b1d': annotation.assoc_dir,
-        'font_style': annotation.font_style,
-    }
+        }
 
 
 # ============================================================
@@ -389,8 +388,50 @@ def _extract_segments(shape: Shape) -> Optional[list]:
     return segments_list
 
 
+# TikZ线型名称 → 默认WSD线型编号映射
+# 用户建议：虚线默认2.wsd的线型，点线默认3.wsd的线型
+_TIKZ_LINE_TYPE_MAP = {
+    'solid': 0,
+    'dashed': 2,
+    'densely dashed': 2,
+    'loosely dashed': 2,
+    'dotted': 3,
+    'densely dotted': 3,
+    'loosely dotted': 3,
+    'dash_dot': 4,
+    'densely dash dot': 4,
+    'loosely dash dot': 4,
+    'dash_dot_dot': 5,
+    'densely dash dot dot': 5,
+    'loosely dash dot dot': 5,
+}
+
+
+def _resolve_shape_line_type(shape: Shape, line_type: int = 0) -> int:
+    """
+    解析形状的线型。
+
+    如果 line_type > 0，直接使用该值（滑块覆盖）。
+    如果 line_type == 0，从 shape.extra 中读取 tikz_line_type 映射到默认值。
+
+    参数:
+        shape: Shape 对象
+        line_type: 外部指定的线型（0=自动从shape读取）
+
+    返回:
+        int: WSD线型编号（0-14）
+    """
+    if line_type > 0:
+        return line_type
+    if shape.extra:
+        tikz_lt = shape.extra.get('tikz_line_type', 'solid')
+        return _TIKZ_LINE_TYPE_MAP.get(tikz_lt, 0)
+    return 0
+
+
 def _shapes_to_compound_record(shapes: list, linewidth: int = 80,
-                               line_alpha: int = 255) -> Optional[bytes]:
+                               line_alpha: int = 255,
+                               line_type: int = 0) -> Optional[bytes]:
     """
     将多个 Shape（外框+孔洞）合并为单个 WSD 路径记录（多 seglist）。
 
@@ -401,6 +442,7 @@ def _shapes_to_compound_record(shapes: list, linewidth: int = 80,
         shapes: 同组的 Shape 列表，第一项为外框，其余为孔洞
         linewidth: 线宽（WSD单位）
         line_alpha: 线条透明度
+        line_type: 线型（0=自动从shape读取，>0=滑块指定的线型编号）
 
     返回:
         bytes: 合并的路径记录，无法转换时返回 None
@@ -412,8 +454,8 @@ def _shapes_to_compound_record(shapes: list, linewidth: int = 80,
     line_color_bgra = _bgr_to_bgra_bytes(outer.line_color, alpha=line_alpha)
     fill_color_bgr = _bgr_to_bgr_bytes(outer.fill_color)
 
-    # 检查虚线样式（使用外框的虚线属性）
-    line_type = 1 if outer.extra and outer.extra.get('dashed') else 0
+    # 解析线型
+    lt = _resolve_shape_line_type(outer, line_type)
 
     # 收集所有形状的段
     all_seglists = []
@@ -430,11 +472,12 @@ def _shapes_to_compound_record(shapes: list, linewidth: int = 80,
         line_color_bgra=line_color_bgra,
         linewidth=linewidth,
         fill_color_bgra=fill_color_bgr,
-        line_type=line_type,
+        line_type=lt,
     )
 
 
-def _shape_to_path_record(shape: Shape, linewidth: int = 80, line_alpha: int = 255) -> Optional[bytes]:
+def _shape_to_path_record(shape: Shape, linewidth: int = 80, line_alpha: int = 255,
+                          line_type: int = 0) -> Optional[bytes]:
     """
     将 Shape 对象转换为对应的 WSD 路径记录（esShapePath 格式，支持颜色）
 
@@ -444,6 +487,7 @@ def _shape_to_path_record(shape: Shape, linewidth: int = 80, line_alpha: int = 2
         shape: Shape 对象
         linewidth: 线宽（WSD单位）
         line_alpha: 线条透明度（0-255），默认255（不透明），0为完全透明（无色）
+        line_type: 线型（0=自动从shape读取，1=实线，2=虚线）
 
     返回:
         bytes: 路径记录的二进制数据，无法转换时返回 None
@@ -465,12 +509,12 @@ def _shape_to_path_record(shape: Shape, linewidth: int = 80, line_alpha: int = 2
             # 直线（2点）：使用0x00FF开放路径格式，支持裁剪
             x1, y1 = shape.points[0]
             x2, y2 = shape.points[1]
-            line_type = 1 if shape.extra and shape.extra.get('dashed') else 0
+            lt = _resolve_shape_line_type(shape, line_type)
             return build_line_record(
                 x1, y1, x2, y2,
                 line_color=line_color_bgra,
                 linewidth=linewidth,
-                line_type=line_type,
+                line_type=lt,
             )
         else:
             # 折线（多点）：使用esShapePath格式
@@ -601,15 +645,15 @@ def _shape_to_path_record(shape: Shape, linewidth: int = 80, line_alpha: int = 2
     if not segments_list:
         return None
 
-    # 检查虚线样式
-    line_type = 1 if shape.extra and shape.extra.get('dashed') else 0
+    # 解析线型
+    lt = _resolve_shape_line_type(shape, line_type)
 
     return build_combo_path(
         segments_list,
         line_color_bgra=line_color_bgra,
         linewidth=linewidth,
         fill_color_bgra=fill_color_bgr,
-        line_type=line_type,
+        line_type=lt,
     )
 
 
@@ -649,8 +693,7 @@ def _annotation_to_text_record(annotation: TextAnnotation) -> Optional[bytes]:
         assoc_f1=annotation.assoc_f1,
         assoc_f2=annotation.assoc_f2,
         assoc_b1d=annotation.assoc_dir,
-        font_style=annotation.font_style,
-    )
+        )
 
 
 def apply_smart_offset(canvas_data: CanvasData) -> CanvasData:
@@ -937,7 +980,7 @@ def export_wsd_single(canvas_data: CanvasData,
                       line_alpha: int = 255,
                       scale_mode: str = 'auto',
                       scale_value: float = 80.0,
-                      font_style: str = 'italic') -> None:
+                      line_type: int = 0) -> None:
     """
     单画布导出为单个 WSD 文件
 
@@ -965,6 +1008,7 @@ def export_wsd_single(canvas_data: CanvasData,
         line_alpha: 线条透明度（0-255），默认255（不透明），0为完全透明（无色）
         scale_mode: 缩放模式 'auto'=自动适应, 'percent'=按百分比, 'fixed'=固定长度
         scale_value: 缩放值（percent模式为百分比0-200，fixed模式为mm长度）
+        line_type: 线型（0=自动从shape读取，1=实线，2=虚线）
 
     返回:
         None（直接写入文件）
@@ -973,10 +1017,6 @@ def export_wsd_single(canvas_data: CanvasData,
 
     # 应用智能偏移（自动计算标注的9宫格区域和f1/f2，避免与线条重叠）
     canvas_data = apply_smart_offset(canvas_data)
-
-    # 应用字体样式到所有标注
-    for ann in canvas_data.annotations:
-        ann.font_style = font_style
 
     # 确定画布尺寸
     if canvas_size_mm is None:
@@ -1039,7 +1079,7 @@ def export_wsd_single(canvas_data: CanvasData,
                 if override_bgr is not None:
                     transformed.line_color = override_bgr
                 group_shapes.append(transformed)
-            rec = _shapes_to_compound_record(group_shapes, linewidth=linewidth, line_alpha=line_alpha)
+            rec = _shapes_to_compound_record(group_shapes, linewidth=linewidth, line_alpha=line_alpha, line_type=line_type)
             if rec is not None:
                 # 中心点取外框中心
                 outer = group_shapes[0]
@@ -1058,7 +1098,7 @@ def export_wsd_single(canvas_data: CanvasData,
 
             if transformed.type == ShapeType.CIRCLE and transformed.points:
                 # 圆形：走_shape_to_path_record（用椭圆段生成位置，再替换为原生圆段）
-                rec = _shape_to_path_record(transformed, linewidth=linewidth, line_alpha=line_alpha)
+                rec = _shape_to_path_record(transformed, linewidth=linewidth, line_alpha=line_alpha, line_type=line_type)
                 if rec is not None:
                     if transformed.points:
                         pcx = sum(p[0] for p in transformed.points) / len(transformed.points)
@@ -1067,7 +1107,7 @@ def export_wsd_single(canvas_data: CanvasData,
                         pcx, pcy = 0.0, 0.0
                     path_recs.append((rec, pcx, pcy))
             else:
-                rec = _shape_to_path_record(transformed, linewidth=linewidth, line_alpha=line_alpha)
+                rec = _shape_to_path_record(transformed, linewidth=linewidth, line_alpha=line_alpha, line_type=line_type)
                 if rec is not None:
                     if transformed.points:
                         pcx = sum(p[0] for p in transformed.points) / len(transformed.points)
@@ -1130,7 +1170,7 @@ def export_wsd_multi(canvas_list: List[CanvasData],
                      linewidth: int = 80,
                      scale_mode: str = 'auto',
                      scale_value: float = 80.0,
-                     font_style: str = 'italic') -> None:
+                     line_type: int = 0) -> None:
     """
     多个画布导出到同一个 WSD 文件的不同画布（多页）
 
@@ -1146,6 +1186,7 @@ def export_wsd_multi(canvas_list: List[CanvasData],
         linewidth: 线宽（WSD单位），默认 80（0.2mm）
         scale_mode: 缩放模式 'auto'=自动适应, 'percent'=按百分比, 'fixed'=固定长度
         scale_value: 缩放值（percent模式为百分比0-200，fixed模式为mm长度）
+        line_type: 线型（0=自动从shape读取，1=实线，2=虚线）
 
     返回:
         None（直接写入文件）
@@ -1188,10 +1229,6 @@ def export_wsd_multi(canvas_list: List[CanvasData],
         # 应用智能偏移（自动计算标注的9宫格区域和f1/f2，避免与线条重叠）
         canvas_data = apply_smart_offset(canvas_data)
 
-        # 应用字体样式到所有标注
-        for ann in canvas_data.annotations:
-            ann.font_style = font_style
-
         # 计算坐标变换
         if scale_mode == 'auto':
             scale, offset_x, offset_y = _fit_canvas_to_wsd(canvas_data, canvas_size_mm)
@@ -1229,7 +1266,7 @@ def export_wsd_multi(canvas_list: List[CanvasData],
                     if override_bgr is not None:
                         transformed.line_color = override_bgr
                     group_shapes.append(transformed)
-                rec = _shapes_to_compound_record(group_shapes, linewidth=linewidth, line_alpha=line_alpha)
+                rec = _shapes_to_compound_record(group_shapes, linewidth=linewidth, line_alpha=line_alpha, line_type=line_type)
                 if rec is not None:
                     outer = group_shapes[0]
                     if outer.points:
@@ -1247,7 +1284,7 @@ def export_wsd_multi(canvas_list: List[CanvasData],
 
                 if transformed.type == ShapeType.CIRCLE and transformed.points:
                     # 圆形：使用LINE段多边形近似（64边形），与GON/LINE段坐标系统一致
-                    rec = _shape_to_path_record(transformed, linewidth=linewidth, line_alpha=line_alpha)
+                    rec = _shape_to_path_record(transformed, linewidth=linewidth, line_alpha=line_alpha, line_type=line_type)
                     if rec is not None:
                         if transformed.points:
                             pcx = sum(p[0] for p in transformed.points) / len(transformed.points)
@@ -1256,7 +1293,7 @@ def export_wsd_multi(canvas_list: List[CanvasData],
                             pcx, pcy = 0.0, 0.0
                         path_recs.append((rec, pcx, pcy))
                 else:
-                    rec = _shape_to_path_record(transformed, linewidth=linewidth, line_alpha=line_alpha)
+                    rec = _shape_to_path_record(transformed, linewidth=linewidth, line_alpha=line_alpha, line_type=line_type)
                     if rec is not None:
                         if transformed.points:
                             pcx = sum(p[0] for p in transformed.points) / len(transformed.points)
@@ -1768,7 +1805,7 @@ def latex_code_to_wsd(latex_code: str,
                       linewidth: int = 80,
                       multi_canvas: bool = True,
                       split_disconnected: bool = True,
-                      font_style: str = 'italic') -> int:
+                      line_type: int = 0) -> int:
     """
     将 LaTeX/TikZ 代码直接转换为 WSD 文件
 
@@ -1783,7 +1820,7 @@ def latex_code_to_wsd(latex_code: str,
         linewidth: 线宽（WSD单位），默认 80
         multi_canvas: 多个图形时是否生成多画布，False则全部合并为单画布
         split_disconnected: 是否在单个tikzpicture内自动分离不连通的图形到不同画布
-        font_style: 字体样式 ('italic' 或 'upright')
+        line_type: 线型（0=自动从shape读取，1=实线，2=虚线）
 
     返回:
         int: 生成的画布数量
@@ -1957,7 +1994,7 @@ def latex_code_to_wsd(latex_code: str,
             output_path=output_path,
             canvas_size_mm=canvas_size_mm,
             linewidth=linewidth,
-            font_style=font_style,
+            line_type=line_type,
         )
     else:
         export_wsd_multi(
@@ -1965,7 +2002,7 @@ def latex_code_to_wsd(latex_code: str,
             output_path=output_path,
             canvas_size_mm=canvas_size_mm,
             linewidth=linewidth,
-            font_style=font_style,
+            line_type=line_type,
         )
 
     return len(canvas_list)
@@ -1977,7 +2014,7 @@ def latex_file_to_wsd(filepath: str,
                       linewidth: int = 80,
                       multi_canvas: bool = True,
                       split_disconnected: bool = True,
-                      font_style: str = 'italic') -> int:
+                      line_type: int = 0) -> int:
     """
     将 LaTeX/TikZ 文件转换为 WSD 文件
 
@@ -1988,7 +2025,7 @@ def latex_file_to_wsd(filepath: str,
         linewidth: 线宽（WSD单位）
         multi_canvas: 多个图形时是否生成多画布
         split_disconnected: 是否自动分离不连通的图形到不同画布
-        font_style: 字体样式
+        line_type: 线型（0=自动从shape读取，1=实线，2=虚线）
 
     返回:
         int: 生成的画布数量
@@ -2003,7 +2040,7 @@ def latex_file_to_wsd(filepath: str,
         linewidth=linewidth,
         multi_canvas=multi_canvas,
         split_disconnected=split_disconnected,
-        font_style=font_style,
+        line_type=line_type,
     )
 
 

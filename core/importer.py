@@ -4,12 +4,10 @@
 统一的文件导入入口，支持多种格式转换为 CanvasData
 
 支持的格式:
-    - 图片格式: PNG, JPG, BMP, TIFF, WEBP（返回原始图像数据）
-    - SVG: 可缩放矢量图形（解析路径转换为Shape列表）
     - LaTeX/TikZ: .tex（提取tikzpicture环境）
     - GGB: GeoGebra文件（ZIP+XML解析）
     - GGB Script: GeoGebra命令式脚本（文本代码）
-    - WSD: 万氏画板文件（调用wsd_parser解析）
+    - TXT: 文本代码（自动识别LaTeX/GGB格式）
 """
 
 import os
@@ -26,13 +24,12 @@ from core.data_model import CanvasData, Shape, TextAnnotation, ShapeType
 
 # 支持的文件扩展名映射
 # 格式分类
-IMAGE_EXTENSIONS = {'.png', '.jpg', '.jpeg', '.bmp', '.tif', '.tiff', '.webp'}
-SVG_EXTENSIONS = {'.svg'}
+
 LATEX_EXTENSIONS = {'.tex'}
 GGB_EXTENSIONS = {'.ggb'}
 GGB_SCRIPT_EXTENSIONS = {'.ggb script', '.ggs'}
 TXT_EXTENSIONS = {'.txt'}
-WSD_EXTENSIONS = {'.wsd'}
+
 
 
 def import_file(filepath: str) -> CanvasData:
@@ -56,18 +53,12 @@ def import_file(filepath: str) -> CanvasData:
 
     ext = os.path.splitext(filepath)[1].lower()
 
-    if ext in IMAGE_EXTENSIONS:
-        return import_image(filepath)
-    elif ext in SVG_EXTENSIONS:
-        return import_svg(filepath)
-    elif ext in LATEX_EXTENSIONS:
+    if ext in LATEX_EXTENSIONS:
         return import_latex(filepath)
     elif ext in GGB_EXTENSIONS:
         return import_ggb(filepath)
     elif ext in TXT_EXTENSIONS:
         return import_txt(filepath)
-    elif ext in WSD_EXTENSIONS:
-        return import_wsd(filepath)
     else:
         raise ValueError(f"不支持的文件格式: {ext}")
 
@@ -80,459 +71,11 @@ def get_supported_formats() -> dict:
         格式描述字典，key为格式名，value为扩展名列表
     """
     return {
-        "图片": sorted(IMAGE_EXTENSIONS),
-        "SVG": sorted(SVG_EXTENSIONS),
         "LaTeX/TikZ": sorted(LATEX_EXTENSIONS),
         "GeoGebra": sorted(GGB_EXTENSIONS),
         "GeoGebra脚本": sorted(GGB_SCRIPT_EXTENSIONS),
         "TXT代码": sorted(TXT_EXTENSIONS),
-        "WSD画板": sorted(WSD_EXTENSIONS),
     }
-
-
-# ============================================================
-# 图片格式导入
-# ============================================================
-
-def import_image(filepath: str) -> CanvasData:
-    """
-    导入图片文件
-
-    使用PIL读取图片，返回包含原始图像数据的CanvasData。
-    图片的矢量化处理由上层模式层负责，此处仅读取原始像素数据。
-
-    参数:
-        filepath: 图片文件路径
-
-    返回:
-        CanvasData 对象，image_data字段存储numpy数组格式的图像数据，
-        bbox字段为图片尺寸，shapes和annotations为空
-    """
-    try:
-        from PIL import Image
-        import numpy as np
-    except ImportError:
-        raise ImportError("导入图片需要安装 Pillow 和 numpy 库")
-
-    # 打开图片并转换为RGB格式
-    img = Image.open(filepath)
-    img_rgb = img.convert("RGB")
-    width, height = img.size
-
-    # 转换为numpy数组（BGR格式，与OpenCV一致）
-    img_array = np.array(img_rgb)
-    # RGB -> BGR
-    img_bgr = img_array[:, :, ::-1].copy()
-
-    canvas = CanvasData(
-        shapes=[],
-        annotations=[],
-        bbox=(0.0, 0.0, float(width), float(height)),
-        source_file=filepath,
-        image_data=img_bgr
-    )
-
-    return canvas
-
-
-# ============================================================
-# SVG格式导入
-# ============================================================
-
-def _hex_to_bgr(color):
-    """将颜色（hex字符串/BGR元组/颜色名称）转换为BGR元组"""
-    if color is None:
-        return None
-    if isinstance(color, (tuple, list)):
-        # _parse_svg_file 返回 (hex_string, gradient_id) 元组
-        if len(color) > 0 and isinstance(color[0], str):
-            return _hex_to_bgr(color[0])
-        # 嵌套元组：((b,g,r), gradient_id) 等，递归取首元素
-        if len(color) > 0 and isinstance(color[0], (tuple, list)):
-            return _hex_to_bgr(color[0])
-        if len(color) >= 3:
-            return tuple(int(c) for c in color[:3])
-        return (0, 0, 0)
-    if isinstance(color, str):
-        s = color.strip().lower()
-        if s.startswith('#'):
-            h = s.lstrip('#')
-            if len(h) == 6:
-                r = int(h[0:2], 16)
-                g = int(h[2:4], 16)
-                b = int(h[4:6], 16)
-                return (b, g, r)
-            elif len(h) == 3:
-                r = int(h[0] * 2, 16)
-                g = int(h[1] * 2, 16)
-                b = int(h[2] * 2, 16)
-                return (b, g, r)
-        if s.startswith('rgb(') and s.endswith(')'):
-            try:
-                parts = s[4:-1].split(',')
-                if len(parts) == 3:
-                    vals = []
-                    for p in parts:
-                        p = p.strip()
-                        if p.endswith('%'):
-                            vals.append(round(float(p[:-1]) * 255 / 100))
-                        else:
-                            vals.append(int(float(p)))
-                    r = max(0, min(255, vals[0]))
-                    g = max(0, min(255, vals[1]))
-                    b = max(0, min(255, vals[2]))
-                    return (b, g, r)
-            except (ValueError, IndexError):
-                pass
-        _named_colors = {
-            'black': (0, 0, 0), 'white': (255, 255, 255),
-            'red': (0, 0, 255), 'green': (0, 128, 0),
-            'blue': (255, 0, 0), 'yellow': (0, 255, 255),
-            'cyan': (255, 255, 0), 'magenta': (255, 0, 255),
-            'gray': (128, 128, 128), 'grey': (128, 128, 128),
-            'orange': (0, 165, 255), 'purple': (128, 0, 128),
-            'pink': (203, 192, 255), 'brown': (42, 42, 165),
-            'transparent': None, 'none': None,
-        }
-        if s in _named_colors:
-            return _named_colors[s]
-    return (0, 0, 0)
-
-
-def import_svg(filepath: str) -> CanvasData:
-    """
-    导入SVG文件
-
-    使用 svg2wsd_core._parse_svg_file 解析SVG中的路径元素，
-    正确处理transform、颜色、描边等属性，转换为Shape列表。
-
-    参数:
-        filepath: SVG文件路径
-
-    返回:
-        CanvasData 对象
-    """
-    import sys as _sys
-    _project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    if _project_root not in _sys.path:
-        _sys.path.insert(0, _project_root)
-
-    try:
-        from svg2wsd_core import _parse_svg_file
-
-        result = _parse_svg_file(filepath)
-        subpaths = result[0]
-        colors = result[1]
-        bbox = result[2]
-        is_stroke_list = result[3] if len(result) > 3 else []
-        stroke_widths = result[4] if len(result) > 4 else []
-        path_group_ids = result[5] if len(result) > 5 else []
-
-        shapes = []
-        all_points = []
-
-        for i, path_points in enumerate(subpaths):
-            fill_color = None
-            line_color = (0, 0, 0)
-            line_width = 1.0
-
-            is_stroke = is_stroke_list and i < len(is_stroke_list) and is_stroke_list[i]
-
-            if is_stroke:
-                # 描边路径：颜色作为线条颜色
-                if colors and i < len(colors):
-                    line_color = _hex_to_bgr(colors[i])
-            else:
-                # 填充路径：颜色作为填充色
-                if colors and i < len(colors):
-                    fill_color = _hex_to_bgr(colors[i])
-
-            # 描边宽度：仅描边路径使用 stroke-width；填充路径线宽设 0
-            if is_stroke and stroke_widths and i < len(stroke_widths) and stroke_widths[i]:
-                line_width = float(stroke_widths[i])
-            elif not is_stroke:
-                line_width = 0.0
-
-            gid = i  # 默认每条路径独立一组
-            if path_group_ids and i < len(path_group_ids):
-                gid = path_group_ids[i]
-
-            shape = Shape(
-                type=ShapeType.BEZIER,
-                points=list(path_points),
-                line_color=line_color,
-                fill_color=fill_color,
-                line_width=line_width,
-                extra={'path_group_id': gid},
-            )
-            shapes.append(shape)
-            all_points.extend(path_points)
-
-        # 计算边界框
-        if all_points:
-            xs = [p[0] for p in all_points]
-            ys = [p[1] for p in all_points]
-            bbox = (min(xs), min(ys), max(xs), max(ys))
-
-        return CanvasData(
-            shapes=shapes,
-            annotations=[],
-            bbox=bbox,
-            source_file=filepath
-        )
-
-    except Exception:
-        # 最后的兜底：使用基础SVG解析
-        import traceback as _tb
-        _tb.print_exc()
-        return _import_svg_basic(filepath)
-
-
-def _import_svg_basic(filepath: str) -> CanvasData:
-    """
-    基础SVG解析（备用实现）
-
-    当项目现有模块不可用时，使用xml.etree进行基础解析。
-    仅支持最基本的path、rect、circle、line等元素。
-
-    参数:
-        filepath: SVG文件路径
-
-    返回:
-        CanvasData 对象
-    """
-    import xml.etree.ElementTree as ET
-
-    shapes = []
-    annotations = []
-
-    tree = ET.parse(filepath)
-    root = tree.getroot()
-
-    # 获取SVG视口尺寸
-    width = float(root.get("width", "800").replace("px", ""))
-    height = float(root.get("height", "600").replace("px", ""))
-
-    # 命名空间处理
-    ns = {"svg": "http://www.w3.org/2000/svg"}
-
-    # 解析路径元素
-    for path_elem in root.findall(".//svg:path", ns):
-        d = path_elem.get("d", "")
-        if d:
-            # 解析路径数据为Shape
-            shape = _parse_svg_path(d, path_elem)
-            if shape:
-                shapes.append(shape)
-
-    # 解析矩形
-    for rect_elem in root.findall(".//svg:rect", ns):
-        shape = _parse_svg_rect(rect_elem)
-        if shape:
-            shapes.append(shape)
-
-    # 解析圆形
-    for circle_elem in root.findall(".//svg:circle", ns):
-        shape = _parse_svg_circle(circle_elem)
-        if shape:
-            shapes.append(shape)
-
-    # 解析直线
-    for line_elem in root.findall(".//svg:line", ns):
-        shape = _parse_svg_line(line_elem)
-        if shape:
-            shapes.append(shape)
-
-    # 解析文字
-    for text_elem in root.findall(".//svg:text", ns):
-        ann = _parse_svg_text(text_elem)
-        if ann:
-            annotations.append(ann)
-
-    # 计算边界框
-    from .data_model import shapes_bbox
-    bbox = shapes_bbox(shapes) if shapes else (0.0, 0.0, width, height)
-
-    return CanvasData(
-        shapes=shapes,
-        annotations=annotations,
-        bbox=bbox,
-        source_file=filepath
-    )
-
-
-def _parse_svg_path(d: str, elem) -> Optional[Shape]:
-    """解析SVG path元素的d属性"""
-    # 基础实现，仅提取坐标点
-    points = []
-    # 简化的路径解析：提取所有坐标
-    import re
-    coords = re.findall(r'(-?\d+\.?\d*)\s*,\s*(-?\d+\.?\d*)', d)
-    for x, y in coords:
-        points.append((float(x), float(y)))
-
-    if not points:
-        return None
-
-    return Shape(
-        type=ShapeType.POLYLINE,
-        points=points,
-        line_color=(0, 0, 0),
-        fill_color=None,
-        line_width=1.0
-    )
-
-
-def _parse_svg_rect(elem) -> Optional[Shape]:
-    """解析SVG rect元素"""
-    try:
-        x = float(elem.get("x", 0))
-        y = float(elem.get("y", 0))
-        w = float(elem.get("width", 0))
-        h = float(elem.get("height", 0))
-
-        points = [(x, y), (x + w, y), (x + w, y + h), (x, y + h)]
-
-        return Shape(
-            type=ShapeType.RECTANGLE,
-            points=points,
-            line_color=(0, 0, 0),
-            fill_color=None,
-            line_width=1.0
-        )
-    except (ValueError, TypeError):
-        return None
-
-
-def _parse_svg_circle(elem) -> Optional[Shape]:
-    """解析SVG circle元素"""
-    try:
-        cx = float(elem.get("cx", 0))
-        cy = float(elem.get("cy", 0))
-        r = float(elem.get("r", 0))
-
-        return Shape(
-            type=ShapeType.CIRCLE,
-            points=[(cx, cy)],
-            line_color=(0, 0, 0),
-            fill_color=None,
-            line_width=1.0,
-            extra={"radius": r}
-        )
-    except (ValueError, TypeError):
-        return None
-
-
-def _parse_svg_line(elem) -> Optional[Shape]:
-    """解析SVG line元素"""
-    try:
-        x1 = float(elem.get("x1", 0))
-        y1 = float(elem.get("y1", 0))
-        x2 = float(elem.get("x2", 0))
-        y2 = float(elem.get("y2", 0))
-
-        return Shape(
-            type=ShapeType.LINE,
-            points=[(x1, y1), (x2, y2)],
-            line_color=(0, 0, 0),
-            fill_color=None,
-            line_width=1.0
-        )
-    except (ValueError, TypeError):
-        return None
-
-
-def _parse_svg_text(elem) -> Optional[TextAnnotation]:
-    """解析SVG text元素"""
-    try:
-        text = elem.text or ""
-        x = float(elem.get("x", 0))
-        y = float(elem.get("y", 0))
-        font_size = float(elem.get("font-size", "12").replace("px", ""))
-
-        return TextAnnotation(
-            text=text.strip(),
-            x=x,
-            y=y,
-            font_size=font_size
-        )
-    except (ValueError, TypeError):
-        return None
-
-
-# ============================================================
-# WSD格式导入
-# ============================================================
-
-def import_wsd(filepath: str) -> CanvasData:
-    """
-    导入WSD（万氏画板）文件
-
-    调用项目中的wsd_parser模块解析WSD文件。
-
-    参数:
-        filepath: WSD文件路径
-
-    返回:
-        CanvasData 对象
-    """
-    try:
-        import sys
-        sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-        from wsd_parser import WsdParser
-
-        parser = WsdParser()
-        wsd_data = parser.parse(filepath)
-
-        # 将WSD解析结果转换为统一的CanvasData格式
-        shapes = _convert_wsd_shapes(wsd_data)
-        annotations = _convert_wsd_annotations(wsd_data)
-
-        # 计算边界框
-        from .data_model import shapes_bbox
-        bbox = shapes_bbox(shapes) if shapes else (0.0, 0.0, 0.0, 0.0)
-
-        return CanvasData(
-            shapes=shapes,
-            annotations=annotations,
-            bbox=bbox,
-            source_file=filepath
-        )
-
-    except ImportError as e:
-        raise ImportError(f"导入WSD文件失败: {e}")
-
-
-def _convert_wsd_shapes(wsd_data) -> list:
-    """
-    将WSD解析结果转换为Shape列表
-
-    参数:
-        wsd_data: WSD解析器返回的数据
-
-    返回:
-        Shape对象列表
-    """
-    shapes = []
-    # 适配层：根据wsd_parser返回格式进行转换
-    # 待与现有wsd_parser模块对接后完善
-    return shapes
-
-
-def _convert_wsd_annotations(wsd_data) -> list:
-    """
-    将WSD解析结果中的文字转换为TextAnnotation列表
-
-    参数:
-        wsd_data: WSD解析器返回的数据
-
-    返回:
-        TextAnnotation对象列表
-    """
-    annotations = []
-    # 适配层：根据wsd_parser返回格式进行转换
-    return annotations
 
 
 # ============================================================
@@ -719,8 +262,8 @@ def _convert_tikz_shapes(tikz_paths) -> list:
 
         line_width = tpath.line_width
 
-        # 检查虚线选项
-        is_dashed = tpath.options.get('dashed', False) is True
+        # 检查线型选项（存储具体线型名称，用于映射到WSD线型编号）
+        tikz_line_type = tpath.options.get('tikz_line_type', 'solid')
 
         # 遍历每个subpath
         for subpath in tpath.subpaths:
@@ -891,7 +434,7 @@ def _convert_tikz_shapes(tikz_paths) -> list:
                         line_color=line_color_bgr,
                         fill_color=fill_color_bgr,
                         line_width=line_width,
-                        extra={'dashed': True} if is_dashed else {}
+                        extra={'tikz_line_type': tikz_line_type}
                     ))
             else:
                 # 无闭合
@@ -903,7 +446,7 @@ def _convert_tikz_shapes(tikz_paths) -> list:
                         line_color=line_color_bgr,
                         fill_color=fill_color_bgr,
                         line_width=line_width,
-                        extra={'dashed': True} if is_dashed else {}
+                        extra={'tikz_line_type': tikz_line_type}
                     ))
                 elif n > 2:
                     shapes.append(Shape(
@@ -912,7 +455,7 @@ def _convert_tikz_shapes(tikz_paths) -> list:
                         line_color=line_color_bgr,
                         fill_color=fill_color_bgr,
                         line_width=line_width,
-                        extra={'dashed': True} if is_dashed else {}
+                        extra={'tikz_line_type': tikz_line_type}
                     ))
                 # n==1 的单点忽略
 
