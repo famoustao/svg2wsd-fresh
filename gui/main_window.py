@@ -1682,89 +1682,16 @@ class MainWindow:
         ext = os.path.splitext(filepath)[1].lower()
 
         if ext == '.svg':
-            # SVG 文件：优先用 SVG 原始路径和颜色作为原图预览
-            # 这样不依赖 cairosvg，显示效果更准确
-            svg_preview_ok = False
+            # SVG 文件：使用 import_svg 解析为 CanvasData 后在 SVG 预览画布上显示
             try:
-                import svg2wsd_core
-                subpaths, colors, bbox, is_stroke, stroke_widths, path_group_ids = \
-                    svg2wsd_core._parse_svg_file(filepath)[:6]
-                # 构建 CanvasData（使用 SVG 原始颜色）
-                from core.data_model import CanvasData, Shape, ShapeType
-                canvas_data = CanvasData()
-                canvas_data.source_file = filepath
-                canvas_data.bbox = bbox
-
-                def _to_bgr(color):
-                    if color is None:
-                        return None
-                    if isinstance(color, (tuple, list)):
-                        # _parse_svg_file 返回 (hex_string, gradient_id) 元组
-                        if len(color) > 0 and isinstance(color[0], str):
-                            return _to_bgr(color[0])
-                        return tuple(int(c) for c in color[:3])
-                    if isinstance(color, str) and color.startswith('#'):
-                        h = color.lstrip('#')
-                        if len(h) == 6:
-                            return (int(h[4:6], 16), int(h[2:4], 16), int(h[0:2], 16))
-                        elif len(h) == 3:
-                            # #rgb 短格式：r=h[0], g=h[1], b=h[2]
-                            return (int(h[2]*2, 16), int(h[1]*2, 16), int(h[0]*2, 16))
-                    return (0, 0, 0)
-
-                all_points = []
-                for i, path_points in enumerate(subpaths):
-                    fill_color = None
-                    line_color = (0, 0, 0)
-                    line_width = 1.0
-                    # 判断是描边路径还是填充路径
-                    stroke_path = is_stroke and i < len(is_stroke) and is_stroke[i]
-                    if stroke_path:
-                        # 描边路径：使用颜色作为线条颜色
-                        if colors and i < len(colors):
-                            line_color = _to_bgr(colors[i])
-                    else:
-                        # 填充路径：使用颜色作为填充颜色
-                        if colors and i < len(colors):
-                            fill_color = _to_bgr(colors[i])
-                    # 描边宽度：仅描边路径使用 SVG 中的 stroke-width；
-                    # 填充路径 stroke:none，线宽设为 0（不绘制轮廓），
-                    # 否则 SVG 原始坐标系下的大 stroke-width 会让预览被轮廓填满
-                    if stroke_path and stroke_widths and i < len(stroke_widths) and stroke_widths[i]:
-                        line_width = float(stroke_widths[i])
-                        # SVG 原始坐标系下 stroke-width 可能很大（如1026），
-                        # 预览时按 bbox 等比缩放到显示坐标，限制最大显示线宽
-                        bw = bbox[2] - bbox[0] if bbox and len(bbox) == 4 else 500
-                        max_lw = max(2.0, bw * 0.02)
-                        if line_width > max_lw:
-                            line_width = max_lw
-                    elif not stroke_path:
-                        line_width = 0.0
-                    # 获取路径组ID（用于复合路径/孔洞）
-                    gid = 0
-                    if path_group_ids and i < len(path_group_ids):
-                        gid = path_group_ids[i]
-                    shape = Shape(
-                        type=ShapeType.BEZIER,
-                        points=list(path_points),
-                        line_color=line_color,
-                        fill_color=fill_color,
-                        line_width=line_width,
-                        extra={'path_group_id': gid},
-                    )
-                    canvas_data.shapes.append(shape)
-                    all_points.extend(path_points)
-
-                if all_points:
-                    xs = [p[0] for p in all_points]
-                    ys = [p[1] for p in all_points]
-                    canvas_data.bbox = (min(xs), min(ys), max(xs), max(ys))
-
+                from core.importer import import_svg
+                canvas_data = import_svg(filepath)
                 self.preview_panel.set_svg_original(canvas_data)
-                self._update_status(f'已加载SVG原图预览: {file_info["name"]} ({len(subpaths)}条路径)')
+                self._update_status(f'已加载SVG原图预览: {file_info["name"]} ({len(canvas_data.shapes)}条路径)')
                 svg_preview_ok = True
             except Exception as e:
                 self._update_status(f'SVG路径预览失败: {e}，尝试图像渲染...')
+                svg_preview_ok = False
 
             # 如果路径预览失败，尝试图像渲染方式
             if not svg_preview_ok:

@@ -30,6 +30,7 @@ LATEX_EXTENSIONS = {'.tex'}
 GGB_EXTENSIONS = {'.ggb'}
 GGB_SCRIPT_EXTENSIONS = {'.ggb script', '.ggs'}
 TXT_EXTENSIONS = {'.txt'}
+SVG_EXTENSIONS = {'.svg'}
 
 
 
@@ -60,6 +61,8 @@ def import_file(filepath: str) -> CanvasData:
         return import_ggb(filepath)
     elif ext in TXT_EXTENSIONS:
         return import_txt(filepath)
+    elif ext in SVG_EXTENSIONS:
+        return import_svg(filepath)
     else:
         raise ValueError(f"不支持的文件格式: {ext}")
 
@@ -1164,6 +1167,90 @@ def import_txt(filepath: str) -> CanvasData:
             f"无法识别 TXT 文件中的代码格式。"
             f"支持: LaTeX/TikZ（\\draw, \\node 等）、GeoGebra 脚本（Circle(, Segment( 等）、GeoGebra XML"
         )
+
+
+# ============================================================
+# SVG 格式导入
+# ============================================================
+
+def import_svg(filepath: str) -> CanvasData:
+    """
+    导入 SVG 文件
+
+    使用 svg2wsd_core._parse_svg_file 解析 SVG 路径，
+    将每个路径转换为 CanvasData 中的 BEZIER 形状，保留原始颜色和描边信息。
+
+    参数:
+        filepath: SVG 文件路径
+
+    返回:
+        CanvasData 对象
+    """
+    import svg2wsd_core
+    from core.data_model import CanvasData, Shape, ShapeType
+
+    subpaths, colors, bbox, is_stroke, stroke_widths, path_group_ids = \
+        svg2wsd_core._parse_svg_file(filepath)[:6]
+
+    def _to_bgr(color):
+        if color is None:
+            return None
+        if isinstance(color, (tuple, list)):
+            if len(color) > 0 and isinstance(color[0], str):
+                return _to_bgr(color[0])
+            return tuple(int(c) for c in color[:3])
+        if isinstance(color, str) and color.startswith('#'):
+            h = color.lstrip('#')
+            if len(h) == 6:
+                return (int(h[4:6], 16), int(h[2:4], 16), int(h[0:2], 16))
+            elif len(h) == 3:
+                return (int(h[2]*2, 16), int(h[1]*2, 16), int(h[0]*2, 16))
+        return (0, 0, 0)
+
+    canvas_data = CanvasData()
+    canvas_data.source_file = filepath
+    canvas_data.bbox = bbox
+
+    all_points = []
+    for i, path_points in enumerate(subpaths):
+        fill_color = None
+        line_color = (0, 0, 0)
+        line_width = 1.0
+        stroke_path = is_stroke and i < len(is_stroke) and is_stroke[i]
+        if stroke_path:
+            if colors and i < len(colors):
+                line_color = _to_bgr(colors[i])
+        else:
+            if colors and i < len(colors):
+                fill_color = _to_bgr(colors[i])
+        if stroke_path and stroke_widths and i < len(stroke_widths) and stroke_widths[i]:
+            line_width = float(stroke_widths[i])
+            bw = bbox[2] - bbox[0] if bbox and len(bbox) == 4 else 500
+            max_lw = max(2.0, bw * 0.02)
+            if line_width > max_lw:
+                line_width = max_lw
+        elif not stroke_path:
+            line_width = 0.0
+        gid = 0
+        if path_group_ids and i < len(path_group_ids):
+            gid = path_group_ids[i]
+        shape = Shape(
+            type=ShapeType.BEZIER,
+            points=list(path_points),
+            line_color=line_color,
+            fill_color=fill_color,
+            line_width=line_width,
+            extra={'path_group_id': gid},
+        )
+        canvas_data.shapes.append(shape)
+        all_points.extend(path_points)
+
+    if all_points:
+        xs = [p[0] for p in all_points]
+        ys = [p[1] for p in all_points]
+        canvas_data.bbox = (min(xs), min(ys), max(xs), max(ys))
+
+    return canvas_data
 
 
 def _import_txt_as_latex(content: str, filepath: str) -> CanvasData:
