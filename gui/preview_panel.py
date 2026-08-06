@@ -572,6 +572,9 @@ class WsdPreviewCanvas(ZoomableCanvas):
             print(f"[WSDPreview] 绘制网格失败: {e}\n{traceback.format_exc()}")
 
         # 按 path_group_id 分组，处理复合路径（孔洞）
+        # SVG 数据子路径使用独立渲染（SVG 的子路径可能是不相交的独立填充区域），
+        # 非 SVG 数据（WSD/LaTeX/GGB）使用复合路径渲染（外框+孔洞）。
+        is_svg = self._canvas_data.extra_info.get('svg_import', False) if self._canvas_data.extra_info else False
         groups = {}
         for shape in self._canvas_data.shapes:
             try:
@@ -585,13 +588,14 @@ class WsdPreviewCanvas(ZoomableCanvas):
 
         # 绘制每组形状
         for gid, group_shapes in groups.items():
-            if len(group_shapes) == 1:
-                # 单路径，直接绘制
-                try:
-                    self._draw_shape(group_shapes[0])
-                except Exception as e:
-                    import traceback
-                    print(f"[WSDPreview] 绘制形状失败: {e}\n{traceback.format_exc()}")
+            if is_svg or len(group_shapes) == 1:
+                # 单路径或 SVG 数据，直接绘制
+                for shape in group_shapes:
+                    try:
+                        self._draw_shape(shape)
+                    except Exception as e:
+                        import traceback
+                        print(f"[WSDPreview] 绘制形状失败: {e}\n{traceback.format_exc()}")
             else:
                 # 复合路径：第一个是外框，其余是孔洞
                 try:
@@ -1342,6 +1346,9 @@ class SvgPreviewCanvas(WsdPreviewCanvas):
             print(f"[SVGPreview] 绘制白色背景失败: {e}\n{traceback.format_exc()}")
 
         # 按 path_group_id 分组，处理复合路径（孔洞）
+        # SVG 数据子路径使用独立渲染（SVG 的子路径可能是不相交的独立填充区域），
+        # 非 SVG 数据（WSD/LaTeX/GGB）使用复合路径渲染（外框+孔洞）。
+        is_svg = self._canvas_data.extra_info.get('svg_import', False) if self._canvas_data.extra_info else False
         groups = {}
         for shape in self._canvas_data.shapes:
             try:
@@ -1355,12 +1362,13 @@ class SvgPreviewCanvas(WsdPreviewCanvas):
 
         # 绘制每组形状
         for gid, group_shapes in groups.items():
-            if len(group_shapes) == 1:
-                try:
-                    self._draw_shape(group_shapes[0])
-                except Exception as e:
-                    import traceback
-                    print(f"[SVGPreview] 绘制形状失败: {e}\n{traceback.format_exc()}")
+            if is_svg or len(group_shapes) == 1:
+                for shape in group_shapes:
+                    try:
+                        self._draw_shape(shape)
+                    except Exception as e:
+                        import traceback
+                        print(f"[SVGPreview] 绘制形状失败: {e}\n{traceback.format_exc()}")
             else:
                 try:
                     self._draw_compound_path(group_shapes)

@@ -1289,6 +1289,7 @@ def import_svg(filepath: str) -> CanvasData:
     canvas_data = CanvasData()
     canvas_data.source_file = filepath
     canvas_data.bbox = bbox
+    canvas_data.extra_info['svg_import'] = True
 
     all_points = []
     for i, path_points in enumerate(subpaths):
