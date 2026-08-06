@@ -446,11 +446,16 @@ class BatchManager:
                         mode = GeometryMode()
                         canvas_data = mode.process(file_item.filepath, params)
                     elif mode_type_lower == "comic":
-                        # 漫画模式（使用模块级 process 函数，支持 SVG 和图片）
-                        from modes.comic_mode import process as comic_process
-                        color_mode = params.get('color_mode', 'line_art')
-                        compound_mode = params.get('compound_mode', 'auto')
-                        canvas_data = comic_process(file_item.filepath, color_mode, params, compound_mode=compound_mode)
+                        # LaTeX/GGB/SVG 文件直接导入，不执行 comic_process
+                        ext = os.path.splitext(file_item.filepath)[1].lower()
+                        if ext in ('.tex', '.ggb', '.txt', '.svg'):
+                            canvas_data = import_file(file_item.filepath)
+                        else:
+                            # 漫画模式（使用模块级 process 函数，支持 SVG 和图片）
+                            from modes.comic_mode import process as comic_process
+                            color_mode = params.get('color_mode', 'line_art')
+                            compound_mode = params.get('compound_mode', 'auto')
+                            canvas_data = comic_process(file_item.filepath, color_mode, params, compound_mode=compound_mode)
                     else:
                         raise ValueError(f"不支持的处理模式: {mode_type}")
 

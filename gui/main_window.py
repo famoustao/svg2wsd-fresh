@@ -1661,6 +1661,7 @@ class MainWindow:
         if 'canvas_data' in file_info and file_info['canvas_data'] is not None:
             canvas_data = file_info['canvas_data']
             name = file_info['name'].lower()
+            is_latex_ggb = 'latex' in name or name.endswith('.tex') or name.endswith('.ggb')
             if 'latex' in name or name.endswith('.tex'):
                 self.preview_panel.set_latex_preview(canvas_data)
             else:
@@ -1669,7 +1670,9 @@ class MainWindow:
                 f'已加载预览: {file_info["name"]} — '
                 f'{len(canvas_data.shapes)} 个图形, {len(canvas_data.annotations)} 个标注'
             )
-            self._on_param_changed()
+            # LaTeX/GGB 文件跳过 comic_process（vtracer/黑白线稿/彩色填充）
+            if not is_latex_ggb:
+                self._on_param_changed()
             return
 
         # 尝试加载原图预览
@@ -2013,20 +2016,10 @@ class MainWindow:
             self._update_status('无法更新预览: 文件路径为空')
             return
 
-        # SVG 文件解析很快，直接在主线程处理，不经过后台线程
         ext = os.path.splitext(filepath)[1].lower()
-        if ext == '.svg':
-            self._update_status(f'正在生成预览: {file_info["name"]}...')
-            try:
-                from modes.comic_mode import process as comic_process
-                compound_mode = params.get('compound_mode', 'auto')
-                canvas_data = comic_process(filepath, sub_mode, params, compound_mode=compound_mode)
-                self._handle_preview_result(canvas_data)
-            except Exception as e:
-                import traceback
-                tb = traceback.format_exc()
-                self._update_status(f'预览失败: {e}')
-                self._log_error(f'SVG预览失败: {e}\n{tb}')
+
+        # LaTeX/GGB/SVG 文件不执行 comic_process（vtracer/黑白线稿/彩色填充），预览已在 _load_preview 中设置
+        if ext in ('.tex', '.ggb', '.txt', '.svg'):
             return
 
         self._update_status(f'正在生成预览: {file_info["name"]}...')
