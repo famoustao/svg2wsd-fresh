@@ -201,8 +201,8 @@ class GeoGebraScriptParser:
         """求值表达式"""
         expr = expr.strip()
 
-        # 元组坐标: (x, y) 或 (x,y)
-        m = re.match(r'^\(\s*(-?[\d.]+)\s*,\s*(-?[\d.]+)\s*\)$', expr)
+        # 元组坐标: (x, y) 或 (x,y)，支持科学计数法如 1e-5、1.5e10
+        m = re.match(r'^\(\s*(-?[\d.eE+-]+)\s*,\s*(-?[\d.eE+-]+)\s*\)$', expr)
         if m:
             x, y = float(m.group(1)), float(m.group(2))
             self._all_x.append(x)
@@ -272,8 +272,8 @@ class GeoGebraScriptParser:
     def _resolve_point(self, arg: str) -> Optional[Tuple[float, float]]:
         """解析参数为坐标点"""
         arg = arg.strip()
-        # 直接坐标元组
-        m = re.match(r'^\(\s*(-?[\d.]+)\s*,\s*(-?[\d.]+)\s*\)$', arg)
+        # 直接坐标元组，支持科学计数法如 1e-5、1.5e10
+        m = re.match(r'^\(\s*(-?[\d.eE+-]+)\s*,\s*(-?[\d.eE+-]+)\s*\)$', arg)
         if m:
             return (float(m.group(1)), float(m.group(2)))
         # 变量引用
@@ -471,6 +471,12 @@ class GeoGebraScriptParser:
                 p3 = self._resolve_point(args[2])  # A
                 if p1 and vertex and p3:
                     self._add_right_angle_mark(p1, vertex, p3)
+            return None
+
+        # 静默跳过未实现的命令，记录警告但不崩溃
+        if func_name in ('Function', 'Text', 'Arc', 'Semicircle', 'Ellipse',
+                         'Parabola', 'Hyperbola', 'Tangent', 'PolyLine'):
+            # 这些命令暂不支持，返回 None 表示跳过
             return None
 
         return None

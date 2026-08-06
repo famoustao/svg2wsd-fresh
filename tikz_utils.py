@@ -1309,6 +1309,36 @@ def _add_elliptical_arc_to_subpath(subpath, cx, cy, rx, ry, start_deg, end_deg, 
 # 主解析函数
 # ============================================================
 
+def _remove_comments(text):
+    """智能移除注释，只移除顶层（花括号外）的%注释，跳过转义\%"""
+    result = []
+    brace_depth = 0
+    i = 0
+    while i < len(text):
+        if text[i] == '\\' and i + 1 < len(text) and text[i+1] == '%':
+            # 转义百分号，保留
+            result.append('\\%')
+            i += 2
+            continue
+        if text[i] == '{':
+            brace_depth += 1
+            result.append('{')
+        elif text[i] == '}':
+            brace_depth = max(0, brace_depth - 1)
+            result.append('}')
+        elif text[i] == '%' and brace_depth == 0:
+            # 顶层注释，跳过到行尾
+            while i < len(text) and text[i] != '\n':
+                i += 1
+            if i < len(text):
+                result.append('\n')
+            continue
+        else:
+            result.append(text[i])
+        i += 1
+    return ''.join(result)
+
+
 def parse_tikz_code(tikz_code):
     """
     解析完整的TikZ代码，返回路径列表 [TikZPath, ...]
@@ -1343,8 +1373,8 @@ def parse_tikz_code(tikz_code):
     else:
         body = tikz_code
 
-    # 去掉注释
-    body = re.sub(r'%.*', '', body)
+    # 去掉注释（智能去除，只移除顶层花括号外的%注释）
+    body = _remove_comments(body)
 
     # 提取命名坐标 (\coordinate 命令)
     # 关键: 提取前先重置 _tikz_scale 为 1.0, 避免上一次调用遗留的 scale
@@ -1401,6 +1431,30 @@ def parse_tikz_code(tikz_code):
                     if opt in TIKZ_COLORS:
                         options['color'] = opt
                         break
+        elif cmd_type == 'clip':
+            # \clip 命令：类比 \path（draw=True, fill=False 仅作路径裁剪用）
+            options['draw'] = options.get('draw', True)
+            options['fill'] = False
+        elif cmd_type == 'shade':
+            # \shade 命令：转化为 \path（draw=False, fill=True）
+            options['draw'] = False
+            options['fill'] = options.get('fill', True)
+        elif cmd_type == 'shadedraw':
+            # \shadedraw 命令：转化为 \path（draw=True, fill=True）
+            options['draw'] = True
+            options['fill'] = options.get('fill', True)
+        elif cmd_type == 'pattern':
+            # \pattern 命令：转化为 \path（draw=False, fill=True）
+            options['draw'] = False
+            options['fill'] = options.get('fill', True)
+        elif cmd_type == 'patterndraw':
+            # \patterndraw 命令：转化为 \path（draw=True, fill=True）
+            options['draw'] = True
+            options['fill'] = options.get('fill', True)
+        elif cmd_type == 'scope':
+            # \scope 命令：等价于 \path（draw=False, fill=False，作为容器）
+            options['draw'] = False
+            options['fill'] = False
 
         path = _parse_path_body(body_str, options)
         if path and path.subpaths:
@@ -1424,9 +1478,9 @@ def _extract_tikz_commands(body):
     pos = 0
 
     while pos < len(body):
-        # 查找 \draw, \fill, \filldraw, \path
+        # 查找 \draw, \fill, \filldraw, \path, \clip, \shade 等命令
         m = re.search(
-            r'\\(draw|fill|filldraw|path|node)\b',
+            r'\\(draw|fill|filldraw|path|node|clip|shade|shadedraw|pattern|patterndraw|scope)\b',
             body[pos:]
         )
         if not m:
@@ -1516,7 +1570,7 @@ def extract_tikz_from_tex(tex_content):
     """
     tikz_codes = []
 
-    pattern = r'\\begin\{tikzpicture\}(\[.*?\])?\s*(.*?)\\end\{tikzpicture\}'
+    pattern = r'\\begin\{tikzpicture\}(\[[^\]]*\])?\s*((?:(?!\\end\{tikzpicture\})[\s\S])*)\\end\{tikzpicture\}'
     matches = re.finditer(pattern, tex_content, re.DOTALL)
 
     for m in matches:
@@ -1690,6 +1744,33 @@ def extract_named_coordinates(tikz_code):
             x, y, _ = coord
             coords[name] = (x, y)
             working_coords[name] = (x, y)
+
+    # ---- 提取 \path ... coordinate (A) 中定义的坐标 ----
+    # 匹配: \path[draw] ... coordinate [name] at (x,y);
+    for m in re.finditer(
+        r'\\(?:path|draw|fill|filldraw|clip|scope)[^;]*?\bcoordinate\s*\[([^\]]*)\]\s*at\s*\(',
+        body
+    ):
+        name = m.group(1).strip()
+        if name in coords:
+            continue
+        coord_start = m.end()
+        paren_depth = 1
+        ci = coord_start
+        while ci < len(body) and paren_depth > 0:
+            if body[ci] == '(':
+                paren_depth += 1
+            elif body[ci] == ')':
+                paren_depth -= 1
+            ci += 1
+        coord_str = body[coord_start:ci - 1].strip()
+        coord = _parse_coord(coord_str)
+        if coord:
+            x, y, _ = coord
+            coords[name] = (x, y)
+            working_coords[name] = (x, y)
+            log("坐标提取", f"\\path ... coordinate {name} = ({x:.4f}, {y:.4f})  "
+                f"[源: {coord_str[:50]}]")
 
     # ---- 提取 \path[name path=XXX] 定义的命名路径 ----
     # 支持: \path[name path=AB] (A)--(B); 等

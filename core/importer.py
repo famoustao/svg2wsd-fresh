@@ -560,6 +560,16 @@ def _convert_tikz_annotations(tikz_nodes) -> list:
 # GeoGebra (.ggb) 格式导入
 # ============================================================
 
+def _safe_float(val, default=0.0):
+    """安全的 float 转换，失败时返回默认值"""
+    if val is None:
+        return default
+    try:
+        return float(val)
+    except (ValueError, TypeError):
+        return default
+
+
 def import_ggb(filepath: str) -> CanvasData:
     """
     导入GeoGebra (.ggb) 文件
@@ -628,8 +638,8 @@ def import_ggb(filepath: str) -> CanvasData:
                 if elem_type == 'point':
                     coords = _find(xml_elem, 'ggb:coords', ns)
                     if coords is not None:
-                        x = float(coords.get('x', 0))
-                        y = float(coords.get('y', 0))
+                        x = _safe_float(coords.get('x', 0))
+                        y = _safe_float(coords.get('y', 0))
                         label_to_coords[label] = (x, y)
                     label_to_type[label] = 'point'
 
@@ -737,12 +747,12 @@ def import_ggb(filepath: str) -> CanvasData:
             # conic 齐次坐标：矩阵 [[a, b/2, d/2], [b/2, c, e/2], [d/2, e/2, f]]
             # 简化处理：尝试作为椭圆采样
             try:
-                a_coeff = float(coords.get('a', coords.get('x1', '0')))
-                b_coeff = float(coords.get('b', coords.get('y1', '0')))
-                c_coeff = float(coords.get('c', coords.get('x2', '0')))
-                d_coeff = float(coords.get('d', coords.get('y2', '0')))
-                e_coeff = float(coords.get('e', coords.get('x3', '0')))
-                f_coeff = float(coords.get('f', coords.get('y3', '1')))
+                a_coeff = _safe_float(coords.get('a', coords.get('x1', '0')))
+                b_coeff = _safe_float(coords.get('b', coords.get('y1', '0')))
+                c_coeff = _safe_float(coords.get('c', coords.get('x2', '0')))
+                d_coeff = _safe_float(coords.get('d', coords.get('y2', '0')))
+                e_coeff = _safe_float(coords.get('e', coords.get('x3', '0')))
+                f_coeff = _safe_float(coords.get('f', coords.get('y3', '1')))
             except (ValueError, TypeError):
                 return
 
@@ -831,7 +841,7 @@ def import_ggb(filepath: str) -> CanvasData:
                 if ls is None:
                     ls = _find(xml_elem, 'lineStyle')
                 if ls is not None:
-                    lw = float(ls.get('thickness', 2))
+                    lw = _safe_float(ls.get('thickness', 2))
 
                 # 按类型解析
                 if elem_type == 'point':
@@ -839,8 +849,8 @@ def import_ggb(filepath: str) -> CanvasData:
                     if coords is None:
                         coords = _find(xml_elem, 'coords')
                     if coords is not None:
-                        x = float(coords.get('x', 0))
-                        y = float(coords.get('y', 0))
+                        x = _safe_float(coords.get('x', 0))
+                        y = _safe_float(coords.get('y', 0))
                         annotations.append(TextAnnotation(
                             text=label, x=x, y=y,
                             font_size=14, bold=True,
@@ -858,10 +868,10 @@ def import_ggb(filepath: str) -> CanvasData:
                         coords = _find(xml_elem, 'coords')
                     if coords is not None:
                         try:
-                            x1 = float(coords.get('x1', coords.get('x', 0)))
-                            y1 = float(coords.get('y1', coords.get('y', 0)))
-                            x2 = float(coords.get('x2', 0))
-                            y2 = float(coords.get('y2', 0))
+                            x1 = _safe_float(coords.get('x1', coords.get('x', 0)))
+                            y1 = _safe_float(coords.get('y1', coords.get('y', 0)))
+                            x2 = _safe_float(coords.get('x2', 0))
+                            y2 = _safe_float(coords.get('y2', 0))
                         except (ValueError, TypeError):
                             continue
                         shapes.append(Shape(
@@ -906,9 +916,9 @@ def import_ggb(filepath: str) -> CanvasData:
                     if coords is None:
                         coords = _find(xml_elem, 'coords')
                     if coords is not None:
-                        a = float(coords.get('x', 0))
-                        b = float(coords.get('y', 0))
-                        c = float(coords.get('z', 0))
+                        a = _safe_float(coords.get('x', 0))
+                        b = _safe_float(coords.get('y', 0))
+                        c = _safe_float(coords.get('z', 0))
                         # 画一条跨越画布的线段
                         if abs(b) > 1e-10:
                             x1 = -500
@@ -946,8 +956,8 @@ def import_ggb(filepath: str) -> CanvasData:
                             if coords_c is None:
                                 coords_c = _find(center, 'coords')
                             if coords_c is not None:
-                                cx = float(coords_c.get('x', 0))
-                                cy = float(coords_c.get('y', 0))
+                                cx = _safe_float(coords_c.get('x', 0))
+                                cy = _safe_float(coords_c.get('y', 0))
                             else:
                                 # 用 center 标签在 label_to_coords 中查找
                                 cp_label = center.get('label', '')
@@ -956,10 +966,10 @@ def import_ggb(filepath: str) -> CanvasData:
                                 else:
                                     cx, cy = 0.0, 0.0
                         else:
-                            cx = float(cp.get('x', 0))
-                            cy = float(cp.get('y', 0))
+                            cx = _safe_float(cp.get('x', 0))
+                            cy = _safe_float(cp.get('y', 0))
 
-                        radius = float(radius_el.get('val', 1)) if radius_el is not None else 1
+                        radius = _safe_float(radius_el.get('val', 1)) if radius_el is not None else 1
                         shapes.append(Shape(
                             type=ShapeType.CIRCLE,
                             points=[(cx, cy)],
@@ -973,9 +983,9 @@ def import_ggb(filepath: str) -> CanvasData:
                         if coords is None:
                             coords = _find(xml_elem, 'coords')
                         if coords is not None:
-                            cx = float(coords.get('x', 0))
-                            cy = float(coords.get('y', 0))
-                            radius = float(radius_el.get('val', 1)) if radius_el is not None else 1
+                            cx = _safe_float(coords.get('x', 0))
+                            cy = _safe_float(coords.get('y', 0))
+                            radius = _safe_float(radius_el.get('val', 1)) if radius_el is not None else 1
                             shapes.append(Shape(
                                 type=ShapeType.CIRCLE,
                                 points=[(cx, cy)],

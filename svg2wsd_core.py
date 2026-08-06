@@ -795,7 +795,7 @@ def _parse_svg_file(svg_path):
         root = tree.getroot()
     except (ET.ParseError, FileNotFoundError, OSError) as e:
         # 返回有意义的空结果
-        return [], [], (0, 0, 0, 0), [], [], [], [], {}
+        return [], [], (0, 0, 0, 0), [], [], [], [], [], {}
 
     # 解析 viewBox 和 width/height（用于 viewBox 坐标到实际像素的变换）
     vb = root.get('viewBox', '')
@@ -1164,8 +1164,22 @@ def _parse_svg_file(svg_path):
         return default
 
     def _get_fill(elem, parent_fill='#000000'):
-        """获取元素填充色，返回 (color_hex_or_none, gradient_id_or_none)"""
+        """获取元素填充色，返回 (color_hex_or_none, gradient_id_or_none, opacity_or_none)"""
         fill = _get_style_value(elem, 'fill')
+        # 提取 fill-opacity 和 opacity
+        opacity = None
+        fill_opacity = _get_style_value(elem, 'fill-opacity')
+        elem_opacity = _get_style_value(elem, 'opacity')
+        if fill_opacity:
+            try:
+                opacity = float(fill_opacity)
+            except (ValueError, TypeError):
+                pass
+        elif elem_opacity:
+            try:
+                opacity = float(elem_opacity)
+            except (ValueError, TypeError):
+                pass
         if fill and fill != 'none':
             # 处理渐变引用: url(#gradientId)
             if fill.startswith('url('):
@@ -1174,22 +1188,38 @@ def _parse_svg_file(svg_path):
                     gid = m.group(1)
                     grad_color = gradient_colors.get(gid)
                     if grad_color:
-                        return (grad_color, gid)
-            return (fill, None)
+                        return (grad_color, gid, opacity)
+                    # 找不到渐变时返回黑色而不是 url(#xxx) 原始字符串
+                    return ('#000000', None, opacity)
+            return (fill, None, opacity)
         if fill == 'none':
-            return ('none', None)
-        # 继承父级颜色：parent_fill 可能已经是 (color, gradient_id) 元组
+            return ('none', None, opacity)
+        # 继承父级颜色：parent_fill 可能已经是 (color, gradient_id, opacity) 元组
         if isinstance(parent_fill, (tuple, list)):
             return parent_fill
-        return (parent_fill, None)
+        return (parent_fill, None, opacity)
 
     def _get_stroke(elem, parent_stroke='none'):
         stroke = _get_style_value(elem, 'stroke')
+        opacity = None
+        # 提取 stroke-opacity 和 opacity
+        stroke_opacity = _get_style_value(elem, 'stroke-opacity')
+        elem_opacity = _get_style_value(elem, 'opacity')
+        if stroke_opacity:
+            try:
+                opacity = float(stroke_opacity)
+            except (ValueError, TypeError):
+                pass
+        elif elem_opacity:
+            try:
+                opacity = float(elem_opacity)
+            except (ValueError, TypeError):
+                pass
         if stroke and stroke != 'none':
-            return stroke
+            return (stroke, opacity)
         if stroke == 'none':
-            return 'none'
-        return parent_stroke
+            return ('none', opacity)
+        return (parent_stroke, opacity)
 
     def _get_stroke_width(elem, parent_width=1.0):
         sw = _get_style_value(elem, 'stroke-width')
@@ -1201,8 +1231,14 @@ def _parse_svg_file(svg_path):
         return parent_width
 
     paths = []
+    text_annotations = []
     def _collect(parent, parent_fill='#000000', parent_stroke='none',
                  parent_stroke_width=1.0, parent_transform=None, in_defs=False):
+        # 检查 display 和 visibility
+        display = parent.get('display', '')
+        visibility = parent.get('visibility', '')
+        if display == 'none' or visibility == 'hidden':
+            return
         g_fill = _get_fill(parent, parent_fill)
         g_stroke = _get_stroke(parent, parent_stroke)
         g_stroke_width = _get_stroke_width(parent, parent_stroke_width)
@@ -1230,6 +1266,17 @@ def _parse_svg_file(svg_path):
                         ref_tag = ref_elem.tag.split('}')[-1] if '}' in ref_elem.tag else ref_elem.tag
                         # 获取 use 元素自身的 transform
                         use_transform = _parse_transform(child.get('transform', ''))
+                        # 处理 use 的 x/y 属性，追加 translate(tx, ty) 到 transform 链末尾
+                        x_attr = child.get('x', '0')
+                        y_attr = child.get('y', '0')
+                        try:
+                            tx = float(x_attr)
+                            ty = float(y_attr)
+                        except (ValueError, TypeError):
+                            tx, ty = 0.0, 0.0
+                        if tx != 0.0 or ty != 0.0:
+                            translate_t = (1.0, 0.0, 0.0, 1.0, tx, ty)
+                            use_transform = _concat_transform(use_transform, translate_t)
                         use_combined = _concat_transform(combined, use_transform)
                         if ref_tag == 'g':
                             # 引用的是 <g>，递归收集其中的 path（使用 use 的 transform）
@@ -1243,7 +1290,12 @@ def _parse_svg_file(svg_path):
                                 stroke_width = _get_stroke_width(ref_elem, g_stroke_width)
                                 t = _parse_transform(ref_elem.get('transform', ''))
                                 full_t = _concat_transform(use_combined, t)
-                                paths.append((d, fill, stroke, stroke_width, full_t))
+                                extra = {}
+                                if isinstance(fill, (tuple, list)) and len(fill) >= 3 and fill[2] is not None:
+                                    extra['opacity'] = fill[2]
+                                elif isinstance(stroke, (tuple, list)) and len(stroke) >= 2 and stroke[1] is not None:
+                                    extra['opacity'] = stroke[1]
+                                paths.append((d, fill, stroke, stroke_width, full_t, extra))
                         elif ref_tag == 'symbol':
                             # 引用的是 <symbol>，递归收集
                             _collect(ref_elem, g_fill, g_stroke, g_stroke_width, use_combined, in_defs=False)
@@ -1254,7 +1306,12 @@ def _parse_svg_file(svg_path):
                 stroke_width = _get_stroke_width(child, g_stroke_width)
                 t = _parse_transform(child.get('transform', ''))
                 full_t = _concat_transform(combined, t)
-                paths.append((d, fill, stroke, stroke_width, full_t))
+                extra = {}
+                if isinstance(fill, (tuple, list)) and len(fill) >= 3 and fill[2] is not None:
+                    extra['opacity'] = fill[2]
+                elif isinstance(stroke, (tuple, list)) and len(stroke) >= 2 and stroke[1] is not None:
+                    extra['opacity'] = stroke[1]
+                paths.append((d, fill, stroke, stroke_width, full_t, extra))
             elif tag in ('rect', 'circle', 'ellipse', 'line', 'polyline', 'polygon'):
                 # SVG基础形状元素，转换为路径
                 d = _svg_shape_to_path_d(child)
@@ -1264,7 +1321,76 @@ def _parse_svg_file(svg_path):
                     stroke_width = _get_stroke_width(child, g_stroke_width)
                     t = _parse_transform(child.get('transform', ''))
                     full_t = _concat_transform(combined, t)
-                    paths.append((d, fill, stroke, stroke_width, full_t))
+                    extra = {}
+                    if isinstance(fill, (tuple, list)) and len(fill) >= 3 and fill[2] is not None:
+                        extra['opacity'] = fill[2]
+                    elif isinstance(stroke, (tuple, list)) and len(stroke) >= 2 and stroke[1] is not None:
+                        extra['opacity'] = stroke[1]
+                    paths.append((d, fill, stroke, stroke_width, full_t, extra))
+            elif tag == 'text':
+                # 提取文本内容
+                text_content = child.text or ''
+                if not text_content.strip():
+                    # 尝试从子元素中收集文本
+                    text_content = ''.join(child.itertext())
+                x = child.get('x', '0')
+                y = child.get('y', '0')
+                font_size = child.get('font-size', '')
+                # 尝试从 style 属性中提取 font-size
+                style = child.get('style', '')
+                if style:
+                    m = re.search(r'font-size:([^;]+)', style)
+                    if m:
+                        font_size = m.group(1).strip()
+                try:
+                    tx = float(x)
+                    ty = float(y)
+                except (ValueError, TypeError):
+                    tx, ty = 0.0, 0.0
+                tfs = 16.0
+                if font_size:
+                    try:
+                        tfs = float(font_size.rstrip('px'))
+                    except (ValueError, TypeError):
+                        pass
+                text_annotations.append({
+                    'text': text_content.strip(),
+                    'x': tx,
+                    'y': ty,
+                    'font_size': tfs,
+                })
+                # 递归处理 tspan 子元素
+                _collect(child, g_fill, g_stroke, g_stroke_width, combined, child_in_defs)
+            elif tag == 'tspan':
+                # 提取 tspan 文本内容
+                tspan_text = child.text or ''
+                if not tspan_text.strip():
+                    tspan_text = ''.join(child.itertext())
+                x = child.get('x', None)
+                y = child.get('y', None)
+                font_size = child.get('font-size', '')
+                style = child.get('style', '')
+                if style:
+                    m = re.search(r'font-size:([^;]+)', style)
+                    if m:
+                        font_size = m.group(1).strip()
+                entry = {'text': tspan_text.strip()}
+                if x is not None:
+                    try:
+                        entry['x'] = float(x)
+                    except (ValueError, TypeError):
+                        pass
+                if y is not None:
+                    try:
+                        entry['y'] = float(y)
+                    except (ValueError, TypeError):
+                        pass
+                if font_size:
+                    try:
+                        entry['font_size'] = float(font_size.rstrip('px'))
+                    except (ValueError, TypeError):
+                        pass
+                text_annotations.append(entry)
 
     _collect(root, '#000000', 'none', 1.0, None)
 
@@ -1556,7 +1682,7 @@ def _parse_svg_file(svg_path):
         clip_image_fills.reverse()
         for cp_d_list, fill_color_hex, transform in clip_image_fills:
             for d in cp_d_list:
-                paths.insert(0, (d, fill_color_hex, 'none', 1.0, transform))
+                paths.insert(0, (d, fill_color_hex, 'none', 1.0, transform, {}))
 
     except ImportError:
         # PIL不可用，跳过位图填充处理
@@ -1572,10 +1698,22 @@ def _parse_svg_file(svg_path):
     all_stroke_widths = []
     path_group_ids = []   # 每个子路径所属的SVG path组ID（同一path的子路径属于同一组，构成复合路径/孔洞）
 
-    for path_idx, (d, fill, stroke, stroke_width, transform) in enumerate(paths):
-        # fill 现在是 (color_hex, gradient_id_or_none) 元组
-        fill_color, fill_grad_id = fill if isinstance(fill, tuple) else (fill, None)
-        stroke_color, _ = stroke if isinstance(stroke, tuple) else (stroke, None)
+    for path_idx, (d, fill, stroke, stroke_width, transform, extra) in enumerate(paths):
+        # fill 现在是 (color_hex, gradient_id_or_none, opacity_or_none) 元组
+        if isinstance(fill, (tuple, list)):
+            fill_color = fill[0]
+            fill_grad_id = fill[1] if len(fill) >= 2 else None
+            fill_opacity = fill[2] if len(fill) >= 3 else None
+        else:
+            fill_color = fill
+            fill_grad_id = None
+            fill_opacity = None
+        if isinstance(stroke, (tuple, list)):
+            stroke_color = stroke[0]
+            stroke_opacity = stroke[1] if len(stroke) >= 2 else None
+        else:
+            stroke_color = stroke
+            stroke_opacity = None
 
         parser = SVGPathParser(d)
         subpaths = parser.parse()
@@ -1638,7 +1776,7 @@ def _parse_svg_file(svg_path):
 
     # 保存描边信息到全局（供convert_to_wsd使用）
     # 注意: gradient_native_info 作为第8个返回值传递（通过 extra_info）
-    return all_subpaths, all_colors, bbox, all_is_stroke, all_stroke_widths, path_group_ids, all_gradient_ids, gradient_native_info
+    return all_subpaths, all_colors, bbox, all_is_stroke, all_stroke_widths, path_group_ids, text_annotations, all_gradient_ids, gradient_native_info
 
 
 # ========== 图像预处理增强 ==========
@@ -2757,10 +2895,11 @@ def parse_input_file(file_path, img_threshold=128, img_turdsize=2,
         }
 
     if ext in SVG_EXTENSIONS:
-        subpaths, colors, bbox, is_stroke, stroke_widths, path_group_ids, gradient_ids, gradient_native_info = _parse_svg_file(file_path)
+        subpaths, colors, bbox, is_stroke, stroke_widths, path_group_ids, text_annotations, gradient_ids, gradient_native_info = _parse_svg_file(file_path)
         extra_info['is_stroke'] = is_stroke
         extra_info['stroke_widths'] = stroke_widths
         extra_info['path_group_ids'] = path_group_ids
+        extra_info['text_annotations'] = text_annotations
         extra_info['gradient_ids'] = gradient_ids
         extra_info['gradient_native_info'] = gradient_native_info
         return subpaths, colors, bbox, 'svg', extra_info
@@ -2792,10 +2931,11 @@ def parse_input_file(file_path, img_threshold=128, img_turdsize=2,
     else:
         # 尝试当作SVG处理
         try:
-            subpaths, colors, bbox, is_stroke, stroke_widths, path_group_ids, gradient_ids, gradient_native_info = _parse_svg_file(file_path)
+            subpaths, colors, bbox, is_stroke, stroke_widths, path_group_ids, text_annotations, gradient_ids, gradient_native_info = _parse_svg_file(file_path)
             extra_info['is_stroke'] = is_stroke
             extra_info['stroke_widths'] = stroke_widths
             extra_info['path_group_ids'] = path_group_ids
+            extra_info['text_annotations'] = text_annotations
             extra_info['gradient_ids'] = gradient_ids
             extra_info['gradient_native_info'] = gradient_native_info
             return subpaths, colors, bbox, 'svg', extra_info
