@@ -1682,30 +1682,46 @@ class MainWindow:
         ext = os.path.splitext(filepath)[1].lower()
 
         if ext == '.svg':
-            # SVG 文件：使用 import_svg 解析为 CanvasData 后在 SVG 预览画布上显示
+            # SVG 文件：使用 import_svg 解析为 CanvasData
+            svg_parse_ok = False
             try:
                 from core.importer import import_svg
                 canvas_data = import_svg(filepath)
-                self.preview_panel.set_svg_original(canvas_data)
-                self._update_status(f'已加载SVG原图预览: {file_info["name"]} ({len(canvas_data.shapes)}条路径)')
-                svg_preview_ok = True
+                svg_parse_ok = True
             except Exception as e:
-                self._update_status(f'SVG路径预览失败: {e}，尝试图像渲染...')
-                svg_preview_ok = False
+                self._update_status(f'SVG路径解析失败: {e}，尝试图像渲染...')
+                canvas_data = None
+                svg_parse_ok = False
 
-            # 如果路径预览失败，尝试图像渲染方式
-            if not svg_preview_ok:
-                try:
-                    img = self._render_svg_to_image(filepath)
-                    if img is not None:
-                        self.preview_panel.set_image(img)
-                        self._update_status(f'已加载SVG图像预览: {file_info["name"]}')
-                    else:
-                        self.preview_panel.set_image(None)
-                        self._update_status(f'SVG预览失败')
-                except Exception as e:
-                    self.preview_panel.set_image(None)
-                    self._update_status(f'SVG预览失败: {e}')
+            # 原图标签页：优先使用图像渲染（更完整，支持嵌入图片等特性）
+            img = None
+            try:
+                img = self._render_svg_to_image(filepath)
+            except Exception as e:
+                self._update_status(f'SVG图像渲染失败: {e}')
+                img = None
+
+            if img is not None:
+                self.preview_panel.set_image(img)
+                # 同时保留 SVG 路径数据供 SVG 预览和 WSD 预览标签页使用
+                if svg_parse_ok and canvas_data is not None:
+                    self.preview_panel.set_canvas_data(canvas_data)
+                    self._update_status(
+                        f'已加载SVG: {file_info["name"]} — '
+                        f'原图(图像渲染) + SVG预览({len(canvas_data.shapes)}条路径) + WSD预览'
+                    )
+                else:
+                    self._update_status(f'已加载SVG图像预览: {file_info["name"]}')
+            elif svg_parse_ok and canvas_data is not None:
+                # 图像渲染失败，回退到路径渲染
+                self.preview_panel.set_svg_original(canvas_data)
+                self.preview_panel.set_canvas_data(canvas_data)
+                self._update_status(
+                    f'已加载SVG路径预览: {file_info["name"]} ({len(canvas_data.shapes)}条路径)'
+                )
+            else:
+                self.preview_panel.set_image(None)
+                self._update_status(f'SVG预览失败：路径解析和图像渲染均失败')
         elif ext in ('.tex',):
             # LaTeX 文件：导入为 CanvasData 后在 LaTeX 预览画布上显示
             try:
