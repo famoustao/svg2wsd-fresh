@@ -16,6 +16,7 @@ if _project_root not in sys.path:
     sys.path.insert(0, _project_root)
 
 from core.data_model import CanvasData, Shape, ShapeType, TextAnnotation
+from core.debug_log import log, log_separator, log_shapes, log_annotations, log_coords
 
 # 延迟导入 wsd_pure_builder 中的构建函数
 _wsb_loaded = False
@@ -498,6 +499,11 @@ def _shape_to_path_record(shape: Shape, linewidth: int = 80, line_alpha: int = 2
     line_color_bgra = _bgr_to_bgra_bytes(shape.line_color, alpha=line_alpha)
     fill_color_bgr = _bgr_to_bgr_bytes(shape.fill_color)
 
+    # 日志：记录形状类型和关键参数
+    type_name = ShapeType(shape.type).name
+    pts_str = ', '.join([f"({p[0]:.4f},{p[1]:.4f})" for p in shape.points[:3]])
+    log("记录构建", f"形状 {type_name} pts=[{pts_str}] radius={shape.extra.get('radius', 'N/A')}")
+
     # 根据形状类型构建 segments_list
     segments_list = []
 
@@ -843,6 +849,11 @@ def _fit_canvas_to_wsd(canvas_data: CanvasData,
     offset_x = (w_wsd - scaled_w) / 2 - min_x * scale
     offset_y = (h_wsd - scaled_h) / 2 - min_y * scale
 
+    log("缩放计算", f"bbox=({min_x:.2f}, {min_y:.2f}, {max_x:.2f}, {max_y:.2f})"
+        f" 内容尺寸=({content_w:.2f}, {content_h:.2f})")
+    log("缩放计算", f"scale=({scale_x:.4f}, {scale_y:.4f}) → {scale:.4f}"
+        f" offset=({offset_x:.2f}, {offset_y:.2f})")
+
     return (scale, offset_x, offset_y)
 
 
@@ -937,6 +948,14 @@ def _transform_shape(shape: Shape, scale: float,
     # 变换线宽
     new_shape.line_width = max(1.0, shape.line_width * scale)
 
+    # 日志：记录关键点的变换
+    if shape.points:
+        orig = shape.points[0]
+        trans = new_shape.points[0]
+        log_coords("坐标变换", f"形状{ShapeType(shape.type).name} 首点", orig[0], orig[1], trans[0], trans[1])
+    if 'radius' in shape.extra:
+        log("坐标变换", f"  半径: {shape.extra['radius']:.4f} → {new_shape.extra['radius']:.4f}")
+
     return new_shape
 
 
@@ -958,6 +977,8 @@ def _transform_annotation(annotation: TextAnnotation,
     new_ann.x = annotation.x * scale + offset_x
     new_ann.y = annotation.y * scale + offset_y
     new_ann.font_size = max(6.0, annotation.font_size * scale)
+
+    log_coords("坐标变换", f"标注[{annotation.text}]", annotation.x, annotation.y, new_ann.x, new_ann.y)
 
     # 关联参数不缩放（f1/f2是比例值，0-1之间）
     if hasattr(annotation, 'assoc_f1'):
@@ -1039,6 +1060,10 @@ def export_wsd_single(canvas_data: CanvasData,
     else:
         scale, offset_x, offset_y = _fit_canvas_to_wsd(canvas_data, canvas_size_mm)
 
+    log_separator("WSD导出")
+    log("WSD导出", f"scale={scale:.6f}, offset=({offset_x:.4f}, {offset_y:.4f})")
+    log("WSD导出", f"共 {len(canvas_data.shapes)} 个形状, {len(canvas_data.annotations)} 个标注")
+
     # 解析覆盖颜色（hex -> BGR tuple）
     override_bgr = None
     if line_color_override:
@@ -1054,6 +1079,7 @@ def export_wsd_single(canvas_data: CanvasData,
 
     # 设置画布尺寸
     w_wsd, h_wsd = _get_canvas_size_wsd(canvas_size_mm)
+    log("WSD导出", f"画布尺寸: {canvas_size_mm}mm → WSD ({w_wsd:.0f}, {h_wsd:.0f})")
     builder.set_canvas_size(int(w_wsd), int(h_wsd))
 
     # 构建路径记录和文字记录（坐标变换后）
@@ -1160,6 +1186,11 @@ def export_wsd_single(canvas_data: CanvasData,
 
     with open(output_path, 'wb') as f:
         f.write(wsd_data)
+
+    file_size = os.path.getsize(output_path) if os.path.exists(output_path) else 0
+    log("WSD导出", f"完成! 写入 {len(path_recs)} 个路径记录, {len(text_recs)} 个文字记录")
+    log("WSD导出", f"输出文件: {output_path} ({file_size} 字节)")
+    log_separator("WSD导出完成")
 
 
 def export_wsd_multi(canvas_list: List[CanvasData],

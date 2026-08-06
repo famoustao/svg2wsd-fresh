@@ -26,6 +26,7 @@ TikZ 命令支持列表：
 import re
 import math
 import os
+from core.debug_log import log, log_coords, log_separator
 
 
 # ============================================================
@@ -271,6 +272,7 @@ def _parse_calc_expr(expr):
     # P = P1 + ratio * (P2 - P1)
     x = p1[0] + ratio * (p2[0] - p1[0])
     y = p1[1] + ratio * (p2[1] - p1[1])
+    log("Calc库", f"解析表达式: {expr} = ({x:.4f}, {y:.4f})")
     return (x, y)
 
 
@@ -1170,6 +1172,8 @@ def parse_tikz_code(tikz_code):
         tikz_code, re.DOTALL
     )
 
+    log_separator("TikZ 解析开始")
+
     # 解析 tikzpicture 选项中的 scale 参数
     tikz_scale = 1.0
     if tikz_env_match and tikz_env_match.group(1):
@@ -1177,6 +1181,7 @@ def parse_tikz_code(tikz_code):
         scale_match = re.search(r'scale\s*=\s*([\d.]+)', env_opts)
         if scale_match:
             tikz_scale = float(scale_match.group(1))
+            log("TikZ参数", f"tikzpicture scale={tikz_scale}")
 
     if tikz_env_match:
         body = tikz_env_match.group(2)
@@ -1245,6 +1250,12 @@ def parse_tikz_code(tikz_code):
         path = _parse_path_body(body_str, options)
         if path and path.subpaths:
             paths.append(path)
+            subpath_info = ', '.join([f"{len(sp)}op" for sp in path.subpaths])
+            log("TikZ命令", f"\\{cmd_type} | {len(path.subpaths)}个子路径[{subpath_info}]"
+                f" draw={path.draw} fill={path.fill}")
+
+    log("TikZ解析", f"共解析出 {len(paths)} 个路径命令")
+    log_separator("TikZ 解析结束")
 
     return paths
 
@@ -1413,6 +1424,10 @@ def _compute_intersection_coord(coord_str, named_coords):
     ix = x1 + t * (x2 - x1)
     iy = y1 + t * (y2 - y1)
 
+    log("交点计算", f"线段 {p1_name}({x1:.4f},{y1:.4f})--{p2_name}({x2:.4f},{y2:.4f})"
+        f" 与 {p3_name}({x3:.4f},{y3:.4f})--{p4_name}({x4:.4f},{y4:.4f})"
+        f" 交点 = ({ix:.4f}, {iy:.4f})")
+
     return (ix, iy)
 
 
@@ -1478,12 +1493,15 @@ def extract_named_coordinates(tikz_code):
             if pt:
                 coords[name] = pt
                 working_coords[name] = pt
+                log("坐标提取", f"intersection of: {name} = ({pt[0]:.4f}, {pt[1]:.4f})")
             continue
         coord = _parse_coord(coord_str)
         if coord:
             x, y, _ = coord
             coords[name] = (x, y)
             working_coords[name] = (x, y)
+            log("坐标提取", f"\\coordinate {name} = ({x:.4f}, {y:.4f})  "
+                f"[源: {coord_str[:50]}]")
 
     # 再匹配简写格式: \coordinate[name] at (x,y);  （name在括号内，无圆括号名）
     for m in re.finditer(
@@ -1517,6 +1535,86 @@ def extract_named_coordinates(tikz_code):
             x, y, _ = coord
             coords[name] = (x, y)
             working_coords[name] = (x, y)
+
+    # ---- 提取 \path[name path=XXX] 定义的命名路径 ----
+    # 支持: \path[name path=AB] (A)--(B); 等
+    named_paths = {}
+    for m in re.finditer(
+        r'\\path\s*\[([^\]]*)\]\s*',
+        body
+    ):
+        opt_str = m.group(1)
+        # 检查是否有 name path
+        name_match = re.search(r'name\s*path\s*=\s*(\w+)', opt_str)
+        if not name_match:
+            continue
+
+        path_name = name_match.group(1)
+
+        # 从匹配结束位置开始，提取路径体（直到分号）
+        body_start = m.end()
+        semi_pos = body.find(';', body_start)
+        if semi_pos < 0:
+            continue
+        path_body = body[body_start:semi_pos].strip()
+
+        # 提取路径上的所有点坐标（括号内容）
+        pt_matches = re.findall(r'\(([^)]+)\)', path_body)
+        if len(pt_matches) >= 2:
+            parsed_points = []
+            for pt_str in pt_matches:
+                pt_str = pt_str.strip()
+                # 先尝试命名坐标
+                pt = working_coords.get(pt_str)
+                if pt:
+                    parsed_points.append(pt)
+                else:
+                    coord = _parse_coord(pt_str)
+                    if coord:
+                        parsed_points.append((coord[0], coord[1]))
+                    else:
+                        break
+            if len(parsed_points) >= 2:
+                named_paths[path_name] = parsed_points
+                pts_str = ', '.join([f"({p[0]:.4f},{p[1]:.4f})" for p in parsed_points[:4]])
+                log("命名路径", f"\\path[name path={path_name}] {pts_str} {'...' if len(parsed_points) > 4 else ''}")
+
+    # ---- 提取 name intersections 命令 ----
+    # 匹配 \draw[name intersections={of=XXX and YYY,by=ZZZ}] 等
+    # 也匹配 \path[name intersections={of=XXX and YYY,by=ZZZ}]
+    for m in re.finditer(
+        r'name\s*intersections\s*=\s*\{[^}]*of\s*=\s*(\w+)\s+and\s+(\w+)[^}]*by\s*=\s*(\w+)\}',
+        body
+    ):
+        path1_name = m.group(1)
+        path2_name = m.group(2)
+        result_name = m.group(3)
+
+        # 跳过已通过标准格式匹配的坐标
+        if result_name in coords:
+            continue
+
+        path1 = named_paths.get(path1_name)
+        path2 = named_paths.get(path2_name)
+
+        if not path1 or not path2 or len(path1) < 2 or len(path2) < 2:
+            continue
+
+        # 计算两线段（取各路径前两个点）的交点
+        x1, y1 = path1[0]
+        x2, y2 = path1[1]
+        x3, y3 = path2[0]
+        x4, y4 = path2[1]
+
+        denom = (x1 - x2) * (y3 - y4) - (y1 - y2) * (x3 - x4)
+        if abs(denom) >= 1e-12:
+            t = ((x1 - x3) * (y3 - y4) - (y1 - y3) * (x3 - x4)) / denom
+            ix = x1 + t * (x2 - x1)
+            iy = y1 + t * (y2 - y1)
+            coords[result_name] = (ix, iy)
+            working_coords[result_name] = (ix, iy)
+            log("坐标提取", f"name intersections: {result_name} = ({ix:.4f}, {iy:.4f})  "
+                f"[{path1_name}×{path2_name}]")
 
     # 恢复原有的 _named_coords（parse_tikz_code 会设置最终值）
     _parse_coord._named_coords = orig_named

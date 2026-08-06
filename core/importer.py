@@ -20,6 +20,7 @@ if _project_root not in sys.path:
     sys.path.insert(0, _project_root)
 
 from core.data_model import CanvasData, Shape, TextAnnotation, ShapeType
+from core.debug_log import log, log_separator, log_shapes, log_annotations
 
 
 # 支持的文件扩展名映射
@@ -107,6 +108,9 @@ def import_latex(filepath: str) -> CanvasData:
         # 提取tikzpicture环境块: [tikz_code_str, ...]
         tikz_blocks = extract_tikz_from_tex(content)
 
+        log_separator(f"导入LaTeX文件: {os.path.basename(filepath)}")
+        log("导入", f"找到 {len(tikz_blocks)} 个 tikzpicture 环境")
+
         shapes = []
         annotations = []
 
@@ -156,6 +160,9 @@ def import_latex(filepath: str) -> CanvasData:
                         cx, cy = named_coords[coord_name]
                         label_text, direction = label_info
 
+                        log("标注转换", f"  coord标签: {coord_name} → text={label_text!r} dir={direction} "
+                            f"pos=({cx:.4f}, {cy:.4f})")
+
                         # 根据TikZ方向选择WSD标注参数
                         if direction and direction in _TIKZ_ANCHOR_MAP:
                             assoc_type, assoc_dir, f1, f2 = _TIKZ_ANCHOR_MAP[direction]
@@ -199,6 +206,9 @@ def import_latex(filepath: str) -> CanvasData:
             all_x.append(a.x)
             all_y.append(a.y)
 
+        log_shapes("导入", "转换后形状(Y轴已翻转)", shapes)
+        log_annotations("导入", "转换后标注(Y轴已翻转)", annotations)
+
         if all_x and all_y:
             bbox = (min(all_x), min(all_y), max(all_x), max(all_y))
         else:
@@ -240,8 +250,15 @@ def _convert_tikz_shapes(tikz_paths) -> list:
     import math
 
     shapes = []
+    log_separator("形状转换")
+    log("形状转换", f"收到 {len(tikz_paths)} 个 TikZPath 对象")
 
     for tpath in tikz_paths:
+        # 跳过既没有描边也没有填充的路径（如 \path[name path=...] 等不可见路径）
+        if not tpath.draw and not tpath.fill:
+            log("形状转换", f"跳过不可见路径 (draw={tpath.draw}, fill={tpath.fill})")
+            continue
+
         # 颜色转换: TikZ (r,g,b) 0-1 float -> BGR 0-255 int
         stroke_r, stroke_g, stroke_b = tpath.draw_color
         line_color_bgr = (
@@ -492,6 +509,8 @@ def _convert_tikz_annotations(tikz_nodes) -> list:
     }
 
     annotations = []
+    log_separator("标注转换")
+    log("标注转换", f"收到 {len(tikz_nodes)} 个 TikZNode 对象")
     for node in tikz_nodes:
         opts = node.options if hasattr(node, 'options') else {}
 
@@ -529,6 +548,8 @@ def _convert_tikz_annotations(tikz_nodes) -> list:
             ann.subscript = True
             ann.text = node.base_text + (node.subscript or '')
         annotations.append(ann)
+        log("标注转换", f"  [{len(annotations)-1}] text={node.text!r} pos=({ann.x:.4f}, {ann.y:.4f})"
+            f" dir={opts} sup={node.has_superscript} sub={node.has_subscript}")
     return annotations
 
 
