@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-纯二进制 WSD 构建器 v2 — 基于原型的纯代码构建
+纯二进制 WSD 构建器 v2 — 直接二进制生成
 
 核心思想：
-  - 文件头/画布/字体等复杂设置：从模板骨架读取（保证兼容）
+  - 文件头：使用硬编码的 base64 常量（WSTUDIO 固定元数据头 59984字节）
+  - 块头/块尾：从零生成，无模板依赖
   - 记录构建：使用硬编码的原型（bytes常量），复制后只修改已知字段
   - 已知可修改字段：坐标、文字内容、线宽、关联参数等
   - 未知字段：保持原型值不变（确保能正常打开）
@@ -19,16 +20,16 @@
   - 组合路径 (esShapePath)    — 直线+贝塞尔混合，支持填充
 
 坐标单位: WSD (1mm = 400 WSD)
-字节序: 小端 (Little Endian)
-"""
+字节序: 小端 (Little Endian)"""
 
 import struct
 import os
 import math
+import base64
 
-# ========== 内置骨架数据（base64编码，无需外部模板文件） ==========
-# 从几何模板_可增减记录.wsd 提取的文件头、块头、块尾部
-_SKELETON_FILE_HEADER_B64 = (
+# ========== WSTUDIO 文件头（base64编码，硬编码常量） ==========
+# 59984字节固定元数据头（包含字体信息、页面设置等，从WSTUDIO原生文件提取）
+_WSTUDIO_FILE_HEADER_B64 = (
     "AFdTVFVESU83CAACAAEAAAAAAAD//v8A//7/AP/+/wD//v8A//7/AP/+/wD//v8A//7/AAAA"
     "AAAAAAAAGQxGAFMAIABNAGEAdABoACAAVAB5AHAAZQAAAAKLW1NPAAAMRgBTACAATQBhAHQA"
     "aAAgAFQAeQBwAGUAAAAMRgBTACAATQBhAHQAaAAgAFQAeQBwAGUAAgAMRgBTACAATQBhAHQA"
@@ -1142,32 +1143,31 @@ _SKELETON_FILE_HEADER_B64 = (
     "AAABAAEAAAABAAAAAgABAAAACABAAAIAAAAgIP//EAABAAAAAAAAAAAAAAA="
 )
 
-_SKELETON_BLOCK_HEADER_B64 = "AAAAEAAAAAAAAAYAAAA="
-
-_SKELETON_BLOCK_TAIL_B64 = (
-    "AAAAAAAAAABS0gAAKWkAAAAAAAAAAQAyABD1AAAAAAD//wEAAAAAAAABAAEAAAC4CwAAAAAA"
-    "AACQAQAAkAEAAAD6AAAAAAAAFAAkAAkAAAA0CJoLMgAyAJYAlgDIAMgAJwAAADIAMgD//v8E"
-    "twAjAG4AtwAAAAAAIuwAAA=="
+# ========== 块尾部常量（120字节，硬编码） ==========
+# 从WSTUDIO原生文件提取的固定块尾部数据
+# 已知字段:
+#   +0x00-0x07: 8字节填充 (00)
+#   +0x08-0x0B: 画布宽度 (uint32 LE)
+#   +0x0C-0x0F: 画布高度 (uint32 LE)
+#   +0x10-0x77: 其他固定属性（字体、颜色、线型等，保持原样）
+_BLOCK_TAIL = bytes.fromhex(
+    '00 00 00 00 00 00 00 00'  # +0x00: 8字节填充
+    '52 d2 00 00'              # +0x08: 画布宽度 (默认 53842 WSD)
+    '29 69 00 00'              # +0x0C: 画布高度 (默认 26921 WSD)
+    '00 00 00 00 00 01 00 32'  # +0x10
+    '00 10 f5 00 00 00 00 00'  # +0x18
+    'ff ff 01 00 00 00 00 00'  # +0x20
+    '00 01 00 01 00 00 00 b8'  # +0x28
+    '0b 00 00 00 00 00 00 00'  # +0x30
+    '90 01 00 00 90 01 00 00'  # +0x38
+    '00 fa 00 00 00 00 00 00'  # +0x40
+    '14 00 24 00 09 00 00 00'  # +0x48
+    '34 08 9a 0b 32 00 32 00'  # +0x50
+    '96 00 96 00 c8 00 c8 00'  # +0x58
+    '27 00 00 00 32 00 32 00'  # +0x60
+    'ff fe ff 04 b7 00 23 00'  # +0x68
+    '6e 00 b7 00 00 00 00 00'  # +0x70
 )
-
-def _get_skeleton():
-    """解码内置骨架数据（延迟加载，节省内存）
-
-    注意: block_tail原始base64解码为124字节，但最后4字节是模板文件的
-    file_size字段（被误包含在block_tail中）。实际block_tail应为120字节，
-    file_size由PureWSDBuilder.build()单独追加。此处截断为120字节。
-    """
-    import base64
-    file_header = base64.b64decode(_SKELETON_FILE_HEADER_B64)
-    block_header = base64.b64decode(_SKELETON_BLOCK_HEADER_B64)
-    block_tail = base64.b64decode(_SKELETON_BLOCK_TAIL_B64)[:120]
-    return file_header, block_header, block_tail
-
-# 画布尺寸在 block_tail 中的偏移
-# block_tail+0x08: 宽度 (i32), block_tail+0x0C: 高度 (i32)
-# 经与原生文件对比验证：此位置存储的是画布尺寸而非固定标记
-# （模板默认值 53842×26921 WSD，即约 134.6mm × 67.3mm）
-_CANVAS_SIZE_OFFSET = 0x08
 
 
 
@@ -1279,18 +1279,7 @@ TEXT_SUPERSCRIPT_PROTO = bytes.fromhex(
 # 上标标志: +0x1a 处 u16 = 0x0100（下标是0x0001，普通是0x0000）
 
 
-# ========== 骨架文件路径 ==========
 
-def _skeleton_path():
-    """获取骨架模板路径"""
-    candidates = [
-        os.path.join(os.path.dirname(__file__), 'wsd_label_samples', '几何模板_可增减记录.wsd'),
-        'wsd_label_samples/几何模板_可增减记录.wsd',
-    ]
-    for c in candidates:
-        if os.path.exists(c):
-            return c
-    raise FileNotFoundError("找不到几何模板_可增减记录.wsd")
 
 
 def _find_block_start(data, ffff_pos):
@@ -2274,44 +2263,36 @@ def _sanitize_record_data(data):
 
 class PureWSDBuilder:
     """
-    纯二进制 WSD 构建器（基于原型）
+    纯二进制 WSD 构建器（直接二进制生成）
 
-    使用模板骨架作为文件头和块尾部，记录部分基于原型构建。
-    所有记录都从硬编码的原型复制，只修改已知字段。
+    不使用任何骨架/模板文件，直接生成二进制 WSD 文件结构。
     """
 
-    def __init__(self, skeleton_path=None):
+    def __init__(self):
         """
         纯二进制 WSD 构建器
 
-        使用内置骨架数据（base64编码），无需外部模板文件。
-        skeleton_path 参数保留用于兼容，但不再需要。
+        直接生成：
+          - 文件头：从硬编码的 _WSTUDIO_FILE_HEADER_B64 解码
+          - 块头：从零生成（14字节，struct.pack）
+          - 块尾：使用硬编码的 _BLOCK_TAIL 常量（120字节）
         """
-        # 从内置常量加载骨架数据
-        file_header_bytes, block_header_bytes, block_tail_bytes = _get_skeleton()
+        # 1. 文件头：从base64常量解码
+        self.file_header = base64.b64decode(_WSTUDIO_FILE_HEADER_B64)
 
-        self.file_header = bytes(file_header_bytes)
-        self.block_header = bytes(block_header_bytes)
-        self.block_tail = bytearray(block_tail_bytes)
+        # 2. 块头：从零生成
+        # 格式: <IIHHH = 4+4+2+2+2 = 14字节
+        #   0x10000000: 块类型标记
+        #   0: 未知字段
+        #   0: 未知字段
+        #   record_count: 记录数（在 build() 中设置）
+        #   0: 未知字段
+        self.block_header = struct.pack('<IIHHH', 0x10000000, 0, 0, 0, 0)
 
-        # 画布尺寸偏移（已知位置）
-        self._canvas_offset = _CANVAS_SIZE_OFFSET
+        # 3. 块尾：硬编码常量（120字节）
+        self.block_tail = bytearray(_BLOCK_TAIL)
 
         self.records = []
-
-    def _find_canvas_offset(self, block_tail):
-        """在块尾部中查找画布尺寸的偏移位置"""
-        # 查找模式: XX XX 00 00 YY YY 00 00
-        # 其中 XX 和 YY 是合理的尺寸值 (>1000, <100000)
-        for i in range(len(block_tail) - 8):
-            w = struct.unpack_from('<H', block_tail, i)[0]
-            h = struct.unpack_from('<H', block_tail, i + 4)[0]
-            # 检查中间两字节是否为0
-            mid = struct.unpack_from('<H', block_tail, i + 2)[0]
-            after = struct.unpack_from('<H', block_tail, i + 6)[0]
-            if mid == 0 and after == 0 and 1000 < w < 100000 and 1000 < h < 100000:
-                return i
-        return None
 
     def set_canvas_size(self, width, height):
         """
@@ -2320,10 +2301,11 @@ class PureWSDBuilder:
         Args:
             width: 画布宽度（WSD单位，1mm = 400 WSD）
             height: 画布高度（WSD单位）
+
+        画布尺寸存储在块尾偏移 +0x08（宽度）和 +0x0C（高度）。
         """
-        if self._canvas_offset is not None:
-            struct.pack_into('<I', self.block_tail, self._canvas_offset, int(width))
-            struct.pack_into('<I', self.block_tail, self._canvas_offset + 4, int(height))
+        struct.pack_into('<I', self.block_tail, 0x08, int(width))
+        struct.pack_into('<I', self.block_tail, 0x0C, int(height))
 
     def get_canvas_size(self):
         """
@@ -2332,11 +2314,9 @@ class PureWSDBuilder:
         Returns:
             (width, height): 画布宽高（WSD单位）
         """
-        if self._canvas_offset is not None:
-            w = struct.unpack_from('<I', self.block_tail, self._canvas_offset)[0]
-            h = struct.unpack_from('<I', self.block_tail, self._canvas_offset + 4)[0]
-            return (w, h)
-        return (None, None)
+        w = struct.unpack_from('<I', self.block_tail, 0x08)[0]
+        h = struct.unpack_from('<I', self.block_tail, 0x0C)[0]
+        return (w, h)
 
     def set_canvas_size_mm(self, width_mm, height_mm):
         """
@@ -2366,6 +2346,13 @@ class PureWSDBuilder:
         """
         构建完整的 WSD 文件
 
+        从零生成完整文件结构：
+          1. 文件头（59984字节）
+          2. 块头（14字节，含记录数）
+          3. 记录区（所有记录数据）
+          4. 块尾（120字节，含画布尺寸）
+          5. 文件大小 + FFFF 结束标记
+
         Returns:
             bytes: 完整的 WSD 文件数据
         """
@@ -2374,17 +2361,16 @@ class PureWSDBuilder:
         # 1. 文件头
         result.extend(self.file_header)
 
-        # 2. 数据块头部（从模板复制，设置record_count为实际记录数）
-        # 原生WSTUDIO文件中record_count=实际记录数（如原生单画布文件record_count=6）
-        block_header = bytearray(self.block_header)
-        struct.pack_into('<H', block_header, 0x0a, len(self.records))
+        # 2. 数据块头部（从零生成，设置record_count为实际记录数）
+        # 格式: <IIHHH, record_count 在偏移 0x0a 处
+        block_header = struct.pack('<IIHHH', 0x10000000, 0, 0, len(self.records), 0)
         result.extend(block_header)
 
         # 3. 记录区
         for rec_type, rec_data in self.records:
             result.extend(rec_data)
 
-        # 4. 块尾部（画布属性等）
+        # 4. 块尾部（画布属性等，画布尺寸已在 set_canvas_size 中设置）
         result.extend(self.block_tail)
 
         # 5. 文件大小字段 + FFFF 结束标记
@@ -2405,12 +2391,12 @@ def build_wsd_pure(path_records, text_records, skeleton_path=None):
     Args:
         path_records: list of bytes 路径记录列表
         text_records: list of bytes 文字记录列表
-        skeleton_path: 骨架文件路径
+        skeleton_path: 保留用于兼容（已不再需要）
 
     Returns:
         bytes: 完整的 WSD 文件
     """
-    builder = PureWSDBuilder(skeleton_path)
+    builder = PureWSDBuilder()
     for pr in path_records:
         builder.add_path(pr)
     for tr in text_records:
@@ -2495,7 +2481,7 @@ def build_wsd_pure_based(geo_paths, text_annotations, skeleton_path=None,
     Args:
         geo_paths: list of bytes 旧格式路径记录列表
         text_annotations: list of dict 文字标注配置
-        skeleton_path: 骨架文件路径
+        skeleton_path: 保留用于兼容（已不再需要）
         font_name: 字体名（暂不支持，保留兼容）
         italic: 斜体（暂不支持，保留兼容）
         bold: 粗体（暂不支持，保留兼容）
@@ -2503,7 +2489,7 @@ def build_wsd_pure_based(geo_paths, text_annotations, skeleton_path=None,
     Returns:
         bytes: 完整的 WSD 文件
     """
-    builder = PureWSDBuilder(skeleton_path)
+    builder = PureWSDBuilder()
 
     # 转换路径记录
     for path_data in geo_paths:
@@ -2627,12 +2613,10 @@ def _load_multi_canvas_template(page_count):
     返回:
         (file_header_bytes, bh_template, mid_header_template, last_entry_template)
     """
-    import base64 as _b64
-
-    file_header, _, _ = _get_skeleton()
-    bh_template = _b64.b64decode(_MULTI_BH_B64)
-    mid_header_template = _b64.b64decode(_MULTI_MID_HEADER_B64)
-    last_entry_template = _b64.b64decode(_MULTI_LAST_ENTRY_B64)
+    file_header = base64.b64decode(_WSTUDIO_FILE_HEADER_B64)
+    bh_template = base64.b64decode(_MULTI_BH_B64)
+    mid_header_template = base64.b64decode(_MULTI_MID_HEADER_B64)
+    last_entry_template = base64.b64decode(_MULTI_LAST_ENTRY_B64)
 
     return bytes(file_header), bh_template, mid_header_template, last_entry_template
 
@@ -2653,8 +2637,8 @@ class MultiCanvasWSDBuilder:
         6. 4零字节 + file_size(4) + FFFF(4)
     """
 
-    def __init__(self, skeleton_path=None):
-        """多画布 WSD 构建器"""
+    def __init__(self):
+        """多画布 WSD 构建器（直接二进制生成，无需骨架模板）"""
         self._canvases = []
         self._default_canvas_w = 56000   # 140mm
         self._default_canvas_h = 56000   # 140mm
