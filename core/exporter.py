@@ -1089,9 +1089,7 @@ def export_wsd_single(canvas_data: CanvasData,
     path_recs = []   # [(record_bytes, cx, cy)]
     text_recs = []   # [(record_bytes, ax, ay)]
 
-    # SVG 数据子路径使用独立渲染（SVG 的子路径可能是不相交的独立填充区域），
-    # 非 SVG 数据（WSD/LaTeX/GGB）使用复合路径渲染（外框+孔洞）。
-    is_svg = canvas_data.extra_info.get('svg_import', False) if canvas_data.extra_info else False
+    # 按 path_group_id 分组形状（复合路径：同组多个形状=外框+孔洞）
     from collections import OrderedDict as _OD
     shape_groups = _OD()  # {group_id: [shape_index, ...]}
     for si, shape in enumerate(canvas_data.shapes):
@@ -1099,7 +1097,7 @@ def export_wsd_single(canvas_data: CanvasData,
         shape_groups.setdefault(gid, []).append(si)
 
     for gid, indices in shape_groups.items():
-        if not is_svg and len(indices) > 1:
+        if len(indices) > 1:
             # 复合路径组：合并为单个 WSD 记录（多 seglist，原生奇偶填充）
             group_shapes = []
             for si in indices:
@@ -1283,9 +1281,7 @@ def export_wsd_multi(canvas_list: List[CanvasData],
         path_recs = []   # [(record_bytes, cx, cy)]
         text_recs = []   # [(record_bytes, ax, ay)]
 
-        # SVG 数据子路径使用独立渲染（SVG 的子路径可能是不相交的独立填充区域），
-        # 非 SVG 数据（WSD/LaTeX/GGB）使用复合路径渲染（外框+孔洞）。
-        is_svg = canvas_data.extra_info.get('svg_import', False) if canvas_data.extra_info else False
+        # 按 path_group_id 分组形状（复合路径：同组多个形状=外框+孔洞）
         from collections import OrderedDict as _OD
         shape_groups = _OD()
         for si, shape in enumerate(canvas_data.shapes):
@@ -1293,7 +1289,7 @@ def export_wsd_multi(canvas_list: List[CanvasData],
             shape_groups.setdefault(gid, []).append(si)
 
         for gid, indices in shape_groups.items():
-            if not is_svg and len(indices) > 1:
+            if len(indices) > 1:
                 # 复合路径组：合并为单个 WSD 记录（多 seglist，原生奇偶填充）
                 group_shapes = []
                 for si in indices:
