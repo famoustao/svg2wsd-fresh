@@ -88,9 +88,7 @@ jobs:
             --hidden-import image_to_svg `
             app.py
 
-      - name: Copy label samples (skeleton)
-        run: |
-          xcopy /E /I wsd_label_samples dist\wsd_label_samples
+      # 模板文件已内嵌到代码中，不再需要复制
 
       - name: Create release zip
         run: |

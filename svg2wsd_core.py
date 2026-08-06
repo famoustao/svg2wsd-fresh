@@ -16,14 +16,6 @@ import xml.etree.ElementTree as ET
 
 # ========== 配置 ==========
 
-def _get_app_dir():
-    if getattr(sys, 'frozen', False):
-        return os.path.dirname(sys.executable)
-    return os.path.dirname(os.path.abspath(__file__))
-
-APP_DIR = _get_app_dir()
-TEMPLATE_PATH = os.path.join(APP_DIR, 'wsd_label_samples', '几何模板_可增减记录.wsd')
-
 CANVAS_MIN = 2000
 CANVAS_MAX = 48000
 MARGIN = 2000
@@ -3311,16 +3303,11 @@ def convert_to_wsd(input_path, wsd_path, color_mode='rainbow',
             'merge' - 强制合并（复合路径合并为多seglist）
     """
 
-    with open(TEMPLATE_PATH, 'rb') as f:
-        tpl = f.read()
+    import base64
+    from wsd_pure_builder import _WSTUDIO_FILE_HEADER_B64, _BLOCK_TAIL
 
-    tail_start = None
-    for i in range(len(tpl)-4, 0xea00, -1):
-        if tpl[i:i+4] == b'\x52\xd2\x00\x00':
-            tail_start = i
-            break
-    if tail_start is None:
-        raise ValueError("找不到模板文件尾部标记")
+    file_header = base64.b64decode(_WSTUDIO_FILE_HEADER_B64)  # 59984 bytes
+    block_tail = bytes(_BLOCK_TAIL)  # 120 bytes (含8字节零开头)
 
     if progress_cb: progress_cb("解析文件...", 0)
 
@@ -3759,11 +3746,10 @@ def convert_to_wsd(input_path, wsd_path, color_mode='rainbow',
     if progress_cb: progress_cb("组装文件...", 92)
 
     output = bytearray()
-    output += tpl[:0xea50]
+    output += file_header
     output += struct.pack('<I', num_objects)
     output += records_data
-    output += bytes(8)
-    output += tpl[tail_start:]
+    output += block_tail  # 包含8字节零 + 尾部数据
 
     while len(output) % 8 != 0:
         output += b'\x00'
@@ -3894,25 +3880,15 @@ def convert_to_wsd_multi(input_files, output_path, color_mode='rainbow',
     if not input_files:
         raise ValueError("没有输入文件")
 
-    with open(TEMPLATE_PATH, 'rb') as f:
-        tpl = f.read()
+    import base64
+    from wsd_pure_builder import _WSTUDIO_FILE_HEADER_B64, _BLOCK_TAIL
 
-    # 找文件头 (到第一个画布头之前)
-    # 文件头 = 0x0000 - 0xea25 (59942B)
-    # 画布头从 0xea26 开始
-    file_header = tpl[:0xea26]
-
-    # 找文件尾 (从最后一个52d2后24B到文件结束)
-    # 简化：从模板的 ffff 往前找
-    file_tail = None
-    for i in range(len(tpl)-4, max(0, len(tpl)-200), -1):
-        if tpl[i:i+4] == b'\xff\xff\xff\xff':
-            # 文件尾从 8B零 + 52d2 + 24B 开始？
-            # 直接取最后 128B 作为文件尾
-            file_tail = tpl[-128:]
-            break
-    if file_tail is None:
-        file_tail = tpl[-128:]
+    fh_bytes = base64.b64decode(_WSTUDIO_FILE_HEADER_B64)
+    file_header = fh_bytes[:0xea26]  # 59942 bytes
+    # 构建文件尾：block_tail + 文件大小(4) + FFFF(4) + 填充
+    block_tail = bytes(_BLOCK_TAIL)
+    # 用 block_tail + 结尾标记构造 file_tail
+    file_tail = block_tail + bytes(8)  # 128 = 120 + 8
 
     # 解析所有文件并准备画布数据
     canvases_data = []
