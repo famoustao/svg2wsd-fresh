@@ -105,6 +105,7 @@ class SVGPathParser:
         elif base == 'S': self._do_smooth_cubic(cmd.islower())
         elif base == 'Q': self._do_quad(cmd.islower())
         elif base == 'T': self._do_smooth_quad(cmd.islower())
+        elif base == 'A': self._do_arc(cmd.islower())
         elif base == 'Z': self._do_close()
 
     def _abs(self, x, y):
@@ -248,6 +249,134 @@ class SVGPathParser:
             self._add_line(self.start_pos)
         self.current_pos = self.start_pos
         self.last_ctrl = None
+
+    def _do_arc(self, rel):
+        """SVG 椭圆弧命令（A/a），转换为多段贝塞尔曲线"""
+        while self._has_more() and not self._is_cmd():
+            nums = self._read_n(7)
+            if nums is None:
+                break
+            rx, ry, x_axis_rot, large_arc, sweep, ex, ey = nums
+            large_arc = int(large_arc)
+            sweep = int(sweep)
+            if rel:
+                end = self._abs(ex, ey)
+            else:
+                end = (ex, ey)
+            self._arc_to_bezier(self.current_pos, rx, ry, x_axis_rot, large_arc, sweep, end)
+            self.current_pos = end
+            self.last_ctrl = None
+
+    def _arc_to_bezier(self, start, rx, ry, x_axis_rot, large_arc, sweep, end):
+        """将椭圆弧转换为多段三次贝塞尔曲线（每段不超过90度）"""
+        x1, y1 = start
+        x2, y2 = end
+
+        # 端点重合则跳过
+        if abs(x1 - x2) < 1e-12 and abs(y1 - y2) < 1e-12:
+            return
+
+        # 退化情况：rx=0 或 ry=0 退化为直线
+        if rx < 1e-12 or ry < 1e-12:
+            self._add_line(end)
+            return
+
+        rx = abs(rx)
+        ry = abs(ry)
+
+        # 旋转角度转为弧度
+        phi = math.radians(x_axis_rot)
+        cos_phi = math.cos(phi)
+        sin_phi = math.sin(phi)
+
+        # 步骤1: 计算旋转后的半长轴端点 (x1', y1')
+        dx = (x1 - x2) / 2.0
+        dy = (y1 - y2) / 2.0
+        x1p = cos_phi * dx + sin_phi * dy
+        y1p = -sin_phi * dx + cos_phi * dy
+
+        # 修正半径（SVG 规范 F.6.6）
+        r_sq = x1p * x1p / (rx * rx) + y1p * y1p / (ry * ry)
+        if r_sq > 1.0:
+            sqrt_r = math.sqrt(r_sq)
+            rx *= sqrt_r
+            ry *= sqrt_r
+
+        # 步骤2: 计算 (cx', cy')
+        rx_sq = rx * rx
+        ry_sq = ry * ry
+        x1p_sq = x1p * x1p
+        y1p_sq = y1p * y1p
+
+        numerator = max(0.0, rx_sq * ry_sq - rx_sq * y1p_sq - ry_sq * x1p_sq)
+        denom = rx_sq * y1p_sq + ry_sq * x1p_sq
+        if denom < 1e-12:
+            denom = 1e-12
+        sqrt_val = math.sqrt(numerator / denom)
+
+        if large_arc == sweep:
+            sqrt_val = -sqrt_val
+
+        cxp = sqrt_val * rx * y1p / ry
+        cyp = -sqrt_val * ry * x1p / rx
+
+        # 步骤3: 计算实际圆心 (cx, cy)
+        cx = cos_phi * cxp - sin_phi * cyp + (x1 + x2) / 2.0
+        cy = sin_phi * cxp + cos_phi * cyp + (y1 + y2) / 2.0
+
+        # 步骤4: 计算起始角和终止角
+        def _vector_angle(ux, uy, vx, vy):
+            dot = ux * vx + uy * vy
+            cross = ux * vy - uy * vx
+            return math.atan2(cross, dot)
+
+        # 单位向量（从中心到起点/终点）
+        vx1 = (x1p - cxp) / rx
+        vy1 = (y1p - cyp) / ry
+        vx2 = (-x1p - cxp) / rx
+        vy2 = (-y1p - cyp) / ry
+
+        theta1 = _vector_angle(1.0, 0.0, vx1, vy1)
+        delta_theta = _vector_angle(vx1, vy1, vx2, vy2)
+
+        # 调整扫掠方向
+        if not sweep and delta_theta > 0:
+            delta_theta -= 2 * math.pi
+        elif sweep and delta_theta < 0:
+            delta_theta += 2 * math.pi
+
+        # 步骤5: 分段，每段不超过90度
+        num_segments = max(1, int(math.ceil(abs(delta_theta) / (math.pi / 2.0))))
+        seg_angle = delta_theta / num_segments
+
+        # 每段弧的贝塞尔近似系数 K = 4/3 * tan(seg_angle/4)
+        # 使用更稳定的数值公式: alpha = sin(seg) * (sqrt(4 + 3*tan(seg/2)^2) - 1) / 3
+        half_angle = seg_angle / 2.0
+        alpha = math.sin(seg_angle) * (math.sqrt(4 + 3 * math.tan(half_angle) ** 2) - 1) / 3.0
+
+        # 生成每段弧的贝塞尔控制点
+        for i in range(num_segments):
+            a1 = theta1 + i * seg_angle
+            a2 = a1 + seg_angle
+
+            # 起点（隐含在 current_pos 中）
+            ex_seg = cx + rx * cos_phi * math.cos(a2) - ry * sin_phi * math.sin(a2)
+            ey_seg = cy + rx * sin_phi * math.cos(a2) + ry * cos_phi * math.sin(a2)
+
+            # 控制点1: 起点处的切线方向
+            c1x = (cx + rx * cos_phi * math.cos(a1) - ry * sin_phi * math.sin(a1)) \
+                  - alpha * (rx * cos_phi * math.sin(a1) + ry * sin_phi * math.cos(a1))
+            c1y = (cy + rx * sin_phi * math.cos(a1) + ry * cos_phi * math.sin(a1)) \
+                  - alpha * (rx * sin_phi * math.sin(a1) - ry * cos_phi * math.cos(a1))
+
+            # 控制点2: 终点处的切线方向
+            c2x = ex_seg + alpha * (rx * cos_phi * math.sin(a2) + ry * sin_phi * math.cos(a2))
+            c2y = ey_seg + alpha * (rx * sin_phi * math.sin(a2) - ry * cos_phi * math.cos(a2))
+
+            self.current_subpath.append((c1x, c1y))
+            self.current_subpath.append((c2x, c2y))
+            self.current_subpath.append((ex_seg, ey_seg))
+            self.current_pos = (ex_seg, ey_seg)
 
 
 # ========== 颜色工具 ==========
@@ -661,11 +790,58 @@ def _concat_transform(t1, t2):
 
 def _parse_svg_file(svg_path):
     """解析SVG文件，返回 (子路径列表, 颜色列表, 边界框, 描边信息列表)"""
-    tree = ET.parse(svg_path)
-    root = tree.getroot()
+    try:
+        tree = ET.parse(svg_path)
+        root = tree.getroot()
+    except (ET.ParseError, FileNotFoundError, OSError) as e:
+        # 返回有意义的空结果
+        return [], [], (0, 0, 0, 0), [], [], [], [], {}
+
+    # 解析 viewBox 和 width/height（用于 viewBox 坐标到实际像素的变换）
+    vb = root.get('viewBox', '')
+    svg_width = root.get('width', '')
+    svg_height = root.get('height', '')
+
+    vb_x, vb_y, vb_w, vb_h = 0.0, 0.0, 0.0, 0.0
+    has_viewbox = False
+    if vb:
+        parts = vb.strip().replace(',', ' ').split()
+        if len(parts) == 4:
+            try:
+                vb_x, vb_y, vb_w, vb_h = map(float, parts)
+                has_viewbox = True
+            except ValueError:
+                pass
+
+    # 计算 viewBox 到实际像素的缩放和平移
+    vb_scale_x = 1.0
+    vb_scale_y = 1.0
+    vb_offset_x = 0.0
+    vb_offset_y = 0.0
+
+    if has_viewbox:
+        # 解析 width/height（支持 px 单位）
+        def _parse_svg_length(val, default):
+            if not val:
+                return default
+            try:
+                return float(val.rstrip('px').rstrip('%'))
+            except ValueError:
+                return default
+
+        w_px = _parse_svg_length(svg_width, vb_w) if vb_w > 0 else 1.0
+        h_px = _parse_svg_length(svg_height, vb_h) if vb_h > 0 else 1.0
+
+        if vb_w > 0 and vb_h > 0:
+            vb_scale_x = w_px / vb_w
+            vb_scale_y = h_px / vb_h
+            vb_offset_x = -vb_x * vb_scale_x
+            vb_offset_y = -vb_y * vb_scale_y
 
     # 解析 <style> 标签中的 CSS 类样式
     css_classes = {}  # {class_name: {prop_name: value}}
+    css_ids = {}      # {id_name: {prop_name: value}}
+    css_elements = {} # {tag_name: {prop_name: value}}
 
     def _parse_css_style(style_text):
         """解析 CSS 样式文本，提取类选择器的样式规则（支持分组选择器）"""
@@ -701,12 +877,24 @@ def _parse_svg_file(svg_path):
                 sel = sel.strip()
                 if not sel:
                     continue
-                # 只处理类选择器（.开头）
                 if sel.startswith('.'):
+                    # 类选择器
                     cls_name = sel[1:]  # 去掉开头的.
                     if cls_name not in css_classes:
                         css_classes[cls_name] = {}
                     css_classes[cls_name].update(props)
+                elif sel.startswith('#'):
+                    # ID 选择器
+                    id_name = sel[1:]  # 去掉开头的#
+                    if id_name not in css_ids:
+                        css_ids[id_name] = {}
+                    css_ids[id_name].update(props)
+                else:
+                    # 元素选择器（纯标签名，如 path, circle, rect 等）
+                    tag_name = sel
+                    if tag_name not in css_elements:
+                        css_elements[tag_name] = {}
+                    css_elements[tag_name].update(props)
 
     # 查找所有 style 标签并解析
     ns = ''
@@ -947,7 +1135,9 @@ def _parse_svg_file(svg_path):
         return class_attr.strip().split()
 
     def _get_style_value(elem, prop_name, default=None):
-        """从元素属性、style、CSS类中获取样式值（优先级：属性 > style > CSS类）"""
+        """从元素属性、style、CSS类、ID选择器、元素选择器中获取样式值
+        优先级：属性 > style > CSS类 > ID选择器 > 元素选择器
+        """
         # 1. 先直接从属性获取
         val = elem.get(prop_name)
         if val is not None:
@@ -963,6 +1153,14 @@ def _parse_svg_file(svg_path):
         for cls in reversed(classes):  # reversed 保证后定义的优先级高
             if cls in css_classes and prop_name in css_classes[cls]:
                 return css_classes[cls][prop_name]
+        # 4. 从 CSS ID 选择器中查找
+        elem_id = elem.get('id', '')
+        if elem_id and elem_id in css_ids and prop_name in css_ids[elem_id]:
+            return css_ids[elem_id][prop_name]
+        # 5. 从 CSS 元素选择器中查找
+        tag = elem.tag.split('}')[-1] if '}' in elem.tag else elem.tag
+        if tag in css_elements and prop_name in css_elements[tag]:
+            return css_elements[tag][prop_name]
         return default
 
     def _get_fill(elem, parent_fill='#000000'):
@@ -1391,6 +1589,9 @@ def _parse_svg_file(svg_path):
                     ny = b * x + d_t * y + f
                 else:
                     nx, ny = x, y
+                # 应用 viewBox 变换（从 viewBox 坐标到实际像素）
+                nx = nx * vb_scale_x + vb_offset_x
+                ny = ny * vb_scale_y + vb_offset_y
                 tsp.append((nx, ny))
             all_subpaths.append(tsp)
             path_group_ids.append(path_idx)

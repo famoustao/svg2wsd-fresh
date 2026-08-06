@@ -573,403 +573,392 @@ def import_ggb(filepath: str) -> CanvasData:
     返回:
         CanvasData 对象
     """
-    import zipfile
-    import xml.etree.ElementTree as ET
+    try:
+        import zipfile
+        import xml.etree.ElementTree as ET
 
-    shapes = []
-    annotations = []
+        shapes = []
+        annotations = []
 
-    with zipfile.ZipFile(filepath, 'r') as zf:
-        xml_content = zf.read('geogebra.xml').decode('utf-8')
+        with zipfile.ZipFile(filepath, 'r') as zf:
+            try:
+                xml_content = zf.read('geogebra.xml').decode('utf-8')
+            except KeyError:
+                print("错误: GGB 文件中未找到 geogebra.xml")
+                return CanvasData(shapes=[], annotations=[], bbox=(0, 0, 0, 0), source_file=filepath)
 
-    root = ET.fromstring(xml_content)
+        root = ET.fromstring(xml_content)
 
-    # 尝试带命名空间和不带命名空间两种方式
-    ns = {'ggb': 'http://www.geogebra.org/xml'}
+        # 尝试带命名空间和不带命名空间两种方式
+        ns = {'ggb': 'http://www.geogebra.org/xml'}
 
-    # 查找 construction 元素
-    construction = root.find('.//ggb:construction', ns)
-    if construction is None:
-        construction = root.find('.//construction')
+        # 查找 construction 元素
+        construction = root.find('.//ggb:construction', ns)
+        if construction is None:
+            construction = root.find('.//construction')
 
-    if construction is None:
-        return CanvasData(shapes=[], annotations=[], bbox=(0, 0, 0, 0), source_file=filepath)
+        if construction is None:
+            return CanvasData(shapes=[], annotations=[], bbox=(0, 0, 0, 0), source_file=filepath)
 
-    # ---- 第一遍：收集所有 element，建立 label -> 坐标/类型 的映射 ----
-    label_to_coords = {}   # label -> (x, y) 或 [(x,y), ...]
-    label_to_type = {}      # label -> elem_type string
+        # ---- 第一遍：收集所有 element，建立 label -> 坐标/类型 的映射 ----
+        label_to_coords = {}   # label -> (x, y) 或 [(x,y), ...]
+        label_to_type = {}      # label -> elem_type string
 
-    def _find(parent, tag, ns_map=None):
-        elem = parent.find(tag, ns_map) if ns_map else parent.find(tag)
-        if elem is None and ns_map:
-            local_tag = tag.replace('{http://www.geogebra.org/xml}', '')
-            elem = parent.find(local_tag)
-        return elem
+        def _find(parent, tag, ns_map=None):
+            elem = parent.find(tag, ns_map) if ns_map else parent.find(tag)
+            if elem is None and ns_map:
+                local_tag = tag.replace('{http://www.geogebra.org/xml}', '')
+                elem = parent.find(local_tag)
+            return elem
 
-    def _findall(parent, tag, ns_map=None):
-        elems = parent.findall(tag, ns_map) if ns_map else parent.findall(tag)
-        if not elems and ns_map:
-            local_tag = tag.replace('{http://www.geogebra.org/xml}', '')
-            elems = parent.findall(local_tag)
-        return elems
+        def _findall(parent, tag, ns_map=None):
+            elems = parent.findall(tag, ns_map) if ns_map else parent.findall(tag)
+            if not elems and ns_map:
+                local_tag = tag.replace('{http://www.geogebra.org/xml}', '')
+                elems = parent.findall(local_tag)
+            return elems
 
-    for xml_elem in construction:
-        tag = xml_elem.tag
-        local_tag = tag.split('}')[-1] if '}' in tag else tag
-        if local_tag == 'element':
-            elem_type = xml_elem.get('type', '')
+        for xml_elem in construction:
+            tag = xml_elem.tag
+            local_tag = tag.split('}')[-1] if '}' in tag else tag
+            if local_tag == 'element':
+                elem_type = xml_elem.get('type', '')
+                label = xml_elem.get('label', '')
+
+                if elem_type == 'point':
+                    coords = _find(xml_elem, 'ggb:coords', ns)
+                    if coords is not None:
+                        x = float(coords.get('x', 0))
+                        y = float(coords.get('y', 0))
+                        label_to_coords[label] = (x, y)
+                    label_to_type[label] = 'point'
+
+        # ---- 第二遍：扫描 command 提取 polygon/polyline 顶点引用 ----
+        command_polygon_pts = {}  # output_label -> [point_labels]
+
+        for xml_elem in construction:
+            tag = xml_elem.tag
+            local_tag = tag.split('}')[-1] if '}' in tag else tag
+            if local_tag == 'command':
+                cmd_name = xml_elem.get('name', '')
+                cmd_type = xml_elem.get('type', '')
+
+                input_elem = _find(xml_elem, 'ggb:input', ns)
+                if input_elem is None:
+                    input_elem = _find(xml_elem, 'input')
+                output_elem = _find(xml_elem, 'ggb:output', ns)
+                if output_elem is None:
+                    output_elem = _find(xml_elem, 'output')
+
+                if input_elem is None or output_elem is None:
+                    continue
+
+                # 收集 input 标签 a0, a1, a2, ...
+                point_labels = []
+                idx = 0
+                while True:
+                    attr_name = f'a{idx}'
+                    val = input_elem.get(attr_name)
+                    if val is None:
+                        break
+                    point_labels.append(val)
+                    idx += 1
+
+                # 收集 output 标签 a0, a1, ...
+                output_labels = []
+                idx = 0
+                while True:
+                    attr_name = f'a{idx}'
+                    val = output_elem.get(attr_name)
+                    if val is None:
+                        break
+                    output_labels.append(val)
+                    idx += 1
+
+                if cmd_type == 'Polygon' and point_labels:
+                    # polygon 的输入标签是顶点（最后一个可能是内部面）
+                    # 顶点按顺序，最后一个输入通常是多边形内部区域标签
+                    vertex_labels = point_labels[:-1] if len(point_labels) > 3 else point_labels
+                    for ol in output_labels:
+                        command_polygon_pts[ol] = vertex_labels
+                elif cmd_type == 'Polyline' and point_labels:
+                    for ol in output_labels:
+                        command_polygon_pts[ol] = point_labels
+
+        # ---- 辅助函数 ----
+        def _extract_polygon_points(xml_elem):
+            """从 polygon element 中提取顶点坐标"""
             label = xml_elem.get('label', '')
-
-            if elem_type == 'point':
-                coords = _find(xml_elem, 'ggb:coords', ns)
-                if coords is not None:
-                    x = float(coords.get('x', 0))
-                    y = float(coords.get('y', 0))
-                    label_to_coords[label] = (x, y)
-                label_to_type[label] = 'point'
-
-    # ---- 第二遍：扫描 command 提取 polygon/polyline 顶点引用 ----
-    command_polygon_pts = {}  # output_label -> [point_labels]
-
-    for xml_elem in construction:
-        tag = xml_elem.tag
-        local_tag = tag.split('}')[-1] if '}' in tag else tag
-        if local_tag == 'command':
-            cmd_name = xml_elem.get('name', '')
-            cmd_type = xml_elem.get('type', '')
-
-            input_elem = _find(xml_elem, 'ggb:input', ns)
-            if input_elem is None:
-                input_elem = _find(xml_elem, 'input')
-            output_elem = _find(xml_elem, 'ggb:output', ns)
-            if output_elem is None:
-                output_elem = _find(xml_elem, 'output')
-
-            if input_elem is None or output_elem is None:
-                continue
-
-            # 收集 input 标签 a0, a1, a2, ...
-            point_labels = []
-            idx = 0
-            while True:
-                attr_name = f'a{idx}'
-                val = input_elem.get(attr_name)
-                if val is None:
-                    break
-                point_labels.append(val)
-                idx += 1
-
-            # 收集 output 标签 a0, a1, ...
-            output_labels = []
-            idx = 0
-            while True:
-                attr_name = f'a{idx}'
-                val = output_elem.get(attr_name)
-                if val is None:
-                    break
-                output_labels.append(val)
-                idx += 1
-
-            if cmd_type == 'Polygon' and point_labels:
-                # polygon 的输入标签是顶点（最后一个可能是内部面）
-                # 顶点按顺序，最后一个输入通常是多边形内部区域标签
-                vertex_labels = point_labels[:-1] if len(point_labels) > 3 else point_labels
-                for ol in output_labels:
-                    command_polygon_pts[ol] = vertex_labels
-            elif cmd_type == 'Polyline' and point_labels:
-                for ol in output_labels:
-                    command_polygon_pts[ol] = point_labels
-
-    # ---- 辅助函数 ----
-    def _extract_polygon_points(xml_elem):
-        """从 polygon element 中提取顶点坐标"""
-        label = xml_elem.get('label', '')
-        # 先查 command 映射
-        if label in command_polygon_pts:
-            vertex_labels = command_polygon_pts[label]
+            # 先查 command 映射
+            if label in command_polygon_pts:
+                vertex_labels = command_polygon_pts[label]
+                pts = []
+                for vl in vertex_labels:
+                    if vl in label_to_coords:
+                        pts.append(label_to_coords[vl])
+                return pts
+            # 回退：查子元素中的 point 引用
             pts = []
-            for vl in vertex_labels:
-                if vl in label_to_coords:
-                    pts.append(label_to_coords[vl])
+            for child in xml_elem:
+                child_tag = child.tag.split('}')[-1] if '}' in child.tag else child.tag
+                if child_tag == 'point':
+                    plabel = child.get('label', '')
+                    if plabel in label_to_coords:
+                        pts.append(label_to_coords[plabel])
             return pts
-        # 回退：查子元素中的 point 引用
-        pts = []
-        for child in xml_elem:
-            child_tag = child.tag.split('}')[-1] if '}' in child.tag else child.tag
-            if child_tag == 'point':
-                plabel = child.get('label', '')
-                if plabel in label_to_coords:
-                    pts.append(label_to_coords[plabel])
-        return pts
 
-    def _extract_polyline_points(xml_elem):
-        """从 polyline element 中提取顶点坐标"""
-        label = xml_elem.get('label', '')
-        if label in command_polygon_pts:
-            vertex_labels = command_polygon_pts[label]
+        def _extract_polyline_points(xml_elem):
+            """从 polyline element 中提取顶点坐标"""
+            label = xml_elem.get('label', '')
+            if label in command_polygon_pts:
+                vertex_labels = command_polygon_pts[label]
+                pts = []
+                for vl in vertex_labels:
+                    if vl in label_to_coords:
+                        pts.append(label_to_coords[vl])
+                return pts
             pts = []
-            for vl in vertex_labels:
-                if vl in label_to_coords:
-                    pts.append(label_to_coords[vl])
+            for child in xml_elem:
+                child_tag = child.tag.split('}')[-1] if '}' in child.tag else child.tag
+                if child_tag == 'point':
+                    plabel = child.get('label', '')
+                    if plabel in label_to_coords:
+                        pts.append(label_to_coords[plabel])
             return pts
-        pts = []
-        for child in xml_elem:
-            child_tag = child.tag.split('}')[-1] if '}' in child.tag else child.tag
-            if child_tag == 'point':
-                plabel = child.get('label', '')
-                if plabel in label_to_coords:
-                    pts.append(label_to_coords[plabel])
-        return pts
 
-    def _add_conic_shapes(xml_elem, ns_map, out_shapes, color, lw):
-        """将二次曲线（conic）采样为贝塞尔点添加到shapes"""
-        import math
-        coords = _find(xml_elem, 'ggb:coords', ns_map)
-        if coords is None:
-            coords = _find(xml_elem, 'coords')
-        if coords is None:
-            return
-        # conic 齐次坐标：矩阵 [[a, b/2, d/2], [b/2, c, e/2], [d/2, e/2, f]]
-        # 简化处理：尝试作为椭圆采样
-        try:
-            a_coeff = float(coords.get('a', coords.get('x1', '0')))
-            b_coeff = float(coords.get('b', coords.get('y1', '0')))
-            c_coeff = float(coords.get('c', coords.get('x2', '0')))
-            d_coeff = float(coords.get('d', coords.get('y2', '0')))
-            e_coeff = float(coords.get('e', coords.get('x3', '0')))
-            f_coeff = float(coords.get('f', coords.get('y3', '1')))
-        except (ValueError, TypeError):
-            return
+        def _add_conic_shapes(xml_elem, ns_map, out_shapes, color, lw):
+            """将二次曲线（conic）采样为贝塞尔点添加到shapes"""
+            import math
+            coords = _find(xml_elem, 'ggb:coords', ns_map)
+            if coords is None:
+                coords = _find(xml_elem, 'coords')
+            if coords is None:
+                return
+            # conic 齐次坐标：矩阵 [[a, b/2, d/2], [b/2, c, e/2], [d/2, e/2, f]]
+            # 简化处理：尝试作为椭圆采样
+            try:
+                a_coeff = float(coords.get('a', coords.get('x1', '0')))
+                b_coeff = float(coords.get('b', coords.get('y1', '0')))
+                c_coeff = float(coords.get('c', coords.get('x2', '0')))
+                d_coeff = float(coords.get('d', coords.get('y2', '0')))
+                e_coeff = float(coords.get('e', coords.get('x3', '0')))
+                f_coeff = float(coords.get('f', coords.get('y3', '1')))
+            except (ValueError, TypeError):
+                return
 
-        # 判断类型并采样
-        # 简化：尝试参数化采样
-        disc = b_coeff**2 - 4*a_coeff*c_coeff
-        pts = []
-        if disc < -1e-10:
-            # 椭圆类型
-            # 用数值方法采样
-            angle_start = 0.0
-            angle_end = 2 * math.pi
-            n_samples = 72
-            for i in range(n_samples):
-                t = angle_start + (angle_end - angle_start) * i / n_samples
-                # 参数曲线近似（对于标准椭圆 ax^2+cy^2+f=0, b=d=e=0）
-                # 通用情况：用隐式曲线采样
-                if abs(a_coeff) < 1e-10 and abs(c_coeff) < 1e-10:
-                    return
-                # 标准椭圆处理
-                if abs(b_coeff) < 1e-10 and abs(d_coeff) < 1e-10 and abs(e_coeff) < 1e-10:
-                    if a_coeff > 0 and c_coeff > 0 and f_coeff < 0:
-                        rx = math.sqrt(-f_coeff / a_coeff)
-                        ry = math.sqrt(-f_coeff / c_coeff)
-                        pts.append((rx * math.cos(t), ry * math.sin(t)))
-                    elif a_coeff < 0 and c_coeff < 0 and f_coeff > 0:
-                        rx = math.sqrt(f_coeff / (-a_coeff))
-                        ry = math.sqrt(f_coeff / (-c_coeff))
-                        pts.append((rx * math.cos(t), ry * math.sin(t)))
-                    else:
+            # 判断类型并采样
+            # 简化：尝试参数化采样
+            disc = b_coeff**2 - 4*a_coeff*c_coeff
+            pts = []
+            if disc < -1e-10:
+                # 椭圆类型
+                # 用数值方法采样
+                angle_start = 0.0
+                angle_end = 2 * math.pi
+                n_samples = 72
+                for i in range(n_samples):
+                    t = angle_start + (angle_end - angle_start) * i / n_samples
+                    # 参数曲线近似（对于标准椭圆 ax^2+cy^2+f=0, b=d=e=0）
+                    # 通用情况：用隐式曲线采样
+                    if abs(a_coeff) < 1e-10 and abs(c_coeff) < 1e-10:
                         return
-                else:
-                    # 通用二次曲线：数值采样
-                    # 从当前角度开始搜索曲线上的点
-                    # 简化：跳过复杂情况
-                    return
+                    # 标准椭圆处理
+                    if abs(b_coeff) < 1e-10 and abs(d_coeff) < 1e-10 and abs(e_coeff) < 1e-10:
+                        if a_coeff > 0 and c_coeff > 0 and f_coeff < 0:
+                            rx = math.sqrt(-f_coeff / a_coeff)
+                            ry = math.sqrt(-f_coeff / c_coeff)
+                            pts.append((rx * math.cos(t), ry * math.sin(t)))
+                        elif a_coeff < 0 and c_coeff < 0 and f_coeff > 0:
+                            rx = math.sqrt(f_coeff / (-a_coeff))
+                            ry = math.sqrt(f_coeff / (-c_coeff))
+                            pts.append((rx * math.cos(t), ry * math.sin(t)))
+                        else:
+                            return
+                    else:
+                        # 通用二次曲线：数值采样
+                        # 从当前角度开始搜索曲线上的点
+                        # 简化：跳过复杂情况
+                        return
 
-            if len(pts) >= 3:
-                cx = sum(p[0] for p in pts) / len(pts)
-                cy = sum(p[1] for p in pts) / len(pts)
-                dists = [math.sqrt((p[0]-cx)**2 + (p[1]-cy)**2) for p in pts]
-                avg_r = sum(dists) / len(dists)
-                max_dev = max(abs(d - avg_r) for d in dists) if dists else 0
-                if avg_r > 0 and max_dev / avg_r < 0.05:
-                    out_shapes.append(Shape(
-                        type=ShapeType.CIRCLE,
-                        points=[(cx, cy)],
-                        line_color=color,
-                        fill_color=None,
-                        line_width=lw,
-                        extra={'radius': avg_r}
-                    ))
-                else:
-                    # 椭圆或多边形近似
-                    out_shapes.append(Shape(
-                        type=ShapeType.POLYGON,
-                        points=pts,
-                        line_color=color,
-                        fill_color=None,
-                        line_width=lw
-                    ))
-
-    # ---- 第三遍：提取所有图形元素 ----
-    for xml_elem in construction:
-        tag = xml_elem.tag
-        local_tag = tag.split('}')[-1] if '}' in tag else tag
-
-        if local_tag == 'element':
-            elem_type = xml_elem.get('type', '')
-            label = xml_elem.get('label', '')
-
-            # 提取颜色
-            color = (0, 0, 0)  # BGR 默认黑色
-            oc = _find(xml_elem, 'ggb:objColor', ns)
-            if oc is None:
-                oc = _find(xml_elem, 'objColor')
-            if oc is not None:
-                r = int(oc.get('r', 0))
-                g = int(oc.get('g', 0))
-                b = int(oc.get('b', 0))
-                color = (b, g, r)  # RGB -> BGR
-
-            # 提取线宽
-            lw = 2.0
-            ls = _find(xml_elem, 'ggb:lineStyle', ns)
-            if ls is None:
-                ls = _find(xml_elem, 'lineStyle')
-            if ls is not None:
-                lw = float(ls.get('thickness', 2))
-
-            # 按类型解析
-            if elem_type == 'point':
-                coords = _find(xml_elem, 'ggb:coords', ns)
-                if coords is None:
-                    coords = _find(xml_elem, 'coords')
-                if coords is not None:
-                    x = float(coords.get('x', 0))
-                    y = float(coords.get('y', 0))
-                    annotations.append(TextAnnotation(
-                        text=label, x=x, y=y,
-                        font_size=14, bold=True,
-                        associated=True,
-                        assoc_type=2,       # 临时值，后续智能计算
-                        assoc_f1=0.7,       # 比例值 0-1，后续智能计算
-                        assoc_f2=0.7,       # 比例值 0-1，后续智能计算
-                        assoc_dir=0xB4,     # 临时值，后续智能计算
-                    ))
-
-            elif elem_type == 'segment':
-                # segment 可能有 coords 直接给出 x1,y1,x2,y2
-                coords = _find(xml_elem, 'ggb:coords', ns)
-                if coords is None:
-                    coords = _find(xml_elem, 'coords')
-                if coords is not None:
-                    try:
-                        x1 = float(coords.get('x1', coords.get('x', 0)))
-                        y1 = float(coords.get('y1', coords.get('y', 0)))
-                        x2 = float(coords.get('x2', 0))
-                        y2 = float(coords.get('y2', 0))
-                    except (ValueError, TypeError):
-                        continue
-                    shapes.append(Shape(
-                        type=ShapeType.LINE,
-                        points=[(x1, y1), (x2, y2)],
-                        line_color=color, line_width=lw
-                    ))
-                else:
-                    # 通过 command 引用的起点终点
-                    # 查找 command 中 output 为此 label 的
-                    pts = []
-                    for xml_cmd in construction:
-                        cmd_tag = xml_cmd.tag.split('}')[-1] if '}' in xml_cmd.tag else xml_cmd.tag
-                        if cmd_tag != 'command':
-                            continue
-                        out_el = _find(xml_cmd, 'ggb:output', ns)
-                        if out_el is None:
-                            out_el = _find(xml_cmd, 'output')
-                        if out_el is None:
-                            continue
-                        out_label = out_el.get('a0', '')
-                        if out_label == label:
-                            in_el = _find(xml_cmd, 'ggb:input', ns)
-                            if in_el is None:
-                                in_el = _find(xml_cmd, 'input')
-                            if in_el is not None:
-                                p1_label = in_el.get('a0', '')
-                                p2_label = in_el.get('a1', '')
-                                if p1_label in label_to_coords and p2_label in label_to_coords:
-                                    pts = [label_to_coords[p1_label], label_to_coords[p2_label]]
-                            break
-                    if len(pts) == 2:
-                        shapes.append(Shape(
-                            type=ShapeType.LINE,
+                if len(pts) >= 3:
+                    cx = sum(p[0] for p in pts) / len(pts)
+                    cy = sum(p[1] for p in pts) / len(pts)
+                    dists = [math.sqrt((p[0]-cx)**2 + (p[1]-cy)**2) for p in pts]
+                    avg_r = sum(dists) / len(dists)
+                    max_dev = max(abs(d - avg_r) for d in dists) if dists else 0
+                    if avg_r > 0 and max_dev / avg_r < 0.05:
+                        out_shapes.append(Shape(
+                            type=ShapeType.CIRCLE,
+                            points=[(cx, cy)],
+                            line_color=color,
+                            fill_color=None,
+                            line_width=lw,
+                            extra={'radius': avg_r}
+                        ))
+                    else:
+                        # 椭圆或多边形近似
+                        out_shapes.append(Shape(
+                            type=ShapeType.POLYGON,
                             points=pts,
-                            line_color=color, line_width=lw
+                            line_color=color,
+                            fill_color=None,
+                            line_width=lw
                         ))
 
-            elif elem_type in ('line', 'ray'):
-                # 用齐次坐标 ax+by+c=0
-                coords = _find(xml_elem, 'ggb:coords', ns)
-                if coords is None:
-                    coords = _find(xml_elem, 'coords')
-                if coords is not None:
-                    a = float(coords.get('x', 0))
-                    b = float(coords.get('y', 0))
-                    c = float(coords.get('z', 0))
-                    # 画一条跨越画布的线段
-                    if abs(b) > 1e-10:
-                        x1 = -500
-                        y1 = -(a * x1 + c) / b
-                        x2 = 500
-                        y2 = -(a * x2 + c) / b
-                    elif abs(a) > 1e-10:
-                        y1 = -500
-                        x1 = -(b * y1 + c) / a
-                        y2 = 500
-                        x2 = -(b * y2 + c) / a
-                    else:
-                        continue
-                    shapes.append(Shape(
-                        type=ShapeType.LINE,
-                        points=[(x1, y1), (x2, y2)],
-                        line_color=color, line_width=lw
-                    ))
+        # ---- 第三遍：提取所有图形元素 ----
+        for xml_elem in construction:
+            tag = xml_elem.tag
+            local_tag = tag.split('}')[-1] if '}' in tag else tag
 
-            elif elem_type == 'circle':
-                center = _find(xml_elem, 'ggb:center', ns)
-                if center is None:
-                    center = _find(xml_elem, 'center')
-                radius_el = _find(xml_elem, 'ggb:radius', ns)
-                if radius_el is None:
-                    radius_el = _find(xml_elem, 'radius')
+            if local_tag == 'element':
+                elem_type = xml_elem.get('type', '')
+                label = xml_elem.get('label', '')
 
-                if center is not None:
-                    # center 下有 point 或 coords
-                    cp = _find(center, 'ggb:point', ns)
-                    if cp is None:
-                        cp = _find(center, 'point')
-                    if cp is None:
-                        coords_c = _find(center, 'ggb:coords', ns)
-                        if coords_c is None:
-                            coords_c = _find(center, 'coords')
-                        if coords_c is not None:
-                            cx = float(coords_c.get('x', 0))
-                            cy = float(coords_c.get('y', 0))
-                        else:
-                            # 用 center 标签在 label_to_coords 中查找
-                            cp_label = center.get('label', '')
-                            if cp_label in label_to_coords:
-                                cx, cy = label_to_coords[cp_label]
-                            else:
-                                cx, cy = 0.0, 0.0
-                    else:
-                        cx = float(cp.get('x', 0))
-                        cy = float(cp.get('y', 0))
+                # 提取颜色
+                color = (0, 0, 0)  # BGR 默认黑色
+                oc = _find(xml_elem, 'ggb:objColor', ns)
+                if oc is None:
+                    oc = _find(xml_elem, 'objColor')
+                if oc is not None:
+                    r = int(oc.get('r', 0))
+                    g = int(oc.get('g', 0))
+                    b = int(oc.get('b', 0))
+                    color = (b, g, r)  # RGB -> BGR
 
-                    radius = float(radius_el.get('val', 1)) if radius_el is not None else 1
-                    shapes.append(Shape(
-                        type=ShapeType.CIRCLE,
-                        points=[(cx, cy)],
-                        line_color=color, fill_color=None,
-                        line_width=lw,
-                        extra={'radius': radius}
-                    ))
-                else:
-                    # 尝试 coords 方式
+                # 提取线宽
+                lw = 2.0
+                ls = _find(xml_elem, 'ggb:lineStyle', ns)
+                if ls is None:
+                    ls = _find(xml_elem, 'lineStyle')
+                if ls is not None:
+                    lw = float(ls.get('thickness', 2))
+
+                # 按类型解析
+                if elem_type == 'point':
                     coords = _find(xml_elem, 'ggb:coords', ns)
                     if coords is None:
                         coords = _find(xml_elem, 'coords')
                     if coords is not None:
-                        cx = float(coords.get('x', 0))
-                        cy = float(coords.get('y', 0))
+                        x = float(coords.get('x', 0))
+                        y = float(coords.get('y', 0))
+                        annotations.append(TextAnnotation(
+                            text=label, x=x, y=y,
+                            font_size=14, bold=True,
+                            associated=True,
+                            assoc_type=2,       # 临时值，后续智能计算
+                            assoc_f1=0.7,       # 比例值 0-1，后续智能计算
+                            assoc_f2=0.7,       # 比例值 0-1，后续智能计算
+                            assoc_dir=0xB4,     # 临时值，后续智能计算
+                        ))
+
+                elif elem_type == 'segment':
+                    # segment 可能有 coords 直接给出 x1,y1,x2,y2
+                    coords = _find(xml_elem, 'ggb:coords', ns)
+                    if coords is None:
+                        coords = _find(xml_elem, 'coords')
+                    if coords is not None:
+                        try:
+                            x1 = float(coords.get('x1', coords.get('x', 0)))
+                            y1 = float(coords.get('y1', coords.get('y', 0)))
+                            x2 = float(coords.get('x2', 0))
+                            y2 = float(coords.get('y2', 0))
+                        except (ValueError, TypeError):
+                            continue
+                        shapes.append(Shape(
+                            type=ShapeType.LINE,
+                            points=[(x1, y1), (x2, y2)],
+                            line_color=color, line_width=lw
+                        ))
+                    else:
+                        # 通过 command 引用的起点终点
+                        # 查找 command 中 output 为此 label 的
+                        pts = []
+                        for xml_cmd in construction:
+                            cmd_tag = xml_cmd.tag.split('}')[-1] if '}' in xml_cmd.tag else xml_cmd.tag
+                            if cmd_tag != 'command':
+                                continue
+                            out_el = _find(xml_cmd, 'ggb:output', ns)
+                            if out_el is None:
+                                out_el = _find(xml_cmd, 'output')
+                            if out_el is None:
+                                continue
+                            out_label = out_el.get('a0', '')
+                            if out_label == label:
+                                in_el = _find(xml_cmd, 'ggb:input', ns)
+                                if in_el is None:
+                                    in_el = _find(xml_cmd, 'input')
+                                if in_el is not None:
+                                    p1_label = in_el.get('a0', '')
+                                    p2_label = in_el.get('a1', '')
+                                    if p1_label in label_to_coords and p2_label in label_to_coords:
+                                        pts = [label_to_coords[p1_label], label_to_coords[p2_label]]
+                                break
+                        if len(pts) == 2:
+                            shapes.append(Shape(
+                                type=ShapeType.LINE,
+                                points=pts,
+                                line_color=color, line_width=lw
+                            ))
+
+                elif elem_type in ('line', 'ray'):
+                    # 用齐次坐标 ax+by+c=0
+                    coords = _find(xml_elem, 'ggb:coords', ns)
+                    if coords is None:
+                        coords = _find(xml_elem, 'coords')
+                    if coords is not None:
+                        a = float(coords.get('x', 0))
+                        b = float(coords.get('y', 0))
+                        c = float(coords.get('z', 0))
+                        # 画一条跨越画布的线段
+                        if abs(b) > 1e-10:
+                            x1 = -500
+                            y1 = -(a * x1 + c) / b
+                            x2 = 500
+                            y2 = -(a * x2 + c) / b
+                        elif abs(a) > 1e-10:
+                            y1 = -500
+                            x1 = -(b * y1 + c) / a
+                            y2 = 500
+                            x2 = -(b * y2 + c) / a
+                        else:
+                            continue
+                        shapes.append(Shape(
+                            type=ShapeType.LINE,
+                            points=[(x1, y1), (x2, y2)],
+                            line_color=color, line_width=lw
+                        ))
+
+                elif elem_type == 'circle':
+                    center = _find(xml_elem, 'ggb:center', ns)
+                    if center is None:
+                        center = _find(xml_elem, 'center')
+                    radius_el = _find(xml_elem, 'ggb:radius', ns)
+                    if radius_el is None:
+                        radius_el = _find(xml_elem, 'radius')
+
+                    if center is not None:
+                        # center 下有 point 或 coords
+                        cp = _find(center, 'ggb:point', ns)
+                        if cp is None:
+                            cp = _find(center, 'point')
+                        if cp is None:
+                            coords_c = _find(center, 'ggb:coords', ns)
+                            if coords_c is None:
+                                coords_c = _find(center, 'coords')
+                            if coords_c is not None:
+                                cx = float(coords_c.get('x', 0))
+                                cy = float(coords_c.get('y', 0))
+                            else:
+                                # 用 center 标签在 label_to_coords 中查找
+                                cp_label = center.get('label', '')
+                                if cp_label in label_to_coords:
+                                    cx, cy = label_to_coords[cp_label]
+                                else:
+                                    cx, cy = 0.0, 0.0
+                        else:
+                            cx = float(cp.get('x', 0))
+                            cy = float(cp.get('y', 0))
+
                         radius = float(radius_el.get('val', 1)) if radius_el is not None else 1
                         shapes.append(Shape(
                             type=ShapeType.CIRCLE,
@@ -978,95 +967,113 @@ def import_ggb(filepath: str) -> CanvasData:
                             line_width=lw,
                             extra={'radius': radius}
                         ))
+                    else:
+                        # 尝试 coords 方式
+                        coords = _find(xml_elem, 'ggb:coords', ns)
+                        if coords is None:
+                            coords = _find(xml_elem, 'coords')
+                        if coords is not None:
+                            cx = float(coords.get('x', 0))
+                            cy = float(coords.get('y', 0))
+                            radius = float(radius_el.get('val', 1)) if radius_el is not None else 1
+                            shapes.append(Shape(
+                                type=ShapeType.CIRCLE,
+                                points=[(cx, cy)],
+                                line_color=color, fill_color=None,
+                                line_width=lw,
+                                extra={'radius': radius}
+                            ))
 
-            elif elem_type == 'polygon':
-                pts = _extract_polygon_points(xml_elem)
-                if pts and len(pts) >= 3:
-                    shapes.append(Shape(
-                        type=ShapeType.POLYGON,
-                        points=pts,
-                        line_color=color,
-                        fill_color=None,
-                        line_width=lw
-                    ))
+                elif elem_type == 'polygon':
+                    pts = _extract_polygon_points(xml_elem)
+                    if pts and len(pts) >= 3:
+                        shapes.append(Shape(
+                            type=ShapeType.POLYGON,
+                            points=pts,
+                            line_color=color,
+                            fill_color=None,
+                            line_width=lw
+                        ))
 
-            elif elem_type == 'polyline':
-                pts = _extract_polyline_points(xml_elem)
-                if pts and len(pts) >= 2:
-                    shapes.append(Shape(
-                        type=ShapeType.POLYLINE,
-                        points=pts,
-                        line_color=color,
-                        line_width=lw
-                    ))
+                elif elem_type == 'polyline':
+                    pts = _extract_polyline_points(xml_elem)
+                    if pts and len(pts) >= 2:
+                        shapes.append(Shape(
+                            type=ShapeType.POLYLINE,
+                            points=pts,
+                            line_color=color,
+                            line_width=lw
+                        ))
 
-            elif elem_type == 'conic':
-                _add_conic_shapes(xml_elem, ns, shapes, color, lw)
+                elif elem_type == 'conic':
+                    _add_conic_shapes(xml_elem, ns, shapes, color, lw)
 
-    # 计算所有 points 和所有 annotations 的 bbox
-    all_x = []
-    all_y = []
+        # 计算所有 points 和所有 annotations 的 bbox
+        all_x = []
+        all_y = []
 
-    for s in shapes:
-        if s.type == ShapeType.CIRCLE:
-            cx, cy = s.points[0]
-            r = s.extra.get('radius', 0)
-            all_x.extend([cx - r, cx + r])
-            all_y.extend([cy - r, cy + r])
+        for s in shapes:
+            if s.type == ShapeType.CIRCLE:
+                cx, cy = s.points[0]
+                r = s.extra.get('radius', 0)
+                all_x.extend([cx - r, cx + r])
+                all_y.extend([cy - r, cy + r])
+            else:
+                for p in s.points:
+                    all_x.append(p[0])
+                    all_y.append(p[1])
+
+        for a in annotations:
+            all_x.append(a.x)
+            all_y.append(a.y)
+
+        # GeoGebra XML 使用数学坐标系（Y向上），WSD 使用屏幕坐标系（Y向下）
+        # 翻转 Y 轴
+        for s in shapes:
+            s.points = [(x, -y) for (x, y) in s.points]
+        for a in annotations:
+            a.y = -a.y
+
+        # 重新收集坐标计算 bbox
+        all_x = []
+        all_y = []
+
+        for s in shapes:
+            if s.type == ShapeType.CIRCLE:
+                cx, cy = s.points[0]
+                r = s.extra.get('radius', 0)
+                all_x.extend([cx - r, cx + r])
+                all_y.extend([cy - r, cy + r])
+            else:
+                for p in s.points:
+                    all_x.append(p[0])
+                    all_y.append(p[1])
+
+        for a in annotations:
+            all_x.append(a.x)
+            all_y.append(a.y)
+
+        if all_x:
+            bbox = (min(all_x), min(all_y), max(all_x), max(all_y))
         else:
-            for p in s.points:
-                all_x.append(p[0])
-                all_y.append(p[1])
+            bbox = (0, 0, 0, 0)
 
-    for a in annotations:
-        all_x.append(a.x)
-        all_y.append(a.y)
+        # 对所有关联标注应用智能偏移方向（根据点在图中的位置）
+        from core.vertex_labeler import compute_smart_label_offset
+        for a in annotations:
+            if a.associated:
+                region, assoc_dir, f1, f2 = compute_smart_label_offset(
+                    a.x, a.y, bbox, shapes
+                )
+                a.assoc_type = region
+                a.assoc_dir = assoc_dir
+                a.assoc_f1 = f1
+                a.assoc_f2 = f2
 
-    # GeoGebra XML 使用数学坐标系（Y向上），WSD 使用屏幕坐标系（Y向下）
-    # 翻转 Y 轴
-    for s in shapes:
-        s.points = [(x, -y) for (x, y) in s.points]
-    for a in annotations:
-        a.y = -a.y
-
-    # 重新收集坐标计算 bbox
-    all_x = []
-    all_y = []
-
-    for s in shapes:
-        if s.type == ShapeType.CIRCLE:
-            cx, cy = s.points[0]
-            r = s.extra.get('radius', 0)
-            all_x.extend([cx - r, cx + r])
-            all_y.extend([cy - r, cy + r])
-        else:
-            for p in s.points:
-                all_x.append(p[0])
-                all_y.append(p[1])
-
-    for a in annotations:
-        all_x.append(a.x)
-        all_y.append(a.y)
-
-    if all_x:
-        bbox = (min(all_x), min(all_y), max(all_x), max(all_y))
-    else:
-        bbox = (0, 0, 0, 0)
-
-    # 对所有关联标注应用智能偏移方向（根据点在图中的位置）
-    from core.vertex_labeler import compute_smart_label_offset
-    for a in annotations:
-        if a.associated:
-            region, assoc_dir, f1, f2 = compute_smart_label_offset(
-                a.x, a.y, bbox, shapes
-            )
-            a.assoc_type = region
-            a.assoc_dir = assoc_dir
-            a.assoc_f1 = f1
-            a.assoc_f2 = f2
-
-    return CanvasData(shapes=shapes, annotations=annotations, bbox=bbox, source_file=filepath)
-
+        return CanvasData(shapes=shapes, annotations=annotations, bbox=bbox, source_file=filepath)
+    except Exception as e:
+        print(f"import_ggb 错误: {e}")
+        return CanvasData(shapes=[], annotations=[], bbox=(0, 0, 0, 0), source_file=filepath)
 
 # ============================================================
 # TXT 代码格式导入（自动识别）

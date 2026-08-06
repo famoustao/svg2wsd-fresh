@@ -439,6 +439,48 @@ def _parse_coord(coord_str):
             if pt:
                 return (pt[0], pt[1], coord_type)
 
+    # ---- node.anchor 格式支持 ----
+    # 例如 (A.north), (B.30), (C.south east) 等
+    if '.' in clean:
+        dot_parts = clean.split('.', 1)
+        if len(dot_parts) == 2:
+            node_name = dot_parts[0].strip()
+            anchor = dot_parts[1].strip()
+            if hasattr(_parse_coord, '_named_coords') and _parse_coord._named_coords:
+                pt = _parse_coord._named_coords.get(node_name)
+                if pt:
+                    nx, ny = pt
+                    offset = 0.3  # 默认偏移半个节点大小
+                    anchor_lower = anchor.lower()
+                    if anchor_lower == 'north':
+                        return (nx, ny + offset, coord_type)
+                    elif anchor_lower == 'south':
+                        return (nx, ny - offset, coord_type)
+                    elif anchor_lower == 'east':
+                        return (nx + offset, ny, coord_type)
+                    elif anchor_lower == 'west':
+                        return (nx - offset, ny, coord_type)
+                    elif anchor_lower == 'north east':
+                        return (nx + offset, ny + offset, coord_type)
+                    elif anchor_lower == 'north west':
+                        return (nx - offset, ny + offset, coord_type)
+                    elif anchor_lower == 'south east':
+                        return (nx + offset, ny - offset, coord_type)
+                    elif anchor_lower == 'south west':
+                        return (nx - offset, ny - offset, coord_type)
+                    elif anchor_lower == 'center':
+                        return (nx, ny, coord_type)
+                    else:
+                        # 尝试解析为角度锚点，如 (B.30)
+                        try:
+                            angle_deg = float(anchor)
+                            angle_rad = math.radians(angle_deg)
+                            dx = offset * math.cos(angle_rad)
+                            dy = offset * math.sin(angle_rad)
+                            return (nx + dx, ny + dy, coord_type)
+                        except ValueError:
+                            pass
+
     # 分割坐标分量
     parts = coord_str.split(',')
 
@@ -475,6 +517,88 @@ def _parse_coord(coord_str):
     return (x, y, coord_type)
 
 
+def _safe_eval(expr):
+    """
+    安全的数学表达式求值，替代 eval
+    使用 ast 解析器限制可用的节点类型，避免任意代码执行
+
+    支持的运算符: +, -, *, /, ** (^), %
+    支持的函数: cos, sin, tan, sqrt, abs, min, max, pow, exp, log, ...
+    支持的常量: pi, e
+
+    参数:
+        expr: 表达式字符串
+
+    返回:
+        float: 求值结果，失败返回 None
+    """
+    import ast
+    import math
+
+    if not expr:
+        return None
+
+    expr = expr.strip()
+
+    # 尝试直接解析为数字（最快路径）
+    try:
+        return float(expr)
+    except ValueError:
+        pass
+
+    # 替换 TikZ 的 ^ 为 Python 的 **
+    expr_clean = expr.replace('^', '**')
+
+    # 安全函数表（TikZ 使用度，所以 cos/sin/tan 需转换）
+    safe_ops = {
+        'cos': lambda x: math.cos(math.radians(x)),
+        'sin': lambda x: math.sin(math.radians(x)),
+        'tan': lambda x: math.tan(math.radians(x)),
+        'acos': lambda x: math.degrees(math.acos(x)),
+        'asin': lambda x: math.degrees(math.asin(x)),
+        'atan': lambda x: math.degrees(math.atan(x)),
+        'sqrt': math.sqrt,
+        'abs': abs,
+        'min': min,
+        'max': max,
+        'pow': pow,
+        'exp': math.exp,
+        'log': math.log,
+        'ln': math.log,
+        'log10': math.log10,
+        'floor': math.floor,
+        'ceil': math.ceil,
+        'round': round,
+        'pi': math.pi,
+        'e': math.e,
+    }
+
+    try:
+        tree = ast.parse(expr_clean, mode='eval')
+        # 只允许安全的节点类型
+        allowed_types = (
+            ast.Expression,
+            ast.Constant,   # Python 3.8+
+            ast.Num,        # fallback for older Python
+            ast.BinOp,
+            ast.UnaryOp,
+            ast.Call,
+            ast.Name,
+            ast.Add, ast.Sub, ast.Mult, ast.Div,
+            ast.Pow, ast.Mod,
+            ast.USub, ast.UAdd,
+            ast.Load, ast.keyword,
+        )
+        for node in ast.walk(tree):
+            if not isinstance(node, allowed_types):
+                return None
+        code = compile(tree, '<safe>', 'eval')
+        result = eval(code, {'__builtins__': {}}, safe_ops)
+        return float(result)
+    except Exception:
+        return None
+
+
 def _eval_tikz_expr(expr_str):
     """
     求值TikZ数学表达式，如 2*cos(120), 2*sin(60), sqrt(3), pi/2 等
@@ -489,44 +613,7 @@ def _eval_tikz_expr(expr_str):
     返回:
         float: 求值结果，失败返回None
     """
-    if not expr_str:
-        return None
-
-    expr = expr_str.strip()
-
-    # 将TikZ函数名替换为Python等价物
-    # cos/sin/tan在TikZ中使用度，需转换为弧度
-    import math as _m
-
-    # 安全的求值环境
-    safe_globals = {
-        '__builtins__': {},
-        'pi': _m.pi,
-        'e': _m.e,
-        'cos': lambda x: _m.cos(_m.radians(x)),
-        'sin': lambda x: _m.sin(_m.radians(x)),
-        'tan': lambda x: _m.tan(_m.radians(x)),
-        'acos': lambda x: _m.degrees(_m.acos(x)),
-        'asin': lambda x: _m.degrees(_m.asin(x)),
-        'atan': lambda x: _m.degrees(_m.atan(x)),
-        'sqrt': _m.sqrt,
-        'abs': abs,
-        'min': min,
-        'max': max,
-        'pow': pow,
-        'exp': _m.exp,
-        'log': _m.log,
-        'ln': _m.log,
-        'log10': _m.log10,
-        'floor': _m.floor,
-        'ceil': _m.ceil,
-        'round': round,
-    }
-
-    try:
-        return float(eval(expr, safe_globals, {}))
-    except Exception:
-        return None
+    return _safe_eval(expr_str)
 
 
 def _parse_length(len_str):
@@ -693,6 +780,36 @@ def _split_top_level(s, delim):
 # 路径解析
 # ============================================================
 
+def _extract_parenthesized(text, start_pos):
+    """
+    从 text 的 start_pos 位置开始，提取一个完整的括号内容（支持嵌套括号）。
+
+    参数:
+        text: 源字符串
+        start_pos: 起始位置，text[start_pos] 应为 '('
+
+    返回:
+        (content, end_pos) 元组，content 是包含完整括号的内容，
+        end_pos 是闭合括号之后的位置；
+        如果 start_pos 不是 '(' 或无法匹配则返回 None
+    """
+    if start_pos < 0 or start_pos >= len(text) or text[start_pos] != '(':
+        return None
+
+    depth = 0
+    i = start_pos
+    while i < len(text):
+        if text[i] == '(':
+            depth += 1
+        elif text[i] == ')':
+            depth -= 1
+            if depth == 0:
+                return (text[start_pos:i + 1], i + 1)
+        i += 1
+
+    return None
+
+
 class TikZPath:
     """一条TikZ路径"""
     def __init__(self):
@@ -765,74 +882,75 @@ def _parse_path_body(body_str, options):
             remaining = remaining[m.end():]
             matched = True
 
-        # -- (x,y) 直线
-        m = re.match(r'--\s*(\+*)\s*\([^)]+\)', remaining)
-        if m and not matched:
-            # 提取完整坐标
-            coord_start = remaining.find('(')
-            depth = 0
-            i = coord_start
-            while i < len(remaining):
-                if remaining[i] == '(':
-                    depth += 1
-                elif remaining[i] == ')':
-                    depth -= 1
-                    if depth == 0:
-                        break
-                i += 1
-            coord_str = remaining[:i+1]
-            # 去掉 --
-            coord_str = coord_str[2:].strip()
-            result = _parse_coord(coord_str)
-            if result:
-                x, y, ctype = result
-                if ctype == 'relative':
-                    x += current_x
-                    y += current_y
-                elif ctype == 'relative_plus':
-                    x += current_x
-                    y += current_y
-                current_subpath.append(('line', (x, y)))
-                current_x, current_y = x, y
-                remaining = remaining[i+1:]
-                matched = True
+        # -- (x,y) 直线（支持 $(calc)$ 等嵌套括号坐标）
+        if remaining.startswith('--') and not matched:
+            pos = 2  # 跳过 --
+            # 跳过空白
+            while pos < len(remaining) and remaining[pos] in ' \t':
+                pos += 1
+            # 提取 + 或 ++ 前缀
+            prefix = ''
+            while pos < len(remaining) and remaining[pos] == '+':
+                prefix += remaining[pos]
+                pos += 1
+            # 跳过空白
+            while pos < len(remaining) and remaining[pos] in ' \t':
+                pos += 1
+            # 用 _extract_parenthesized 提取完整坐标（支持嵌套括号）
+            extracted = _extract_parenthesized(remaining, pos)
+            if extracted:
+                coord_str, end_pos = extracted
+                full_coord = prefix + coord_str
+                result = _parse_coord(full_coord)
+                if result:
+                    x, y, ctype = result
+                    if ctype == 'relative':
+                        x += current_x
+                        y += current_y
+                    elif ctype == 'relative_plus':
+                        x += current_x
+                        y += current_y
+                    current_subpath.append(('line', (x, y)))
+                    current_x, current_y = x, y
+                    remaining = remaining[end_pos:]
+                    matched = True
 
-        # rectangle (x,y) 或 rectangle ++(x,y) 矩形
-        m = re.match(r'rectangle\s*(\+*)\s*\([^)]+\)', remaining)
-        if m and not matched:
-            coord_start = remaining.find('(')
-            depth = 0
-            i = coord_start
-            while i < len(remaining):
-                if remaining[i] == '(':
-                    depth += 1
-                elif remaining[i] == ')':
-                    depth -= 1
-                    if depth == 0:
-                        break
-                i += 1
-            coord_str = remaining[coord_start:i+1]
-            # 检查 ++ 或 + 前缀
-            rect_prefix = m.group(1) or ''
-            full_coord = rect_prefix + coord_str
-            result = _parse_coord(full_coord)
-            if result:
-                rx, ry, ctype = result
-                if ctype == 'relative':
-                    rx += current_x
-                    ry += current_y
-                elif ctype == 'relative_plus':
-                    rx += current_x
-                    ry += current_y
-                # 矩形四个角
-                x0, y0 = current_x, current_y
-                current_subpath.append(('line', (rx, y0)))
-                current_subpath.append(('line', (rx, ry)))
-                current_subpath.append(('line', (x0, ry)))
-                current_subpath.append(('close', None))
-                current_x, current_y = rx, ry
-                remaining = remaining[i+1:]
-                matched = True
+        # rectangle (x,y) 或 rectangle ++(x,y) 矩形（支持 $(calc)$ 等）
+        if remaining.startswith('rectangle') and not matched:
+            pos = len('rectangle')
+            # 跳过空白
+            while pos < len(remaining) and remaining[pos] in ' \t':
+                pos += 1
+            # 提取 + 或 ++ 前缀
+            prefix = ''
+            while pos < len(remaining) and remaining[pos] == '+':
+                prefix += remaining[pos]
+                pos += 1
+            # 跳过空白
+            while pos < len(remaining) and remaining[pos] in ' \t':
+                pos += 1
+            extracted = _extract_parenthesized(remaining, pos)
+            if extracted:
+                coord_str, end_pos = extracted
+                full_coord = prefix + coord_str
+                result = _parse_coord(full_coord)
+                if result:
+                    rx, ry, ctype = result
+                    if ctype == 'relative':
+                        rx += current_x
+                        ry += current_y
+                    elif ctype == 'relative_plus':
+                        rx += current_x
+                        ry += current_y
+                    # 矩形四个角
+                    x0, y0 = current_x, current_y
+                    current_subpath.append(('line', (rx, y0)))
+                    current_subpath.append(('line', (rx, ry)))
+                    current_subpath.append(('line', (x0, ry)))
+                    current_subpath.append(('close', None))
+                    current_x, current_y = rx, ry
+                    remaining = remaining[end_pos:]
+                    matched = True
 
         # circle (r) 或 circle[radius=r]
         m = re.match(r'circle\s*(\[|\()', remaining)
@@ -1004,45 +1122,82 @@ def _parse_path_body(body_str, options):
                     remaining = remaining[i+1:]
                     matched = True
 
-        # .. controls (c1) and (c2) .. (x,y) 贝塞尔曲线
-        m = re.match(r'\.\.\s*controls\s*\([^)]+\)\s*and\s*\([^)]+\)\s*\.\.\s*\([^)]+\)', remaining)
-        if m and not matched:
-            # 简化处理：提取所有坐标
-            coords = re.findall(r'\([^)]+\)', m.group(0))
-            if len(coords) == 4:
-                c1 = _parse_coord(coords[0])
-                c2 = _parse_coord(coords[1])
-                ep = _parse_coord(coords[2])
-                if c1 and c2 and ep:
-                    c1x, c1y, _ = c1
-                    c2x, c2y, _ = c2
-                    ex, ey, etype = ep
-                    if etype == 'relative':
-                        ex += current_x
-                        ey += current_y
-                    # 控制点如果是相对坐标也需要转换（这里简化为绝对）
-                    current_subpath.append(('curve', (c1x, c1y, c2x, c2y, ex, ey)))
-                    current_x, current_y = ex, ey
-                    remaining = remaining[m.end():]
-                    matched = True
+        # .. controls (c1) and (c2) .. (x,y) 贝塞尔曲线（支持 $(calc)$ 等）
+        if remaining.startswith('..') and not matched:
+            pos = 2  # 跳过 ..
+            # 跳过空白
+            while pos < len(remaining) and remaining[pos] in ' \t':
+                pos += 1
+            if remaining[pos:pos + 8] == 'controls':
+                pos += 8
+                # 跳过空白
+                while pos < len(remaining) and remaining[pos] in ' \t':
+                    pos += 1
+                # 提取第一个控制点
+                extracted1 = _extract_parenthesized(remaining, pos)
+                if extracted1:
+                    c1_str, pos = extracted1
+                    # 跳过空白
+                    while pos < len(remaining) and remaining[pos] in ' \t':
+                        pos += 1
+                    # 检查 'and'
+                    if remaining[pos:pos + 3] == 'and':
+                        pos += 3
+                        # 跳过空白
+                        while pos < len(remaining) and remaining[pos] in ' \t':
+                            pos += 1
+                        # 提取第二个控制点
+                        extracted2 = _extract_parenthesized(remaining, pos)
+                        if extracted2:
+                            c2_str, pos = extracted2
+                            # 跳过空白
+                            while pos < len(remaining) and remaining[pos] in ' \t':
+                                pos += 1
+                            # 检查 '..'
+                            if remaining[pos:pos + 2] == '..':
+                                pos += 2
+                                # 跳过空白
+                                while pos < len(remaining) and remaining[pos] in ' \t':
+                                    pos += 1
+                                # 提取终点
+                                extracted3 = _extract_parenthesized(remaining, pos)
+                                if extracted3:
+                                    ep_str, pos = extracted3
+                                    c1 = _parse_coord(c1_str)
+                                    c2 = _parse_coord(c2_str)
+                                    ep = _parse_coord(ep_str)
+                                    if c1 and c2 and ep:
+                                        c1x, c1y, _ = c1
+                                        c2x, c2y, _ = c2
+                                        ex, ey, etype = ep
+                                        if etype == 'relative':
+                                            ex += current_x
+                                            ey += current_y
+                                        current_subpath.append(('curve', (c1x, c1y, c2x, c2y, ex, ey)))
+                                        current_x, current_y = ex, ey
+                                        remaining = remaining[pos:]
+                                        matched = True
 
-        # 直接坐标 (x,y) 或 ++(x,y) — move 或 line
+        # 直接坐标 (x,y) 或 ++(x,y) — move 或 line（支持 $(calc)$ 等）
         if not matched:
-            m = re.match(r'(\+*)\s*\([^)]+\)', remaining)
-            if m:
-                coord_start = remaining.find('(')
-                depth = 0
-                i = coord_start
-                while i < len(remaining):
-                    if remaining[i] == '(':
-                        depth += 1
-                    elif remaining[i] == ')':
-                        depth -= 1
-                        if depth == 0:
-                            break
-                    i += 1
-                coord_str = remaining[:i+1]
-                result = _parse_coord(coord_str)
+            # 跳过空白
+            pos = 0
+            while pos < len(remaining) and remaining[pos] in ' \t':
+                pos += 1
+            # 提取 + 或 ++ 前缀
+            prefix = ''
+            while pos < len(remaining) and remaining[pos] == '+':
+                prefix += remaining[pos]
+                pos += 1
+            # 跳过空白
+            while pos < len(remaining) and remaining[pos] in ' \t':
+                pos += 1
+            # 提取完整坐标（支持嵌套括号）
+            extracted = _extract_parenthesized(remaining, pos)
+            if extracted:
+                coord_str, end_pos = extracted
+                full_coord = prefix + coord_str
+                result = _parse_coord(full_coord)
                 if result:
                     x, y, ctype = result
                     if ctype == 'relative':
@@ -1059,7 +1214,7 @@ def _parse_path_body(body_str, options):
                         # 后续点：line
                         current_subpath.append(('line', (x, y)))
                     current_x, current_y = x, y
-                    remaining = remaining[i+1:]
+                    remaining = remaining[end_pos:]
                     matched = True
 
         # node[options] {content} 内联节点

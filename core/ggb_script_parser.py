@@ -256,6 +256,19 @@ class GeoGebraScriptParser:
             args.append(current.strip())
         return args
 
+    def _resolve_arg(self, arg: str) -> Any:
+        """解析参数，支持变量名引用和嵌套函数调用
+
+        先尝试从变量表查找，若不存在则尝试作为表达式求值（支持嵌套函数调用）。
+        """
+        arg = arg.strip()
+        # 先尝试变量引用
+        val = self._vars.get(arg)
+        if val is not None:
+            return val
+        # 若变量不存在，尝试作为表达式求值（支持嵌套函数调用如 Line(A,B)）
+        return self._eval_expr(arg)
+
     def _resolve_point(self, arg: str) -> Optional[Tuple[float, float]]:
         """解析参数为坐标点"""
         arg = arg.strip()
@@ -411,7 +424,7 @@ class GeoGebraScriptParser:
         elif func_name == 'PerpendicularLine':
             # PerpendicularLine(seg, P) 或 PerpendicularLine(A, B, P)
             if len(args) == 2:
-                seg = self._vars.get(args[0].strip())
+                seg = self._resolve_arg(args[0])
                 pt = self._resolve_point(args[1])
                 if seg and pt:
                     p1 = seg.get('p1', seg.get('start'))
@@ -431,8 +444,8 @@ class GeoGebraScriptParser:
 
         elif func_name == 'Intersect':
             if len(args) == 2:
-                obj1 = self._vars.get(args[0].strip())
-                obj2 = self._vars.get(args[1].strip())
+                obj1 = self._resolve_arg(args[0])
+                obj2 = self._resolve_arg(args[1])
                 if obj1 and obj2:
                     pt = self._intersect_two(obj1, obj2)
                     if pt:
