@@ -1273,6 +1273,20 @@ def import_svg(filepath: str) -> CanvasData:
         if isinstance(color, str):
             # 处理 SVG 命名颜色（如 'red', 'blue' 等）
             if not color.startswith('#'):
+                # 处理 rgb() / rgba() 格式
+                import re
+                rgb_match = re.match(r'rgba?\s*\(\s*(\d+\.?\d*%?)\s*,\s*(\d+\.?\d*%?)\s*,\s*(\d+\.?\d*%?)\s*', color, re.IGNORECASE)
+                if rgb_match:
+                    def _parse_channel(val):
+                        val = val.strip()
+                        if val.endswith('%'):
+                            return int(float(val[:-1]) * 255 / 100)
+                        return int(val)
+                    r = _parse_channel(rgb_match.group(1))
+                    g = _parse_channel(rgb_match.group(2))
+                    b = _parse_channel(rgb_match.group(3))
+                    return (b, g, r)  # BGR
+                # 检查命名颜色
                 hex_color = _SVG_NAMED_COLORS.get(color.lower())
                 if hex_color is not None:
                     color = hex_color
